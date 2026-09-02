@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from pathlib import Path
@@ -25,7 +26,7 @@ from pydantic import BaseModel
 
 from devflow.cli import _config, _list_threads, _thread_exists, apply_assignments
 from devflow.doc_reader import read_doc
-from devflow.events import events_from_astream
+from devflow.events import events_from_astream, events_from_stream
 from devflow.orchestrator import build_graph_with_providers, initial_state
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -115,23 +116,47 @@ def _sse(payload: dict[str, Any]) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
 
 
+async def _sse_from_sync_stream(graph: Any, input_msg: dict[str, Any], tid: str):
+    """同步 stream（同步 SqliteSaver 不支持 astream）→ SSE 事件流。
+
+    to_thread 跑生成器，asyncio.Queue 桥接回事件循环，零新依赖。
+    """
+    q: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+    def run() -> None:
+        try:
+            for event in events_from_stream(
+                graph.stream(input_msg, _config(thread_id=tid), stream_mode="updates")
+            ):
+                q.put_nowait(event)
+        except Exception as e:
+            q.put_nowait({"type": "error", "error": str(e)})
+        finally:
+            q.put_nowait({"type": "stream_end", "stage": "paused"})
+
+    task = asyncio.create_task(asyncio.to_thread(run))
+    try:
+        while True:
+            event = await asyncio.wait_for(q.get(), timeout=600)
+            yield _sse(event)
+            if event.get("type") == "stream_end":
+                break
+    except asyncio.CancelledError:
+        raise  # 客户端断开：让 Starlette 取消，to_thread 任务继续无害运行
+    finally:
+        if not task.done():
+            await asyncio.shield(task)
+
+
 @app.post("/api/sessions/{tid}/messages")
 async def send_message(tid: str, body: SendMessage) -> StreamingResponse:
     if not _thread_exists(tid):
         raise HTTPException(404, f"会话不存在: {tid}")
     graph = build_graph_with_providers()
     input_msg = {"messages": [HumanMessage(content=body.text)]}
-
-    async def gen():
-        try:
-            async for event in events_from_astream(
-                graph.astream(input_msg, _config(thread_id=tid), stream_mode="updates")
-            ):
-                yield _sse(event)
-        finally:
-            yield _sse({"type": "stream_end", "stage": "paused"})
-
-    return StreamingResponse(gen(), media_type="text/event-stream")
+    return StreamingResponse(
+        _sse_from_sync_stream(graph, input_msg, tid), media_type="text/event-stream"
+    )
 
 
 @app.post("/api/sessions/{tid}/gates")
@@ -139,17 +164,10 @@ async def decide_gate(tid: str, body: GateDecision) -> StreamingResponse:
     if not _thread_exists(tid):
         raise HTTPException(404, f"会话不存在: {tid}")
     graph = build_graph_with_providers()
-
-    async def gen():
-        try:
-            async for event in events_from_astream(
-                graph.astream(Command(resume=body.decision), _config(thread_id=tid), stream_mode="updates")
-            ):
-                yield _sse(event)
-        finally:
-            yield _sse({"type": "stream_end", "stage": "paused"})
-
-    return StreamingResponse(gen(), media_type="text/event-stream")
+    input_msg = Command(resume=body.decision)
+    return StreamingResponse(
+        _sse_from_sync_stream(graph, input_msg, tid), media_type="text/event-stream"
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════

@@ -547,46 +547,37 @@ def _thread_exists(tid: str) -> bool:
 
 
 def _list_threads() -> list[dict[str, Any]]:
-    """读取 SQLite 中每个 thread_id 的最新 checkpoint blob，取其中关键字段。"""
+    """列出所有会话及关键字段。
+
+    langgraph 1.x checkpoint 列/序列化（msgpack）与旧 pickle 格式不同，
+    不再直接解 blob，改用 graph.get_state 逐会话读取（依赖官方 API，稳）。
+    """
     conn = _connect_checkpoint()
     if not conn:
         return []
     try:
-        # 列：checkpoint_id, thread_id, checkpoint_ns, parent_checkpoint_id, checkpoint, metadata
-        # 表名和列名参考 LangGraph SqliteSaver 实现
         try:
-            rows = conn.execute(
-                "SELECT thread_id, checkpoint, metadata FROM checkpoints ORDER BY checkpoint_id DESC"
-            ).fetchall()
+            threads = [r[0] for r in conn.execute("SELECT DISTINCT thread_id FROM checkpoints").fetchall()]
         except sqlite3.OperationalError as e:
             console.print(f"[yellow]![/] checkpoints 表结构不对: {e}")
             return []
-
-        seen: set[str] = set()
-        result: list[dict[str, Any]] = []
-        import pickle  # noqa: S403 —— 读自己写的 SQLite，可信范围
-        for thread_id, blob, metadata in rows:
-            if thread_id in seen:
-                continue
-            seen.add(thread_id)
-            entry: dict[str, Any] = {"thread_id": thread_id, "stage": "?", "project_root": "", "has_graph": False}
-            try:
-                state = pickle.loads(blob)  # noqa: S301
-                if isinstance(state, dict):
-                    # channel_values 还是直接 state？SqliteSaver 存的是 checkpoint tuple
-                    # 兜底：try 多个层级
-                    val = state.get("channel_values") or state.get("values") or state
-                    if isinstance(val, dict):
-                        entry["stage"] = val.get("current_stage", "?")
-                        req = val.get("requirement") or {}
-                        entry["project_root"] = req.get("project_root", "") or ""
-                        entry["has_graph"] = bool(val.get("logic_graph"))
-            except Exception:
-                pass
-            result.append(entry)
-        return result
     finally:
         conn.close()
+
+    graph = build_graph_with_providers()
+    result: list[dict[str, Any]] = []
+    for tid in threads:
+        entry = {"thread_id": tid, "stage": "?", "project_root": "", "has_graph": False}
+        try:
+            vals = graph.get_state(_config(thread_id=tid)).values or {}
+            req = vals.get("requirement") or {}
+            entry["stage"] = vals.get("current_stage", "?")
+            entry["project_root"] = req.get("project_root", "") or ""
+            entry["has_graph"] = bool(vals.get("logic_graph"))
+        except Exception:
+            pass
+        result.append(entry)
+    return result
 
 
 if __name__ == "__main__":

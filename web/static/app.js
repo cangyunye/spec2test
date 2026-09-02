@@ -174,6 +174,8 @@ function buildSetFields() {
     `target_modules=${$("fModules").value}`,
     `edge_cases=${$("fEdges").value}`,
     `acceptance_criteria=${$("fAccept").value}`,
+    `project_context=${$("fCtx").value}`,
+    `io_constraints=${$("fIo").value}`,
   ];
 }
 

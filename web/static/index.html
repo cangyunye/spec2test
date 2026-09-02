@@ -26,6 +26,8 @@
         <label>target_modules (JSON)<input id="fModules" value='["calculator/calc.py"]'></label>
         <label>edge_cases (JSON)<input id="fEdges" value='["除零","连续运算","负数","小数"]'></label>
         <label>acceptance (JSON)<input id="fAccept" value='["四则运算结果正确","除零给出错误提示","GUI 可启动"]'></label>
+        <label>project_context <input id="fCtx" value="桌面 GUI 计算器应用（tkinter）"></label>
+        <label>io_constraints (JSON)<input id="fIo" value='{"input":"按钮点击与表达式","output":"结果或错误提示"}'></label>
       </details>
       <button id="btnNew" class="primary">开始全链路</button>
     </section>

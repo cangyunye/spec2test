@@ -11,10 +11,28 @@ run.passed = 场景数（未执行真实测试，logs 注明需接执行器）�
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Literal
+
+from pydantic import BaseModel, Field
 
 from ..llm_client import invoke_json
 from .base import TestGenProvider, TestReport
+
+
+class _Scenario(BaseModel):
+    tier: Literal["functional", "performance", "security"] = Field(description="用例层级")
+    priority: Literal["P0", "P1", "P2"] = Field(description="优先级")
+    title: str = Field(description="用例标题")
+    target: str | None = Field(default=None, description="针对的节点/模块")
+    precondition: str | None = Field(default=None, description="前置条件")
+    steps: str = Field(description="操作步骤")
+    expected: str = Field(description="预期结果")
+    rationale: str | None = Field(default=None, description="设计依据")
+
+
+class _TestDesign(BaseModel):
+    scenarios: list[_Scenario] = Field(description="测试场景组")
+    summary: str = Field(description="设计摘要")
 
 SYSTEM_PROMPT_TEST_DESIGN = """你是有经验的测试架构师。根据【需求】【逻辑图】【目标模块】设计测试场景组。
 
@@ -58,34 +76,6 @@ def _build_user_prompt(project_root: str, target_symbols: list[str], logic_graph
         "请按优先级策略输出测试场景组。"
     )
 
-
-_SCHEMA = {
-    "type": "object",
-    "required": ["scenarios", "summary"],
-    "properties": {
-        "scenarios": {
-            "type": "array",
-            "minItems": 4,
-            "items": {
-                "type": "object",
-                "required": ["tier", "priority", "title", "steps", "expected"],
-                "properties": {
-                    "tier": {"type": "string", "enum": ["functional", "performance", "security"]},
-                    "priority": {"type": "string", "enum": ["P0", "P1", "P2"]},
-                    "title": {"type": "string"},
-                    "target": {"type": "string"},
-                    "precondition": {"type": "string"},
-                    "steps": {"type": "string"},
-                    "expected": {"type": "string"},
-                    "rationale": {"type": "string"},
-                },
-            },
-        },
-        "summary": {"type": "string"},
-    },
-}
-
-
 class LlmTestGenProvider(TestGenProvider):
     name = "llm_test_gen"
 
@@ -103,10 +93,20 @@ class LlmTestGenProvider(TestGenProvider):
         result = await invoke_json(
             system_prompt=SYSTEM_PROMPT_TEST_DESIGN,
             user_prompt=_build_user_prompt(project_root, target_symbols, graph),
-            json_schema=_SCHEMA,
+            response_model=_TestDesign,
             response_type="test_design",
         )
-        scenarios = result.get("scenarios") or []
+        # invoke_json 可能返回纯 dict（mock）或 pydantic 模型，统一取 scenarios
+        if hasattr(result, "model_dump"):
+            result = result.model_dump()
+        scenarios = result.get("scenarios")
+        if not isinstance(scenarios, list):
+            # mock 兜底键名兼容（如 test_scenarios）
+            for v in result.values():
+                if isinstance(v, list) and v and isinstance(v[0], dict):
+                    scenarios = v
+                    break
+        scenarios = scenarios or []
         cases = [
             {
                 "test_file": f"tests/test_{target_symbols[0].replace('.', '_')}.py" if target_symbols else "tests/test_scenarios.py",
