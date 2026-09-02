@@ -153,7 +153,25 @@ async def send_message(tid: str, body: SendMessage) -> StreamingResponse:
     if not _thread_exists(tid):
         raise HTTPException(404, f"会话不存在: {tid}")
     graph = build_graph_with_providers()
-    input_msg = {"messages": [HumanMessage(content=body.text)]}
+    return StreamingResponse(
+        _sse_from_sync_stream(graph, {"messages": [HumanMessage(content=body.text)]}, tid),
+        media_type="text/event-stream",
+    )
+
+
+@app.get("/api/sessions/{tid}/stream")
+async def stream_sse(tid: str, op: str, text: str = "", decision: str = "") -> StreamingResponse:
+    """浏览器 EventSource 用：GET + query 参数。
+
+    op=message&text=<用户消息> ；op=gate&decision=approve|reject 。
+    """
+    if not _thread_exists(tid):
+        raise HTTPException(404, f"会话不存在: {tid}")
+    graph = build_graph_with_providers()
+    if op == "gate":
+        input_msg: Any = Command(resume=decision)
+    else:
+        input_msg = {"messages": [HumanMessage(content=text)]}
     return StreamingResponse(
         _sse_from_sync_stream(graph, input_msg, tid), media_type="text/event-stream"
     )

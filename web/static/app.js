@@ -128,33 +128,27 @@ function renderTestTable(report) {
 }
 
 // ── API ───────────────────────────────────────────────
-async function postSSE(url, body) {
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!resp.ok) {
-    const t = await resp.text();
-    throw new Error(`${resp.status}: ${t}`);
-  }
-  const reader = resp.body.getReader();
-  const dec = new TextDecoder();
-  let buf = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    let idx;
-    while ((idx = buf.indexOf("\n\n")) >= 0) {
-      const chunk = buf.slice(0, idx);
-      buf = buf.slice(idx + 2);
-      for (const line of chunk.split("\n")) {
-        if (!line.startsWith("data: ")) continue;
-        try { onEvent(JSON.parse(line.slice(6))); } catch (err) { /* 忽略坏帧 */ }
-      }
-    }
-  }
+// 浏览器 SSE：EventSource（GET + query）。服务端流尾发 stream_end → 手动 close。
+let activeES = null;
+
+function startEventSource(url) {
+  stopEventSource();
+  const es = new EventSource(url);
+  activeES = es;
+  es.onmessage = (ev) => {
+    let e;
+    try { e = JSON.parse(ev.data); } catch (err) { return; }
+    if (e.type === "stream_end") { stopEventSource(); return; }
+    onEvent(e);
+  };
+  es.onerror = () => {
+    // EventSource 在服务端正常关闭时会触发 onerror 并尝试重连；stream_end 已处理，这里兜底关闭
+    stopEventSource();
+  };
+}
+
+function stopEventSource() {
+  if (activeES) { activeES.close(); activeES = null; }
 }
 
 async function api(url, body) {
@@ -192,11 +186,12 @@ async function startFlow() {
   $("artifactBox").classList.add("hidden");
   $("testBox").classList.add("hidden");
   closeGate();
+  stopEventSource();
   try {
     const { thread_id } = await api("/api/sessions", { set_fields: buildSetFields() });
     state.tid = thread_id;
     evHTML("me", `<b>需求</b>：${nl2br(text)}`);
-    await postSSE(`/api/sessions/${thread_id}/messages`, { text });
+    startEventSource(`/api/sessions/${thread_id}/stream?op=message&text=${encodeURIComponent(text)}`);
     refreshSessions();
   } catch (err) {
     evHTML("err", "失败: " + esc(err.message));
@@ -210,7 +205,7 @@ async function sendAnswer() {
   if (!t || !state.tid) return;
   evHTML("me", `<b>补充</b>：${nl2br(t)}`);
   $("reqText").value = "";
-  await postSSE(`/api/sessions/${state.tid}/messages`, { text: t });
+  startEventSource(`/api/sessions/${state.tid}/stream?op=message&text=${encodeURIComponent(t)}`);
 }
 
 async function refreshSessions() {
@@ -239,14 +234,16 @@ $("btnSample").onclick = () => {
   $("reqText").value = "开发一个带图形界面的 Python 计算器（GUI，使用 tkinter），支持四则运算、连续运算、除零报错、负数与小数的输入，输入非法字符时给出错误提示。";
 };
 $("btnNew").onclick = startFlow;
-$("btnApprove").onclick = async () => {
+$("btnApprove").onclick = () => {
   if (!state.tid || !state.gate) return;
-  await postSSE(`/api/sessions/${state.tid}/gates`, { decision: "approve" });
+  closeGate();  // 决策已提交，立即收起模态；产物在流中逐步渲染
+  startEventSource(`/api/sessions/${state.tid}/stream?op=gate&decision=approve`);
   refreshSessions();
 };
-$("btnReject").onclick = async () => {
+$("btnReject").onclick = () => {
   if (!state.tid || !state.gate) return;
-  await postSSE(`/api/sessions/${state.tid}/gates`, { decision: "reject" });
+  closeGate();
+  startEventSource(`/api/sessions/${state.tid}/stream?op=gate&decision=reject`);
   refreshSessions();
 };
 $("reqText").addEventListener("keydown", (e) => {
