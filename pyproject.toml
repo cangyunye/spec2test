@@ -1,0 +1,38 @@
+[project]
+name = "ai-devflow"
+version = "0.1.0"
+description = "AI-powered end-to-end development workflow orchestrator (LangGraph + LangChain + OpenCode)"
+requires-python = ">=3.11"
+dependencies = [
+    "langgraph>=0.2.0",
+    "langchain>=0.2.0",
+    "langchain-openai>=0.1.0",
+    "langgraph-checkpoint-sqlite>=3.0.0",
+    "pydantic>=2.6.0",
+    "jsonschema>=4.21.0",
+    "httpx>=0.27.0",
+    "python-dotenv>=1.0.0",
+    "rich>=13.7.0",
+    "typer>=0.12.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]
+
+[project.scripts]
+devflow = "devflow.cli:app"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["devflow*"]
+
+[tool.pytest.ini_options]
+markers = [
+    "live: 需要真实 LLM API Key（LLM_LIVE_TESTS=1 才执行）",
+]

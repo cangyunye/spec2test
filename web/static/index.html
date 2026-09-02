@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DevFlow Web Shell</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+</head>
+<body>
+<header>
+  <h1>DevFlow · 需求到测试全链路</h1>
+  <span class="sub">澄清 → 文档确认 → 制图 → 制图评审 → 检索 → 生成 → 测试设计 → 人工验收</span>
+</header>
+
+<main class="layout">
+  <!-- 左侧：会话 -->
+  <aside class="sidebar">
+    <section class="card">
+      <h2>新建会话</h2>
+      <textarea id="reqText" rows="6" placeholder="输入需求文本（或点下方示例填充）"></textarea>
+      <button id="btnSample">填充计算器示例需求</button>
+      <details>
+        <summary>高级字段（可选）</summary>
+        <label>project_root <input id="fRoot" value="/workspace"></label>
+        <label>target_modules (JSON)<input id="fModules" value='["calculator/calc.py"]'></label>
+        <label>edge_cases (JSON)<input id="fEdges" value='["除零","连续运算","负数","小数"]'></label>
+        <label>acceptance (JSON)<input id="fAccept" value='["四则运算结果正确","除零给出错误提示","GUI 可启动"]'></label>
+      </details>
+      <button id="btnNew" class="primary">开始全链路</button>
+    </section>
+
+    <section class="card">
+      <h2>历史会话</h2>
+      <ul id="sessions"></ul>
+    </section>
+  </aside>
+
+  <!-- 右侧：流程 -->
+  <section class="main">
+    <div id="timeline" class="timeline">
+      <span data-s="clarify">需求识别</span><span data-s="doc_review">文档确认</span><span data-s="graph">制图</span><span data-s="graph_review">制图评审</span><span data-s="search">检索</span><span data-s="code">生成</span><span data-s="test">测试设计</span><span data-s="review">人工验收</span>
+    </div>
+
+    <div id="chat" class="card">
+      <h2>对话 / 过程</h2>
+      <div id="events"></div>
+    </div>
+
+    <div id="graphBox" class="card hidden">
+      <h2>逻辑图</h2>
+      <div class="mermaid" id="mermaid"></div>
+    </div>
+
+    <div id="artifactBox" class="card hidden">
+      <h2>产物</h2>
+      <div id="artifacts"></div>
+    </div>
+
+    <div id="testBox" class="card hidden">
+      <h2>测试场景（功能 &gt; 性能 &gt; 安全 分级）</h2>
+      <table id="testTable"><thead><tr>
+        <th>层级</th><th>优先级</th><th>标题</th><th>目标</th><th>前置</th><th>步骤</th><th>预期</th><th>依据</th>
+      </tr></thead><tbody></tbody></table>
+    </div>
+  </section>
+</main>
+
+<!-- 门禁模态 -->
+<div id="gateModal" class="modal hidden">
+  <div class="modal-box">
+    <h2 id="gateTitle">确认</h2>
+    <pre id="gateSummary"></pre>
+    <div class="row">
+      <button id="btnApprove" class="primary">approve</button>
+      <button id="btnReject" class="danger">reject</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
