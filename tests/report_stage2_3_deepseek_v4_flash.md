@@ -30,7 +30,7 @@
 **LLM Provider 配置**（本次使用的测试 key）：
 
 ```bash
-LLM_API_KEY=sk-6c2028747e6f4167ab2eddddbe437120   # 测试 key
+LLM_API_KEY=sk-6c2028747e6f4167ab2eddddbe437120   # 测试 key（非真实可用 key，已在 DeepSeek 后台吊销，仅作历史记录保留）
 LLM_BASE_URL=https://api.deepseek.com/v1
 LLM_MODEL=deepseek-v4-flash                       # 官方 V4 模型（默认 thinking 模式）
 LLM_FALLBACKS=mock
