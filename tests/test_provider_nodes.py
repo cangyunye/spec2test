@@ -173,10 +173,9 @@ async def test_test_gen_node_writes_report():
     assert out["test_report"] is not None
     assert "test_cases" in out["test_report"]
     assert "run" in out["test_report"]
-    # code_changes 被回填 test_passed
-    assert out["code_changes"][0]["test_passed"] is not None
-    # mock 生成 2 个 case，1 passed 1 failed → test_fail
-    assert out["current_stage"] == "code"
+    # test_gen 只产出设计报告；真实 test_passed 由下游 test_run 节点回填
+    assert "code_changes" not in out
+    assert out["current_stage"] == "test"
 
 
 @pytest.mark.asyncio
@@ -209,12 +208,10 @@ def test_route_after_code_gen():
 
 
 def test_route_after_test_gen():
-    s_ok = {"test_report": {"run": {"passed": 3, "failed": 0}}}
-    assert route_after_test_gen(s_ok) == "test_ok"
-    s_fail = {"test_report": {"run": {"passed": 0, "failed": 1}}}
-    assert route_after_test_gen(s_fail) == "test_fail"
-    # 空 report → test_fail（保守路由）
-    assert route_after_test_gen({}) == "test_fail"
+    # test_gen 一律交给下游 test_run 做真实执行判定
+    assert route_after_test_gen({"test_report": {"run": {"passed": 3, "failed": 0}}}) == "run"
+    assert route_after_test_gen({"test_report": {"run": {"passed": 0, "failed": 1}}}) == "run"
+    assert route_after_test_gen({}) == "run"
 
 
 # ═══════════════════════════════════════════════════════════════════

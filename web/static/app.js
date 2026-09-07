@@ -819,6 +819,14 @@ function gateReviewBody(p) {
   stats.appendChild(stat("测试失败", ts.failed ?? "—", Number(ts.failed) > 0));
   stats.appendChild(stat("覆盖率", ts.coverage_pct !== undefined ? ts.coverage_pct + "%" : "—"));
   stats.appendChild(stat("测试场景", ts.case_count ?? "—"));
+  // 执行闭环：测试数字是否来自真实 pytest
+  stats.appendChild(
+    stat(
+      "测试执行",
+      ts.executed ? `pytest ✓ ${ts.duration_sec ?? 0}s` : `未执行${ts.skip_reason ? " · " + ts.skip_reason : ""}`,
+      ts.executed ? Number(ts.failed) > 0 || Number(ts.failure_count) > 0 : true,
+    ),
+  );
   wrap.appendChild(stats);
 
   const changes = p.code_changes || [];

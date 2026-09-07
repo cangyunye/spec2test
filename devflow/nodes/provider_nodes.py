@@ -275,10 +275,14 @@ def make_code_gen_node(providers: Providers | None = None):
         related_files = _build_related_files(code_ctx)
 
         # 取第一个修改节点的 label 作为 instruction 的锚点；
-        # 门禁 reject 的意见（review_feedback）拼进 instruction 针对性修正
+        # 门禁 reject 的意见（review_feedback）与上轮测试失败摘要（test_failure）拼进
+        # instruction 针对性修正
         first_node = modified_nodes[0]
         instruction = _build_code_instruction(
-            req, first_node, feedback=state.get("review_feedback")
+            req,
+            first_node,
+            feedback=state.get("review_feedback"),
+            test_failure=state.get("test_failure"),
         )
 
         try:
@@ -317,6 +321,7 @@ def make_code_gen_node(providers: Providers | None = None):
             )
 
         # 把 Provider 返回的 changes 映射到 GlobalState.code_changes 格式
+        # content_after 一并携带（apply_code 节点仅对新建文件使用整文件直写）
         code_changes: list[dict[str, Any]] = []
         for ch in result["changes"]:
             code_changes.append(
@@ -324,8 +329,9 @@ def make_code_gen_node(providers: Providers | None = None):
                     "file_path": ch["file_path"],
                     "action": ch.get("action", "update"),
                     "diff": ch.get("diff_unified", ""),
+                    "content_after": ch.get("content_after"),
                     "lint_passed": result["lint_passed"],
-                    "test_passed": None,  # 测试节点回填
+                    "test_passed": None,  # test_run 节点回填
                 }
             )
 
@@ -349,6 +355,7 @@ def make_code_gen_node(providers: Providers | None = None):
         base = {
             "code_changes": code_changes,
             "opencode_sessions": {**sessions, "code_gen": result["session_id"]},
+            "test_failure": None,  # 已消费（拼进 instruction），避免残留到下一轮
         }
         if lint_err is not None:
             base.update(lint_err)
@@ -431,49 +438,15 @@ def make_test_gen_node(providers: Providers | None = None):
                 },
             )
 
-        # 回填 code_changes 的 test_passed
-        test_passed = report["run"]["failed"] == 0 and report["run"]["passed"] > 0
-        updated_changes = []
-        for ch in code_changes:
-            updated = dict(ch)
-            updated["test_passed"] = test_passed
-            updated_changes.append(updated)
-
-        if not test_passed:
-            from ..errors import CliExitError
-
-            # 测试未通过：当作 CLI_EXIT_ERROR 语义（SPEC 5.2），按错误写 state
-            err = CliExitError(
-                "测试未通过",
-                extra={
-                    "passed": report["run"].get("passed", 0),
-                    "failed": report["run"].get("failed", -1),
-                },
-            )
-            out = _apply_error_out(
-                "test_gen",
-                state,
-                err,
-                stage_when_fail="code",
-                extra_snapshot={"target_symbols": list(target_symbols)},
-            )
-            out.update(
-                {
-                    "test_report": dict(report),
-                    "code_changes": updated_changes,
-                    "opencode_sessions": {**sessions, "test_gen": report["session_id"]},
-                }
-            )
-            return out
-
+        # 测试「执行」由下游 test_run 节点承担真实判定；本节点只产出设计报告。
+        # code_changes.test_passed 保持 None，等 test_run 回填。
         return {
             "test_report": dict(report),
-            "code_changes": updated_changes,
             "opencode_sessions": {**sessions, "test_gen": report["session_id"]},
             "last_error": None,
             "last_error_code": None,
             "last_error_retryable": None,
-            "current_stage": "review",
+            "current_stage": "test",
         }
 
     def test_gen_node(state: GlobalState) -> dict[str, Any]:
@@ -528,19 +501,9 @@ def route_after_code_gen(state: GlobalState) -> str:
 
 
 def route_after_test_gen(state: GlobalState) -> str:
-    """测试路由：
-      - DevFlowError 可重试 → retry；否则 abort；
-      - 否则按测试结果判断 test_ok / test_fail。
-    """
-    if state.get("last_error_code"):
-        if state.get("last_error_retryable") is True:
-            return "retry"
-        return "abort"
-    report = state.get("test_report") or {}
-    run = report.get("run") or {}
-    if run.get("failed", 0) == 0 and run.get("passed", 0) > 0:
-        return "test_ok"
-    return "test_fail"
+    """测试设计完成后的业务路由：一律 "run" → 交给 test_run 节点做真实执行判定。
+    （错误分流由 orchestrator 的 _route_after_test_gen 包装处理。）"""
+    return "run"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -564,9 +527,13 @@ def _build_search_query(req: dict[str, Any]) -> str:
 
 
 def _build_code_instruction(
-    req: dict[str, Any], node: dict[str, Any], *, feedback: str | None = None
+    req: dict[str, Any],
+    node: dict[str, Any],
+    *,
+    feedback: str | None = None,
+    test_failure: str | None = None,
 ) -> str:
-    """把需求 + 逻辑图节点（+ 评审意见）拼成给 Provider 的 instruction。"""
+    """把需求 + 逻辑图节点（+ 评审意见 / 上轮测试失败摘要）拼成给 Provider 的 instruction。"""
     label = node.get("label", "未知节点")
     io = req.get("io_constraints") or {}
     lines = [
@@ -578,6 +545,8 @@ def _build_code_instruction(
         lines.append(f"验收标准：{ac}")
     for ec in req.get("edge_cases", []) or []:
         lines.append(f"边界场景：{ec}")
+    if test_failure and test_failure.strip():
+        lines.append(f"上轮测试执行未通过（必须针对性修复）：\n{test_failure.strip()}")
     if feedback and feedback.strip():
         lines.append(f"上轮验收意见（必须针对性修正）：{feedback.strip()}")
     return "\n".join(lines)

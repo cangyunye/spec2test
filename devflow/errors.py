@@ -40,6 +40,7 @@ NODE_CONTEXT = "NODE.CONTEXT"
 CIRCUIT_OPEN = "CIRCUIT.OPEN"
 DEADLINE_EXCEEDED = "DEADLINE.EXCEEDED"
 CLARIFY_LOOP_EXHAUSTED = "CLARIFY.LOOP_EXHAUSTED"
+EXEC_APPLY_FAILED = "EXEC.APPLY_FAILED"     # diff 落盘失败（上下文不匹配/路径非法），可回 code_gen 重新生成
 
 
 # SPEC 5.1 默认可重试集合
@@ -55,6 +56,7 @@ DEFAULT_RETRYABLE_CODES: frozenset[str] = frozenset([
     CLI_TIMEOUT,
     CLI_INDEX_MISSING,
     CLI_EXIT_ERROR,             # CodeGraph JSON 偶尔 bad output，算可重试（限次）
+    EXEC_APPLY_FAILED,          # diff 应用失败 → 回 code_gen 重新生成（限次）
 ])
 
 DEFAULT_FALLBACK_CODES: frozenset[str] = frozenset([
@@ -211,7 +213,18 @@ class CliExitError(DevFlowError):
         super().__init__(CLI_EXIT_ERROR, message, retryable=True, extra=extra, **kw)
 
 
+class ExecApplyFailedError(DevFlowError):
+    """diff 落盘失败（上下文不匹配 / 路径非法 / 写入失败）。可重试：回 code_gen 重新生成 diff。"""
+
+    def __init__(self, message: str, *, files: list[dict[str, Any]] | None = None, **kw: Any) -> None:
+        extra = dict(kw.pop("extra", None) or {})
+        if files:
+            extra["files"] = files
+        super().__init__(EXEC_APPLY_FAILED, message, retryable=True, extra=extra, **kw)
+
+
 class NodeContextError(DevFlowError):
+    """节点内部状态/断言失败（程序 bug），不可重试。"""
     def __init__(self, message: str, **kw: Any) -> None:
         super().__init__(NODE_CONTEXT, message, retryable=False, **kw)
 

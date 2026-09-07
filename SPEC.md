@@ -859,4 +859,48 @@ pip install python-docx>=1.1.0
 
 ---
 
+## 八、实施补记（2026-09）：执行闭环与真实后端定位
+
+### 8.1 执行闭环（已落地）
+
+阶段三原缺口：code_gen 只产出 diff 不落盘，test_gen 只产出场景设计（`run.passed` 是场景数）。
+现已补全为真实闭环：
+
+```
+code_gen ──lint_ok──▶ apply_code ──▶ test_gen ──▶ test_run ──test_ok──▶ 人工验收
+   ▲                    │                          │
+   │   diff 坏了（≤1 次）│            failed>0（≤TEST_RUN_MAX_FIX_ROUNDS）
+   └────────────────────┴──────────────────────────┘
+```
+
+- **apply_code**（`devflow/code_apply.py` + `devflow/nodes/test_run.py`）：unified diff 解析
+  （容行号漂移 / a-b 前缀 / new/delete / `\ No newline`）→ all-or-nothing 预检 → 备份到目标项目
+  `.devflow_backup/<时间戳>/`（含 manifest.json）→ 落盘；失败自动回滚。`content_after` 整文件
+  直写仅允许用于新建文件（防 mock 内容覆盖真实源码）。落盘失败不 abort：回炉一次后降级为
+  「仅设计」模式继续，由人工验收兜底。
+- **test_run**（`devflow/test_runner.py`）：目标项目内子进程跑 `pytest --junitxml`，解析回填
+  真实 `run`（passed/failed/errors/skipped/时长/失败明细/日志尾部）。失败摘要（`test_failure`）
+  回传 code_gen 的 instruction 针对性修复；连续失败超限后带失败报告进人工验收（循环有界收敛）。
+  未收集到用例 ≠ 通过；执行被跳过（开关关闭 / 项目不可用 / 超时）时报告带 skip_reason，不误判。
+- **开关**（.env）：`APPLY_CODE_ENABLED` / `TEST_RUN_ENABLED` / `TEST_RUN_TIMEOUT_SEC` /
+  `TEST_RUN_MAX_FIX_ROUNDS` / `TEST_RUN_PATHS`。
+- 顺带修复：`dead_letters` 此前未在 GlobalState 声明，LangGraph 静默丢弃该键，死信从未真正
+  进入 drain 节点；现已声明，死信 JSONL 落盘恢复生效。
+
+### 8.2 真实后端定位（OpenCode / CodeGraph / Archify = 可选增强）
+
+三个外部后端的 Provider 适配层（含熔断、错误码映射、Mock 回退）均已实现，但默认主路径不依赖它们：
+
+| 能力 | 默认主路径 | 可选增强后端 |
+|---|---|---|
+| 代码检索 | LLM 直连（graph_gen 生成目标锚点）+ 语义兜底 | `CODE_SEARCH_PROVIDER=codegraph`（需本地安装并 `codegraph init`） |
+| 制图渲染 | Mermaid 文本（Web 端渲染） | `CODE_GRAPH_RENDER_PROVIDER=archify`（需 node ≥ 18） |
+| 代码生成 | LLM 直连产出 diff + lint 回修 | `CODE_EDIT_PROVIDER=opencode`（需本地 OpenCode Server） |
+| 测试生成/执行 | llm_testgen 场景设计 + 本地 pytest 真实执行 | `TEST_GEN_PROVIDER=opencode`（远程执行） |
+
+对接真实后端前先跑 `devflow check-providers` 自检；每次真实后端验证结论以 `tests/` 下报告文档为准。
+未配置任何后端时全流程可用（Mock 降级 + LLM 直连），这是演示与 CI 的基线。
+
+---
+
 > **评审说明**：以上方案已通过用户评审，进入编码阶段。

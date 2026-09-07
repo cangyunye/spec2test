@@ -77,6 +77,11 @@ def review_node(state: GlobalState) -> dict[str, Any]:
             "failed": run.get("failed", 0),
             "coverage_pct": run.get("coverage_pct", 0),
             "case_count": len(cases),
+            # 执行闭环：数字是否来自真实 pytest（false = 仅场景设计或执行被跳过）
+            "executed": bool(run.get("executed")),
+            "skip_reason": run.get("skip_reason"),
+            "duration_sec": run.get("duration_sec", 0),
+            "failure_count": int(run.get("failed", 0)) + int(run.get("errors", 0)),
         },
     }
 
@@ -87,6 +92,7 @@ def review_node(state: GlobalState) -> dict[str, Any]:
         return {
             "current_stage": "done",
             "review_feedback": None,
+            "test_failure": None,
             "last_error": None,
             "last_error_code": None,
         }

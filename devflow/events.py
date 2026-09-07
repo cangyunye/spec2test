@@ -29,7 +29,9 @@ NODE_LABELS: dict[str, str] = {
     "code_search": "代码检索",
     "graph_render": "图表渲染",
     "code_gen": "代码生成",
+    "apply_code": "代码落盘",
     "test_gen": "测试设计",
+    "test_run": "测试执行",
     "review": "人工验收",
     "dead_letter_drain": "错误归档",
 }

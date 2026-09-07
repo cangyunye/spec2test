@@ -419,26 +419,26 @@ class TestRouteAfterCodeGen:
 
 
 class TestRouteAfterTestGen:
-    """4 条分支：无错+测试通过→test_ok / 无错+测试失败→test_fail / 有错+可重试→retry / 有错+不可重试/超限→abort。"""
+    """无错 → run（交给 test_run 执行判定）/ 有错+可重试 → retry / 有错+不可重试或超限 → abort。"""
 
-    def test_no_error_test_ok(self):
+    def test_no_error_runs_test_run_node(self):
         s = _state(
             error_code=None,
             test_report={"run": {"passed": 5, "failed": 0}},
         )
-        assert _route_after_test_gen(s) == "test_ok"
+        assert _route_after_test_gen(s) == "run"
 
-    def test_no_error_test_fail(self):
+    def test_no_error_fail_report_still_runs(self):
+        """设计报告里的数字不再决定路由，真实执行在 test_run。"""
         s = _state(
             error_code=None,
             test_report={"run": {"passed": 3, "failed": 2}},
         )
-        assert _route_after_test_gen(s) == "test_fail"
+        assert _route_after_test_gen(s) == "run"
 
-    def test_no_error_no_report_test_fail(self):
-        """没有 test_report → 默认 test_fail。"""
+    def test_no_error_no_report_still_runs(self):
         s = _state(error_code=None, test_report=None)
-        assert _route_after_test_gen(s) == "test_fail"
+        assert _route_after_test_gen(s) == "run"
 
     def test_error_retryable_retry(self):
         s = _state(

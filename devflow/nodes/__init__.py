@@ -12,6 +12,12 @@ from .provider_nodes import (
     route_after_test_gen,
 )
 from .review import review_node, route_after_review
+from .test_run import (
+    make_apply_code_node,
+    make_test_run_node,
+    route_after_code_apply,
+    route_after_test_run,
+)
 
 __all__ = [
     "clarify_extract",
@@ -26,9 +32,13 @@ __all__ = [
     "make_code_gen_node",
     "make_graph_render_node",
     "make_test_gen_node",
+    "make_apply_code_node",
+    "make_test_run_node",
     "review_node",
     "route_after_review",
     "route_after_code_search",
     "route_after_code_gen",
     "route_after_test_gen",
+    "route_after_code_apply",
+    "route_after_test_run",
 ]

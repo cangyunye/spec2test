@@ -65,16 +65,20 @@ from .nodes import (
     compress_messages,
     graph_generate,
     graph_review_node,
+    make_apply_code_node,
     make_code_gen_node,
     make_code_search_node,
     make_graph_render_node,
     make_test_gen_node,
+    make_test_run_node,
     review_node,
+    route_after_code_apply,
     route_after_code_gen,
     route_after_code_search,
     route_after_graph_review,
     route_after_review,
     route_after_test_gen,
+    route_after_test_run,
 )
 from .providers import Providers, get_providers
 from .resilience import dead_letter_record
@@ -280,8 +284,8 @@ def _route_after_code_gen(state: GlobalState) -> str:
 
 
 def _route_after_test_gen(state: GlobalState) -> str:
-    """业务路由（test_ok / test_fail / retry）+ 错误分流（abort）。"""
-    business = route_after_test_gen(state)
+    """测试设计后路由：业务上无条件 → test_run 执行；仅剩错误分流（retry / abort）。"""
+    business = route_after_test_gen(state)  # 恒为 "run"
     err = state.get("last_error_code")
     if not err:
         return business
@@ -290,6 +294,35 @@ def _route_after_test_gen(state: GlobalState) -> str:
     if retryable and count <= _GRAPH_RETRY_CAP_PER_NODE:
         return "retry"
     return "abort"
+
+
+def _route_after_code_apply(state: GlobalState) -> str:
+    """落盘后路由：可重试错（diff 应用不了）且回修未超限 → 回 code_gen 重新生成；
+    其余（成功 / 降级 / 关闭）→ 继续测试设计。"""
+    err = state.get("last_error_code")
+    if not err:
+        return "continue"
+    business = route_after_code_apply(state)
+    if business == "retry":
+        count = (state.get("retry_count") or {}).get("apply_code", 0)
+        if count <= 1:  # diff 坏了回炉一次就够，反复回炉没意义
+            return "retry"
+    return "continue"
+
+
+def _route_after_test_run(state: GlobalState) -> str:
+    """执行后路由（业务+错误分流）：
+      test_ok / skip / review_failed → review；test_fail → code_gen 回修；
+      基础设施可重试错 → test_run 本身；不可重试 → abort。
+    """
+    err = state.get("last_error_code")
+    if err:
+        retryable = bool(state.get("last_error_retryable"))
+        count = (state.get("retry_count") or {}).get("test_run", 0)
+        if retryable and count <= _GRAPH_RETRY_CAP_PER_NODE:
+            return "retry"
+        return "abort"
+    return route_after_test_run(state)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -376,15 +409,18 @@ def build_graph():
 
 
 def build_graph_with_providers(providers: Providers | None = None):
-    """构建包含代码检索/渲染/生成/测试全链路的 LangGraph。
+    """构建包含代码检索/渲染/生成/落盘/测试全链路的 LangGraph。
 
     与 build_graph() 的区别：
       - graph_generate 后不再直接 END，而是进入 code_search_node
-      - 新增 4 个 Provider 驱动的 async 节点
+      - Provider 驱动的阶段二/三节点 + 本地执行闭环节点（apply_code / test_run）
       - 路由：
           检索成功 → 渲染；检索可重试错 → retry；检索不可重试或真没结果 → 回澄清
-          lint 成功 → 测试；lint/生成可重试 → retry code_gen；超限/不可重试 → abort
-          测试通过 → END；失败可重试 → 回 code_gen；超限/不可重试 → abort
+          lint 成功 → apply_code 落盘；lint/生成可重试 → retry code_gen；超限/不可重试 → abort
+          落盘成功/降级 → test_gen；diff 坏了可回炉一次 → code_gen
+          测试设计 → test_run 真实执行；通过 → 人工验收；
+          失败 → 回 code_gen（带失败摘要，上限 TEST_RUN_MAX_FIX_ROUNDS）；
+          超限带失败报告 → 人工验收；未执行（跳过）→ 人工验收
     """
     p = providers or get_providers()
     checkpointer = SqliteSaver(_get_sqlite_conn())
@@ -408,7 +444,9 @@ def build_graph_with_providers(providers: Providers | None = None):
     workflow.add_node("graph_render", make_graph_render_node(p))
     workflow.add_node("graph_review", graph_review_node)
     workflow.add_node("code_gen", make_code_gen_node(p))
+    workflow.add_node("apply_code", make_apply_code_node())
     workflow.add_node("test_gen", make_test_gen_node(p))
+    workflow.add_node("test_run", make_test_run_node())
     workflow.add_node("review", review_node)
 
     # ── 连边 ──────────────────────────────────────────
@@ -482,26 +520,51 @@ def build_graph_with_providers(providers: Providers | None = None):
     # 渲染 → 代码生成
     workflow.add_edge("graph_render", "code_gen")
 
-    # 代码生成：lint_ok / force_test → test_gen；retry → code_gen；abort → drain
+    # 代码生成：lint_ok → 落盘；force_test（lint 超限）不落盘直接设计；
+    #           retry → code_gen；abort → drain
     workflow.add_conditional_edges(
         "code_gen",
         _route_after_code_gen,
         {
-            "lint_ok": "test_gen",
+            "lint_ok": "apply_code",
             "force_test": "test_gen",
             "retry": "code_gen",
             "abort": "dead_letter_drain",
         },
     )
 
-    # 测试：通过→人工验收；失败回 code_gen；可重试错→test_gen 本身；不可重试→abort
+    # diff 落盘：成功/降级 → 测试设计；diff 坏了可回炉一次 → code_gen
+    workflow.add_conditional_edges(
+        "apply_code",
+        _route_after_code_apply,
+        {
+            "continue": "test_gen",
+            "retry": "code_gen",
+        },
+    )
+
+    # 测试设计完成后一律交给 test_run 做真实执行判定
     workflow.add_conditional_edges(
         "test_gen",
         _route_after_test_gen,
         {
+            "run": "test_run",
+            "retry": "test_gen",
+            "abort": "dead_letter_drain",
+        },
+    )
+
+    # 真实执行：通过→人工验收；失败→code_gen 回修（带失败摘要）；
+    #           超限带失败报告→人工验收；未执行（跳过）→人工验收；可重试错→自身；不可重试→abort
+    workflow.add_conditional_edges(
+        "test_run",
+        _route_after_test_run,
+        {
             "test_ok": "review",
             "test_fail": "code_gen",
-            "retry": "test_gen",
+            "review_failed": "review",
+            "skip": "review",
+            "retry": "test_run",
             "abort": "dead_letter_drain",
         },
     )
@@ -540,6 +603,8 @@ def initial_state() -> dict[str, Any]:
         "current_stage": "clarify",
         "missing_fields": [],
         "review_feedback": None,
+        "code_apply": None,
+        "test_failure": None,
         "last_error": None,
         "last_error_code": None,
         "last_error_retryable": False,

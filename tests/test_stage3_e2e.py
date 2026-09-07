@@ -90,7 +90,7 @@ class TestGraphStructure:
             "clarify_extract", "clarify_validate", "clarify_build_question",
             "compress_messages", "graph_generate", "dead_letter_drain",
             "code_search", "graph_render", "graph_review", "code_gen",
-            "test_gen", "review",
+            "apply_code", "test_gen", "test_run", "review",
         }
         assert expected.issubset(node_names), f"缺失节点: {expected - node_names}"
 
@@ -201,6 +201,110 @@ class TestReviewRouting:
         # 这里只测 route_after_review 的逻辑
         result = route_after_review({"current_stage": "done"})
         assert result == "approved"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# TC311: 执行闭环 e2e — diff 真实落盘 + pytest 真实执行
+# ═══════════════════════════════════════════════════════════════════
+
+class TestE2EExecutionLoop:
+    """project_root 指向真实 tmp 项目：apply_code 落盘成功，test_run 真实跑 pytest。
+
+    Mock 的 diff 上下文首行是 "# mock"，目标项目文件预置同内容即可匹配应用。
+    项目里没有测试文件 → executed=True 且 total=0 → 不声称通过，进人工验收。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, tmp_path):
+        self.proj = tmp_path / "proj"
+        (self.proj / "src" / "mock").mkdir(parents=True)
+        (self.proj / "src" / "mock" / "symbol_from_0.py").write_text("# mock\n", encoding="utf-8")
+        (self.proj / "src" / "mock" / "symbol_from_1.py").write_text("# mock\n", encoding="utf-8")
+
+        self.graph = build_graph_with_providers(_mock_providers())
+        self.tid = f"tc311-{uuid.uuid4().hex[:8]}"
+        self.config = {"configurable": {"thread_id": self.tid}}
+
+        state = _full_initial_state()
+        state["requirement"] = {**state["requirement"], "project_root": str(self.proj)}
+        self._input_state = state
+
+    def test_apply_and_real_test_run(self):
+        # 1. 启动 → 停在制图门禁
+        list(self.graph.stream(self._input_state, self.config, stream_mode="updates"))
+        snapshot = self.graph.get_state(self.config)
+        assert "graph_review" in (snapshot.next or [])
+
+        # 2. 制图门通过 → 一路落盘/设计/执行到人工验收
+        list(self.graph.stream(Command(resume="approve"), self.config, stream_mode="updates"))
+        vals = self.graph.get_state(self.config).values
+
+        # 3. diff 已真实落盘（含备份）
+        ca = vals.get("code_apply") or {}
+        assert ca.get("applied") is True, f"落盘失败: {ca}"
+        changed = self.proj / "src" / "mock" / "symbol_from_0.py"
+        text = changed.read_text(encoding="utf-8")
+        assert text.startswith("# mock\n# "), f"文件未被修改: {text!r}"
+        backup = Path(ca["backup_dir"])
+        assert backup.is_dir() and (backup / "manifest.json").is_file()
+        # 备份里是应用前的内容
+        assert (backup / "src/mock/symbol_from_0.py").read_text(encoding="utf-8") == "# mock\n"
+
+        # 4. pytest 真实执行过（项目无测试 → executed=True, total=0, 不声称通过）
+        run = (vals.get("test_report") or {}).get("run") or {}
+        assert run.get("executed") is True, f"测试未真实执行: {run}"
+        assert run.get("total") == 0
+        assert vals["code_changes"][0].get("test_passed") is None
+
+        # 5. 终审 approve → 结束
+        assert "review" in (self.graph.get_state(self.config).next or [])
+        list(self.graph.stream(Command(resume="approve"), self.config, stream_mode="updates"))
+        snapshot = self.graph.get_state(self.config)
+        assert snapshot.next == ()
+        assert snapshot.values.get("current_stage") == "done"
+
+
+class TestE2ETestFailLoop:
+    """测试失败 → 回 code_gen 回修（mock 修不好）→ 连续失败超限 → 带失败报告进人工验收。
+
+    验证自动修复循环有界收敛，不会无限打转。
+    """
+
+    def test_failing_tests_converge_to_review(self, tmp_path):
+        from devflow.config import settings as cfg
+
+        proj = tmp_path / "proj"
+        (proj / "src" / "mock").mkdir(parents=True)
+        (proj / "src" / "mock" / "symbol_from_0.py").write_text("# mock\n", encoding="utf-8")
+        (proj / "src" / "mock" / "symbol_from_1.py").write_text("# mock\n", encoding="utf-8")
+        (proj / "tests").mkdir()
+        (proj / "tests" / "test_bad.py").write_text(
+            "def test_broken():\n    assert 1 == 2, '修复循环验证'\n", encoding="utf-8"
+        )
+
+        graph = build_graph_with_providers(_mock_providers())
+        tid = f"tc312-{uuid.uuid4().hex[:8]}"
+        config = {"configurable": {"thread_id": tid}}
+
+        state = _full_initial_state()
+        state["requirement"] = {**state["requirement"], "project_root": str(proj)}
+
+        list(graph.stream(state, config, stream_mode="updates"))
+        list(graph.stream(Command(resume="approve"), config, stream_mode="updates"))
+
+        snapshot = graph.get_state(config)
+        assert "review" in (snapshot.next or []), "连续失败超限后应停在人工验收"
+        vals = snapshot.values
+
+        run = (vals.get("test_report") or {}).get("run") or {}
+        assert run.get("executed") is True
+        assert run.get("failed") >= 1
+        assert (vals["code_changes"][0] or {}).get("test_passed") is False
+        # 回修轮次 = MAX_FIX_ROUNDS + 1 次失败后收敛
+        assert vals["retry_count"]["test_run"] == cfg.TEST_RUN_MAX_FIX_ROUNDS + 1
+        assert "test_broken" in (vals.get("test_failure") or "")
+        # 失败明细进了报告（供人工验收查看）
+        assert any("test_broken" in f["id"] for f in run.get("failures", []))
 
 
 # ═══════════════════════════════════════════════════════════════════

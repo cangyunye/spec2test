@@ -130,11 +130,42 @@ def _print_stage_report(state: dict[str, Any]) -> None:
             f"graph_id={graph['graph_id']}  nodes={len(graph['nodes'])}  edges={len(graph['edges'])}",
         )
 
+    apply_info = state.get("code_apply")
+    if apply_info is not None:
+        if apply_info.get("applied"):
+            table.add_row(
+                "CodeApply",
+                f"[green]✓ {len(apply_info.get('files') or [])} 个文件已落盘[/]"
+                f"（备份 {apply_info.get('backup_dir') or '-'}）",
+            )
+        else:
+            table.add_row("CodeApply", f"[yellow]未落盘[/] {apply_info.get('reason') or ''}")
+
+    report = state.get("test_report")
+    if report:
+        run = report.get("run") or {}
+        if run.get("executed"):
+            failures = int(run.get("failed", 0)) + int(run.get("errors", 0))
+            color = "green" if failures == 0 else "red"
+            table.add_row(
+                "TestRun",
+                f"[{color}]{'✓' if failures == 0 else '✗'} 真实执行[/] "
+                f"passed={run.get('passed', 0)} failed={run.get('failed', 0)} "
+                f"errors={run.get('errors', 0)} skipped={run.get('skipped', 0)} "
+                f"（{run.get('duration_sec', 0)}s）",
+            )
+        else:
+            n_cases = len(report.get("test_cases") or [])
+            table.add_row(
+                "TestRun",
+                f"场景设计 {n_cases} 个（{run.get('skip_reason') or '未执行'}）",
+            )
+
     console.print(Panel(table, title="状态摘要", border_style="blue"))
 
 
 def _export_artifacts(state: dict[str, Any], out_dir: Path) -> list[Path]:
-    """导出结构化产物：需求 JSON、逻辑图 JSON、逻辑图 Mermaid。"""
+    """导出结构化产物：需求 JSON、逻辑图 JSON/Mermaid、代码变更、测试报告。"""
     out_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
 
@@ -151,6 +182,22 @@ def _export_artifacts(state: dict[str, Any], out_dir: Path) -> list[Path]:
         written.append(p)
         p = out_dir / "logic_graph.mmd"
         p.write_text(graph["mermaid_source"], encoding="utf-8")
+        written.append(p)
+
+    if state.get("code_changes"):
+        p = out_dir / "code_changes.json"
+        p.write_text(json.dumps(state["code_changes"], ensure_ascii=False, indent=2), encoding="utf-8")
+        written.append(p)
+
+    apply_info = state.get("code_apply")
+    if apply_info is not None:
+        p = out_dir / "code_apply.json"
+        p.write_text(json.dumps(apply_info, ensure_ascii=False, indent=2), encoding="utf-8")
+        written.append(p)
+
+    if state.get("test_report"):
+        p = out_dir / "test_report.json"
+        p.write_text(json.dumps(state["test_report"], ensure_ascii=False, indent=2), encoding="utf-8")
         written.append(p)
 
     return written

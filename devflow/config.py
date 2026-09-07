@@ -119,9 +119,25 @@ class Settings:
             os.getenv("CHECKPOINT_SQLITE_PATH", "./data/checkpoints.db")
         )
 
-        # ── OpenCode (阶段一占位) ──────────────────────────
+        # ── OpenCode（可选增强后端；默认主路径为 LLM 直连，不配置即自动 Mock）──
         self.OPENCODE_BASE_URL: str = os.getenv("OPENCODE_BASE_URL", "http://localhost:8080")
         self.OPENCODE_API_TOKEN: str = os.getenv("OPENCODE_API_TOKEN", "")
+
+        # ── 执行闭环（diff 落盘 + 真实测试执行）────────────
+        self.APPLY_CODE_ENABLED: bool = os.getenv(
+            "APPLY_CODE_ENABLED", "1"
+        ).strip().lower() not in ("0", "false", "no", "off")
+        self.TEST_RUN_ENABLED: bool = os.getenv(
+            "TEST_RUN_ENABLED", "1"
+        ).strip().lower() not in ("0", "false", "no", "off")
+        # 单轮 pytest 超时（秒），超时按「未执行」处理而不是误判失败
+        self.TEST_RUN_TIMEOUT_SEC: int = int(os.getenv("TEST_RUN_TIMEOUT_SEC", "300"))
+        # 测试连续失败时自动回 code_gen 修复的最大轮数；超出后带失败报告进人工验收
+        self.TEST_RUN_MAX_FIX_ROUNDS: int = int(os.getenv("TEST_RUN_MAX_FIX_ROUNDS", "2"))
+        # 限定 pytest 收集范围（逗号分隔相对路径）；留空 = 整个项目
+        self.TEST_RUN_PATHS: list[str] = [
+            s.strip() for s in os.getenv("TEST_RUN_PATHS", "").split(",") if s.strip()
+        ]
 
         # ── 记忆策略 ──────────────────────────────────────
         # 保留最近 N 轮对话

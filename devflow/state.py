@@ -89,6 +89,7 @@ class GlobalState(TypedDict, total=False):
     logic_graph: Optional[LogicGraph]
     code_changes: list[CodeChange]           # 阶段三才会有
     test_report: Optional[dict[str, Any]]    # 阶段三才会有
+    code_apply: Optional[dict[str, Any]]     # diff 落盘结果 {applied, files, backup_dir, reason}
 
     # ── 3. 子系统会话映射 ──────────────────────────────
     opencode_sessions: OpenCodeSessions
@@ -97,5 +98,7 @@ class GlobalState(TypedDict, total=False):
     current_stage: StageType
     missing_fields: list[str]                # 校验节点输出的缺失字段/错误
     review_feedback: Optional[str]           # 门禁 reject 时用户填写的修改意见
+    test_failure: Optional[str]              # test_run 失败摘要，code_gen 修复时拼进 instruction
     last_error: Optional[str]
     retry_count: dict[str, int]              # e.g. {"clarify_validate": 1}
+    dead_letters: list                       # SPEC 5.7 死信队列（dead_letter_drain 落盘前暂存）
