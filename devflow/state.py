@@ -96,5 +96,6 @@ class GlobalState(TypedDict, total=False):
     # ── 4. 流程控制字段 ────────────────────────────────
     current_stage: StageType
     missing_fields: list[str]                # 校验节点输出的缺失字段/错误
+    review_feedback: Optional[str]           # 门禁 reject 时用户填写的修改意见
     last_error: Optional[str]
     retry_count: dict[str, int]              # e.g. {"clarify_validate": 1}

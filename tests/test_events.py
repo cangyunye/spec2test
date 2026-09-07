@@ -35,19 +35,30 @@ class TestDictItems:
             {"test_gen": {"test_report": {"run": {"passed": 1, "failed": 0}}}},
         ]
         events = _seq(events_from_stream(iter(items)))
+        # 每个节点先产出 node_done，再产出其 update 内容事件
         assert [e["type"] for e in events] == [
-            "stage", "artifact", "artifact", "artifact", "artifact",
+            "node_done", "node_done", "stage",
+            "node_done", "artifact",
+            "node_done", "artifact",
+            "node_done", "artifact",
+            "node_done", "artifact",
         ]
         kinds = [e.get("kind") for e in events if e["type"] == "artifact"]
         assert kinds == ["logic_graph", "code_context", "code_changes", "test_report"]
+        nodes = [e.get("node") for e in events if e["type"] == "node_done"]
+        assert nodes == [
+            "compress_messages", "clarify_validate", "graph_generate",
+            "code_search", "code_gen", "test_gen",
+        ]
 
     def test_none_update_skipped(self):
+        # 无状态更新也应有 node_done（进度可见），但不产内容事件
         events = _seq(events_from_stream(iter([{"compress_messages": None}])))
-        assert events == []
+        assert [e["type"] for e in events] == ["node_done"]
 
     def test_empty_update_skipped(self):
         events = _seq(events_from_stream(iter([{"clarify_validate": {}}])))
-        assert events == []
+        assert [e["type"] for e in events] == ["node_done"]
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -72,6 +83,7 @@ class TestInterrupt:
         payload = {"type": "graph_review", "graph_id": "g1", "nodes": 3, "edges": 2}
         items = [{"__interrupt__": (Interrupt(value=payload),)}]
         events = _seq(events_from_stream(iter(items)))
+        assert events[0]["type"] == "gate"
         assert events[0]["gate"] == "graph_review"
 
     def test_gate_after_artifacts_keeps_order(self):
@@ -81,7 +93,7 @@ class TestInterrupt:
             {"__interrupt__": (Interrupt(value=payload),)},
         ]
         events = _seq(events_from_stream(iter(items)))
-        assert [e["type"] for e in events] == ["artifact", "gate"]
+        assert [e["type"] for e in events] == ["node_done", "artifact", "gate"]
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -97,7 +109,7 @@ class TestLegacyTuples:
             ("test_gen", {"test_report": {"run": {}}}),
         ]
         events = _seq(events_from_stream(iter(items)))
-        assert [e.get("kind") for e in events] == ["logic_graph", "test_report"]
+        assert [e.get("kind") for e in events if e["type"] == "artifact"] == ["logic_graph", "test_report"]
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -133,3 +145,46 @@ class TestQuestionAndError:
         events = _seq(events_from_stream(iter(items)))
         err = [e for e in events if e["type"] == "error"]
         assert err and "LLM.XXX" in err[0]["error"]
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 多流模式（Web 路径）：(mode, data) 元组
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestMultiModeStream:
+    def test_updates_mode_tuple(self):
+        items = [
+            ("updates", {"clarify_validate": {"current_stage": "graph"}}),
+            ("updates", {"graph_generate": {"logic_graph": {"graph_id": "g1"}}}),
+        ]
+        events = _seq(events_from_stream(iter(items)))
+        assert [e["type"] for e in events] == ["node_done", "stage", "node_done", "artifact"]
+
+    def test_messages_mode_yields_tokens(self):
+        from langchain_core.messages import AIMessageChunk
+
+        chunk = AIMessageChunk(content="正在生成")
+        items = [("messages", (chunk, {"langgraph_node": "graph_generate"}))]
+        events = _seq(events_from_stream(iter(items)))
+        assert events == [
+            {"type": "token", "node": "graph_generate", "label": "逻辑制图", "content": "正在生成"}
+        ]
+
+    def test_human_chunk_not_streamed(self):
+        from langchain_core.messages import HumanMessage
+
+        items = [("messages", (HumanMessage(content="用户输入"), {"langgraph_node": "clarify_extract"}))]
+        events = _seq(events_from_stream(iter(items)))
+        assert events == []
+
+    def test_mixed_modes(self):
+        from langchain_core.messages import AIMessageChunk
+
+        items = [
+            ("messages", (AIMessageChunk(content="思考中…"), {"langgraph_node": "clarify_extract"})),
+            ("updates", {"clarify_extract": {"current_stage": "clarify"}}),
+            ("updates", {"__interrupt__": ()}),  # 不完整的 interrupt 兜底为通用 gate
+        ]
+        events = _seq(events_from_stream(iter(items)))
+        assert [e["type"] for e in events] == ["token", "node_done", "stage", "gate"]

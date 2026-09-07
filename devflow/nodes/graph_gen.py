@@ -79,11 +79,16 @@ USER_PROMPT_TEMPLATE = """
 
 # 代码上下文（阶段一可能为空数组，不用强依赖）
 {code_context_json}
-
+{feedback_section}
 # 制图要求
 - 生成一份可机读逻辑图，节点 3~8 个
 - 所有 is_modified 标记要与需求的「新增/修改」部分对应
 - 最后同时输出 Mermaid 源码
+"""
+
+FEEDBACK_SECTION_TEMPLATE = """
+# 上轮评审意见（用户 reject 本图后给出的修改要求，本轮必须针对性修正）
+{review_feedback}
 """
 
 
@@ -102,6 +107,10 @@ async def graph_generate_async(state: GlobalState) -> dict[str, Any]:
 
     req = state.get("requirement") or {}
     code_ctx = state.get("code_context") or []
+    feedback = (state.get("review_feedback") or "").strip()
+    feedback_section = (
+        FEEDBACK_SECTION_TEMPLATE.format(review_feedback=feedback) if feedback else ""
+    )
 
     try:
         result = await invoke_json(
@@ -109,6 +118,7 @@ async def graph_generate_async(state: GlobalState) -> dict[str, Any]:
             user_prompt=USER_PROMPT_TEMPLATE.format(
                 requirement_json=json.dumps(req, ensure_ascii=False, indent=2),
                 code_context_json=json.dumps(code_ctx, ensure_ascii=False, indent=2),
+                feedback_section=feedback_section,
             ),
             response_model=LogicGraphModel,
             response_type="logic_graph",

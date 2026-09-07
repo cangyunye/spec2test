@@ -274,9 +274,12 @@ def make_code_gen_node(providers: Providers | None = None):
         # （P4：带 snippet 让真实 OpenCode 拿到代码上下文；有长度上限保护 token）
         related_files = _build_related_files(code_ctx)
 
-        # 取第一个修改节点的 label 作为 instruction 的锚点
+        # 取第一个修改节点的 label 作为 instruction 的锚点；
+        # 门禁 reject 的意见（review_feedback）拼进 instruction 针对性修正
         first_node = modified_nodes[0]
-        instruction = _build_code_instruction(req, first_node)
+        instruction = _build_code_instruction(
+            req, first_node, feedback=state.get("review_feedback")
+        )
 
         try:
             result = await p.code_edit.generate(
@@ -560,8 +563,10 @@ def _build_search_query(req: dict[str, Any]) -> str:
     return "；".join(parts) if parts else "代码检索"
 
 
-def _build_code_instruction(req: dict[str, Any], node: dict[str, Any]) -> str:
-    """把需求 + 逻辑图节点拼成给 Provider 的 instruction。"""
+def _build_code_instruction(
+    req: dict[str, Any], node: dict[str, Any], *, feedback: str | None = None
+) -> str:
+    """把需求 + 逻辑图节点（+ 评审意见）拼成给 Provider 的 instruction。"""
     label = node.get("label", "未知节点")
     io = req.get("io_constraints") or {}
     lines = [
@@ -573,6 +578,8 @@ def _build_code_instruction(req: dict[str, Any], node: dict[str, Any]) -> str:
         lines.append(f"验收标准：{ac}")
     for ec in req.get("edge_cases", []) or []:
         lines.append(f"边界场景：{ec}")
+    if feedback and feedback.strip():
+        lines.append(f"上轮验收意见（必须针对性修正）：{feedback.strip()}")
     return "\n".join(lines)
 
 

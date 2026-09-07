@@ -45,6 +45,20 @@ logger = logging.getLogger(__name__)
 # 1. 模型模型池 + mock
 # ═══════════════════════════════════════════════════════════════════
 
+# Mock 兜底用的完整演示需求：保证「无 Key 演示模式」下澄清校验可通过、
+# 全链路能跑通到门禁与测试场景（残缺模板会在 clarify_validate 处死循环）。
+_MOCK_DEMO_REQUIREMENT: dict[str, Any] = {
+    "req_type": "component_iteration",
+    "project_root": ".",
+    "project_context": "Mock 演示项目：桌面 GUI 计算器应用（tkinter），含加减乘除与错误提示",
+    "target_modules": ["calculator/calc.py"],
+    "existing_code_accessible": True,
+    "io_constraints": {"input": "按钮点击与表达式输入", "output": "运算结果或错误提示"},
+    "edge_cases": ["除零", "连续运算", "负数", "小数"],
+    "acceptance_criteria": ["四则运算结果正确", "除零给出错误提示", "GUI 可启动"],
+}
+
+
 class _MockLLM:
     """SPEC 5.3 最后兜底：不依赖任何外部服务，始终返回模板 JSON / 文本。"""
 
@@ -52,17 +66,7 @@ class _MockLLM:
         # 依据 prompt 猜需求：要求 extract requirement 时给空模板，graph 给模板
         joined = "\n".join(str(getattr(m, "content", "")) for m in messages)
         if "requirement" in joined.lower() and "json" in joined.lower():
-            payload = {
-                "req_type": "component_iteration",
-                "project_root": ".",
-                "project_context": "(mock fallback: LLM 不可用)",
-                "target_modules": [],
-                "existing_code_accessible": True,
-                "io_constraints": {"input": "", "output": "", "latency_ms": None, "throughput_qps": None, "env": None},
-                "edge_cases": [],
-                "acceptance_criteria": ["由人工补充验收标准"],
-            }
-            return AIMessage(content=json.dumps(payload, ensure_ascii=False))
+            return AIMessage(content=json.dumps(_MOCK_DEMO_REQUIREMENT, ensure_ascii=False))
         if any(kw in joined.lower() for kw in ("logic", "graph", "逻辑图", "制图", "mermaid")):
             return AIMessage(content=json.dumps({
                 "graph_id": "mock-graph",
@@ -92,16 +96,7 @@ class _MockStructured:
 
         class _ReqMocker:
             def model_dump(self, mode: str = "python") -> dict[str, Any]:
-                return {
-                    "req_type": "component_iteration",
-                    "project_root": ".",
-                    "project_context": "mock",
-                    "target_modules": [],
-                    "existing_code_accessible": True,
-                    "io_constraints": {"input": "", "output": ""},
-                    "edge_cases": [],
-                    "acceptance_criteria": [],
-                }
+                return dict(_MOCK_DEMO_REQUIREMENT)
 
         class _GraphMocker:
             def model_dump(self, mode: str = "python") -> dict[str, Any]:
