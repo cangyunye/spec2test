@@ -42,57 +42,14 @@
 
   <div class="shell">
 
-    <!-- ── 左栏：新建 + 会话 ─────────────────────── -->
+    <!-- ── 左栏：会话历史 ─────────────────────────── -->
     <aside id="sidebar" class="sidebar">
-      <section class="panel">
-        <div class="panel-title">新建会话</div>
-        <div class="req-wrap">
-          <textarea id="reqText" rows="5" placeholder="描述你的需求…&#10;&#10;也可以把 .md / .txt / .docx 需求文档直接拖进来"></textarea>
-        </div>
-        <div class="hint-row">
-          <button id="btnSample" class="chip-btn">✦ 示例需求</button>
-          <label class="chip-btn">⇪ 导入文档<input type="file" id="fileDoc" accept=".md,.txt,.docx" hidden></label>
-        </div>
-
-        <details class="advanced" id="advanced">
-          <summary>高级字段</summary>
-          <div class="field">
-            <label for="fRoot">project_root</label>
-            <input id="fRoot" value="." spellcheck="false">
-          </div>
-          <div class="field">
-            <label>目标模块 <span class="label-hint">回车添加</span></label>
-            <div class="tags" id="tagModules" data-sample='["calculator/calc.py"]'></div>
-          </div>
-          <div class="field">
-            <label>边界场景 <span class="label-hint">回车添加</span></label>
-            <div class="tags" id="tagEdges" data-sample='["除零","连续运算","负数","小数"]'></div>
-          </div>
-          <div class="field">
-            <label>验收标准 <span class="label-hint">回车添加</span></label>
-            <div class="tags" id="tagAccept" data-sample='["四则运算结果正确","除零给出错误提示","GUI 可启动"]'></div>
-          </div>
-          <div class="field">
-            <label for="fCtx">项目背景</label>
-            <input id="fCtx" value="桌面 GUI 计算器应用（tkinter）">
-          </div>
-          <div class="field-row">
-            <div class="field">
-              <label for="fIoIn">输入约束</label>
-              <input id="fIoIn" value="按钮点击与表达式">
-            </div>
-            <div class="field">
-              <label for="fIoOut">输出约束</label>
-              <input id="fIoOut" value="结果或错误提示">
-            </div>
-          </div>
-        </details>
-
-        <button id="btnNew" class="btn primary block">开始全链路<kbd>⌘ ↵</kbd></button>
-      </section>
-
       <section class="panel grow">
-        <div class="panel-title">历史会话 <span id="sessCount" class="count"></span></div>
+        <div class="panel-title">
+          历史会话 <span id="sessCount" class="count"></span>
+          <span class="spacer"></span>
+          <button id="btnNewChat" class="chip-btn" title="开始一个新的会话">＋ 新会话</button>
+        </div>
         <ul id="sessions" class="sessions"><li class="sess-empty">加载中…</li></ul>
       </section>
     </aside>
@@ -100,33 +57,62 @@
 
     <!-- ── 主区：动态流 + 输入 ───────────────────── -->
     <main class="main">
-      <div id="feed" class="feed">
-        <div id="feedEmpty" class="feed-empty">
-          <div class="fe-mark"></div>
-          <h2>从一段需求，到一组测试场景</h2>
-          <p>DevFlow 会澄清需求、生成可机读逻辑图、生成代码与测试设计；关键节点由你把关。</p>
-          <ol class="fe-steps">
-            <li><b>01</b> 输入需求，回答 AI 追问</li>
-            <li><b>02</b> 评审逻辑图，通过或驳回</li>
-            <li><b>03</b> 验收产物，导出测试场景</li>
-          </ol>
-          <div class="fe-actions">
-            <button class="chip-btn" id="feSample">✦ 用示例需求试试</button>
-          </div>
-        </div>
-      </div>
+      <div id="feed" class="feed"></div>
 
       <footer class="composer">
+        <div id="cfgChips" class="cfg-chips hidden"></div>
         <div class="composer-meta">
           <span id="composerHint">输入需求，回车开始</span>
           <span id="composerTimer" class="mono"></span>
         </div>
         <div class="composer-box" id="composerBox">
-          <textarea id="chatInput" rows="1" placeholder="描述你的需求…"></textarea>
+          <button id="btnDoc" class="comp-btn" title="导入需求文档（.md / .txt / .docx）">⇪</button>
+          <textarea id="chatInput" rows="1" placeholder="描述你的需求，回车开始全链路…"></textarea>
+          <button id="btnCfg" class="comp-btn" title="运行配置（仅在新会话创建时生效）">⚙</button>
           <button id="btnSend" class="send" title="发送（Enter）" disabled>↑</button>
         </div>
+        <input type="file" id="fileDoc" accept=".md,.txt,.docx" hidden>
       </footer>
     </main>
+  </div>
+</div>
+
+<!-- 运行配置弹层（composer 上方） -->
+<div id="cfgPop" class="cfg-pop hidden">
+  <div class="cfg-head">运行配置 <span class="label-hint">仅在新会话创建时生效</span></div>
+  <div class="field">
+    <label for="fRoot">project_root</label>
+    <input id="fRoot" value="." spellcheck="false">
+  </div>
+  <div class="field">
+    <label>目标模块 <span class="label-hint">回车添加</span></label>
+    <div class="tags" id="tagModules"></div>
+  </div>
+  <div class="field">
+    <label>边界场景 <span class="label-hint">回车添加</span></label>
+    <div class="tags" id="tagEdges"></div>
+  </div>
+  <div class="field">
+    <label>验收标准 <span class="label-hint">回车添加</span></label>
+    <div class="tags" id="tagAccept"></div>
+  </div>
+  <div class="field">
+    <label for="fCtx">项目背景</label>
+    <input id="fCtx" value="桌面 GUI 计算器应用（tkinter）">
+  </div>
+  <div class="field-row">
+    <div class="field">
+      <label for="fIoIn">输入约束</label>
+      <input id="fIoIn" value="按钮点击与表达式">
+    </div>
+    <div class="field">
+      <label for="fIoOut">输出约束</label>
+      <input id="fIoOut" value="结果或错误提示">
+    </div>
+  </div>
+  <div class="cfg-foot">
+    <button id="btnCfgClear" class="chip-btn">清空配置</button>
+    <button id="btnCfgSample" class="chip-btn">✦ 示例配置</button>
   </div>
 </div>
 

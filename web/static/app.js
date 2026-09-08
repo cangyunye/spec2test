@@ -640,7 +640,6 @@ function setRunning(on) {
     clearInterval(S.timer);
     $("composerTimer").textContent = "";
   }
-  $("btnNew").disabled = on;
   updateComposer();
 }
 
@@ -998,11 +997,11 @@ function updateComposer() {
     send.disabled = true;
     input.disabled = true;
   } else if (!S.tid) {
-    hint.textContent = "输入需求，或点「开始全链路」· Enter 发送";
+    hint.textContent = "描述需求开始全链路 · Enter 发送 · ⚙ 运行配置 · ⇪ 导入文档";
     send.disabled = !input.value.trim();
     input.disabled = false;
   } else if (S.stage === "done") {
-    hint.textContent = "全流程已完成 · 可导出产物，或新建会话开启下一轮";
+    hint.textContent = "全流程已完成 · 可导出产物，或点左侧「＋ 新会话」开启下一轮";
     send.disabled = true;
     input.disabled = false;
   } else {
@@ -1015,24 +1014,21 @@ function updateComposer() {
 function autoresize() {
   const t = $("chatInput");
   t.style.height = "auto";
-  t.style.height = Math.min(t.scrollHeight, 140) + "px";
+  t.style.height = Math.min(t.scrollHeight, Math.round(window.innerHeight * 0.4)) + "px";
 }
 
 function sendChat() {
   const t = $("chatInput");
   const text = t.value.trim();
-  if (!text || !S.tid || S.running || S.gate) return;
+  if (!text || S.running || S.gate) return;
+  if (!S.tid) { createAndStart(text); return; }  // 单一入口：无会话时发送 = 创建会话
   t.value = ""; autoresize();
   addUserMsg(text);
   setRunning(true);
   startStream({ op: "message", text });
 }
 
-async function startFlow() {
-  const text = $("reqText").value.trim();
-  if (!text) { toast("先输入需求", "可以直接粘贴需求文本，或点「示例需求」", "err"); return; }
-  if (S.running) return;
-  resetFeed();
+async function createAndStart(text) {
   try {
     const { thread_id } = await api("/api/sessions", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -1041,15 +1037,34 @@ async function startFlow() {
     S.tid = thread_id;
     S.stage = "clarify";
     S.graph = null; S.report = null; S.gate = null;
+    $("chatInput").value = ""; autoresize();
+    resetFeed();
     setStep(0, true);
     addUserMsg(text);
     setRunning(true);
     startStream({ op: "message", text });
+    renderCfgChips();
     refreshSessions();
     closeSidebar();
   } catch (err) {
     toast("创建会话失败", err.message, "err");
   }
+}
+
+/* ＋ 新会话：回到空态，等待 composer 输入 */
+function newSession() {
+  if (S.running) { toast("请等待当前流程结束", "流程暂停后再新建会话", "err"); return; }
+  stopStream();
+  S.tid = null; S.gate = null; S.graph = null; S.report = null; S.stage = "clarify";
+  $("gateModal").classList.add("hidden");
+  $("gatePill").classList.add("hidden");
+  resetFeed();
+  showEmptyState();
+  setStep(0, false);
+  updateComposer();
+  refreshSessions();
+  closeSidebar();
+  $("chatInput").focus();
 }
 
 function buildSetFields() {
@@ -1078,6 +1093,85 @@ function resetFeed() {
   liveClearAll();
   S.stage = "clarify";
   setStep(0, false);
+}
+
+/* 空态引导（无活动会话时） */
+function showEmptyState() {
+  if (S.tid || $("feedEmpty")) return;
+  const d = h("div", "feed-empty");
+  d.id = "feedEmpty";
+  d.appendChild(h("div", "fe-mark"));
+  d.appendChild(h("h2", null, "从一段需求，到一组测试场景"));
+  d.appendChild(h("p", null, "DevFlow 会澄清需求、生成可机读逻辑图、生成代码与测试设计；关键节点由你把关。在下方输入框描述需求即可开始。"));
+  const ol = h("ol", "fe-steps");
+  [["01", "输入需求，回答 AI 追问"], ["02", "评审逻辑图，通过或驳回"], ["03", "验收产物，导出测试场景"]]
+    .forEach(([n, t]) => {
+      const li = h("li");
+      li.appendChild(h("b", null, n));
+      li.appendChild(document.createTextNode(t));
+      ol.appendChild(li);
+    });
+  d.appendChild(ol);
+  const actions = h("div", "fe-actions");
+  const btn = h("button", "chip-btn", "✦ 用示例需求试试");
+  btn.id = "feSample";
+  btn.onclick = () => { fillSample(); $("chatInput").focus(); };
+  actions.appendChild(btn);
+  d.appendChild(actions);
+  feedInner().appendChild(d);
+}
+
+/* ── 运行配置弹层 + 配置 chips ───────────────────────── */
+
+const CFG_DEFAULTS = { fRoot: ".", fCtx: "桌面 GUI 计算器应用（tkinter）", fIoIn: "按钮点击与表达式", fIoOut: "结果或错误提示" };
+
+function cfgIsCustom() {
+  if ($("fRoot").value.trim() && $("fRoot").value.trim() !== ".") return true;
+  if (tagValues($("tagModules")).length || tagValues($("tagEdges")).length || tagValues($("tagAccept")).length) return true;
+  return Object.keys(CFG_DEFAULTS).some((id) =>
+    id !== "fRoot" && $(id).value.trim() !== CFG_DEFAULTS[id]);
+}
+
+function cfgGroups() {
+  const mods = tagValues($("tagModules"));
+  const edges = tagValues($("tagEdges"));
+  const acc = tagValues($("tagAccept"));
+  const root = $("fRoot").value.trim();
+  const ctx = $("fCtx").value.trim();
+  const ioIn = $("fIoIn").value.trim(), ioOut = $("fIoOut").value.trim();
+  const groups = [];
+  if (root && root !== ".") groups.push({ key: "root", label: `project_root=${root}`, clear: () => { $("fRoot").value = "."; } });
+  if (mods.length) groups.push({ key: "mods", label: `目标模块 ${mods.length}`, clear: () => initTags($("tagModules"), []) });
+  if (edges.length) groups.push({ key: "edges", label: `边界场景 ${edges.length}`, clear: () => initTags($("tagEdges"), []) });
+  if (acc.length) groups.push({ key: "acc", label: `验收标准 ${acc.length}`, clear: () => initTags($("tagAccept"), []) });
+  if (ctx && ctx !== CFG_DEFAULTS.fCtx) groups.push({ key: "ctx", label: `背景：${ctx.slice(0, 14)}${ctx.length > 14 ? "…" : ""}`, clear: () => { $("fCtx").value = CFG_DEFAULTS.fCtx; } });
+  if ((ioIn && ioIn !== CFG_DEFAULTS.fIoIn) || (ioOut && ioOut !== CFG_DEFAULTS.fIoOut))
+    groups.push({ key: "io", label: "IO 约束", clear: () => { $("fIoIn").value = CFG_DEFAULTS.fIoIn; $("fIoOut").value = CFG_DEFAULTS.fIoOut; } });
+  return groups;
+}
+
+function renderCfgChips() {
+  const box = $("cfgChips");
+  box.innerHTML = "";
+  const groups = cfgGroups();
+  $("btnCfg").classList.toggle("on", groups.length > 0);
+  if (!groups.length || S.tid) { box.classList.add("hidden"); return; }
+  groups.forEach((g) => {
+    const chip = h("span", "cfg-chip mono");
+    chip.appendChild(document.createTextNode(g.label + " "));
+    const x = h("i", null, "×");
+    x.onclick = () => { g.clear(); renderCfgChips(); };
+    chip.appendChild(x);
+    box.appendChild(chip);
+  });
+  box.classList.remove("hidden");
+}
+
+function toggleCfgPop(force) {
+  const pop = $("cfgPop");
+  const show = force !== undefined ? force : pop.classList.contains("hidden");
+  if (show && S.tid) { toast("配置仅在新会话创建时生效", "本会话已按创建时配置运行；点「＋ 新会话」可重新配置"); return; }
+  pop.classList.toggle("hidden", !show);
 }
 
 /* ── 标签输入组件 ────────────────────────────────────── */
@@ -1174,8 +1268,10 @@ async function importDoc(file) {
   toast("正在解析文档", file.name);
   try {
     const { text, chars } = await api("/api/doc/extract", { method: "POST", body: fd });
-    $("reqText").value = text;
-    toast("文档已导入", `${file.name} · ${chars} 字符，检查后点「开始全链路」`);
+    $("chatInput").value = text;
+    autoresize();
+    updateComposer();
+    toast("文档已导入", `${file.name} · ${chars} 字符，检查后回车开始全链路`);
   } catch (err) {
     toast("解析失败", err.message, "err");
   }
@@ -1193,8 +1289,9 @@ function closeSidebar() {
 const SAMPLE_REQ = "开发一个带图形界面的 Python 计算器（GUI，使用 tkinter），支持四则运算、连续运算、除零报错、负数与小数的输入，输入非法字符时给出错误提示。";
 
 function fillSample() {
-  $("reqText").value = SAMPLE_REQ;
-  // 高级字段恢复为示例值
+  $("chatInput").value = SAMPLE_REQ;
+  autoresize();
+  // 配置恢复为示例值
   $("fRoot").value = ".";
   $("fCtx").value = "桌面 GUI 计算器应用（tkinter）";
   $("fIoIn").value = "按钮点击与表达式";
@@ -1202,6 +1299,8 @@ function fillSample() {
   initTags($("tagModules"), ["calculator/calc.py"]);
   initTags($("tagEdges"), ["除零", "连续运算", "负数", "小数"]);
   initTags($("tagAccept"), ["四则运算结果正确", "除零给出错误提示", "GUI 可启动"]);
+  renderCfgChips();
+  updateComposer();
 }
 
 function boot() {
@@ -1209,8 +1308,9 @@ function boot() {
   buildStepper();
   setStep(0, false);
 
-  [["tagModules"], ["tagEdges"], ["tagAccept"]].forEach(([id]) => initTags($(id), []));
-  fillSample();
+  initTags($("tagModules"), ["calculator/calc.py"]);
+  initTags($("tagEdges"), ["除零", "连续运算", "负数", "小数"]);
+  initTags($("tagAccept"), ["四则运算结果正确", "除零给出错误提示", "GUI 可启动"]);
 
   // 顶栏
   $("btnTheme").onclick = toggleTheme;
@@ -1220,35 +1320,45 @@ function boot() {
         !$("healthPop").contains(e.target) && e.target !== $("btnHealth")) {
       $("healthPop").classList.add("hidden");
     }
+    if (!$("cfgPop").classList.contains("hidden") &&
+        !$("cfgPop").contains(e.target) && !$("btnCfg").contains(e.target)) {
+      toggleCfgPop(false);
+    }
   });
 
-  // 侧栏
+  // 侧栏（仅历史）+ 新会话
   $("btnSidebar").onclick = () => {
     $("sidebar").classList.add("open");
     $("scrim").hidden = false;
   };
   $("scrim").onclick = closeSidebar;
+  $("btnNewChat").onclick = newSession;
 
-  // 新会话
-  $("btnNew").onclick = startFlow;
-  $("btnSample").onclick = fillSample;
-  $("feSample").onclick = () => { fillSample(); $("reqText").focus(); };
-  $("reqText").addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); startFlow(); }
-  });
-  $("fileDoc").addEventListener("change", (e) => { if (e.target.files[0]) importDoc(e.target.files[0]); });
-  const reqWrap = document.querySelector(".req-wrap");
-  ["dragover", "dragenter"].forEach((ev) => reqWrap.addEventListener(ev, (e) => {
-    e.preventDefault(); $("reqText").classList.add("dragover");
+  // 运行配置弹层
+  $("btnCfg").onclick = (e) => { e.stopPropagation(); toggleCfgPop(); };
+  $("btnCfgSample").onclick = () => { fillSample(); };
+  $("btnCfgClear").onclick = () => {
+    $("fRoot").value = "."; $("fCtx").value = ""; $("fIoIn").value = ""; $("fIoOut").value = "";
+    initTags($("tagModules"), []); initTags($("tagEdges"), []); initTags($("tagAccept"), []);
+    renderCfgChips();
+  };
+  $("cfgPop").addEventListener("input", renderCfgChips);
+
+  // 文档导入：按钮 + 拖到输入框
+  $("btnDoc").onclick = () => $("fileDoc").click();
+  $("fileDoc").addEventListener("change", (e) => { if (e.target.files[0]) importDoc(e.target.files[0]); e.target.value = ""; });
+  const box = $("composerBox");
+  ["dragover", "dragenter"].forEach((ev) => box.addEventListener(ev, (e) => {
+    e.preventDefault(); box.classList.add("dragover");
   }));
-  ["dragleave", "drop"].forEach((ev) => reqWrap.addEventListener(ev, (e) => {
-    e.preventDefault(); $("reqText").classList.remove("dragover");
+  ["dragleave", "drop"].forEach((ev) => box.addEventListener(ev, (e) => {
+    e.preventDefault(); box.classList.remove("dragover");
     if (ev === "drop" && e.dataTransfer.files[0]) importDoc(e.dataTransfer.files[0]);
   }));
 
-  // 聊天输入
+  // 聊天输入（唯一入口）
   $("chatInput").addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); }
+    if (e.key === "Enter" && (!e.shiftKey || e.metaKey || e.ctrlKey)) { e.preventDefault(); sendChat(); }
   });
   $("chatInput").addEventListener("input", () => { autoresize(); updateComposer(); });
   $("btnSend").onclick = sendChat;
@@ -1273,8 +1383,10 @@ function boot() {
   });
 
   updateComposer();
+  renderCfgChips();
   loadHealth();
   refreshSessions();
+  showEmptyState();
 }
 
 boot();
