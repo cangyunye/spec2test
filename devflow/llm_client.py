@@ -121,7 +121,7 @@ class _MockLLM:
                     {"edge_id": "e-1", "from_node": "n-1", "to_node": "n-2",
                      "edge_type": "call", "condition": None, "is_modified": False},
                 ],
-                "mermaid_source": "graph TD\\n  n-1(Input) --> n-2(Process)",
+                "mermaid_source": "flowchart TD\n  n-1([Input]) --> n-2[Process]",
             }, ensure_ascii=False))
         # clarify_build_question / 其它：提示人工介入
         return AIMessage(content="(mock fallback) 当前 LLM 不可用，请人工补充需求。")

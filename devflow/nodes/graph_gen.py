@@ -65,7 +65,14 @@ SYSTEM_PROMPT_GRAPH = """你是一个资深软件架构师，擅长把需求拆�
    - condition —— 从 condition 节点出发的条件分支（每条边必须填 condition 字段）
 5. 代码引用 code_ref：阶段一没接 OpenCode 时，如果你能从需求文本推断出文件路径，就填；推断不出来就填 null。
    阶段二会由程序回填 code_ref。
-6. Mermaid 源码必须是合法的 flowchart TD 语法，能直接渲染；修改部分用:::modified 样式标记（你自己定义 classDef）。
+6. Mermaid 源码语法硬规则（违反会导致渲染失败）：
+   - 第一行必须是 `flowchart TD`，不要用 ``` 代码块包裹输出；
+   - 节点标签里含括号/引号/冒号/分号/竖线等特殊字符时，必须用双引号包裹整个标签：
+     正确 `n-1["表单校验(含必填项)"]`，错误 `n-1[表单校验(含必填项)]`；
+   - 边条件文字同理：`n-2 -->|"已支付(含税费)"| n-3`；
+   - 修改高亮：先用 `classDef modified fill:#f96,stroke:#333,stroke-width:2px;` 定义，
+     再用 `class n-2,n-3 modified;` 标记；禁止引用未定义的 class；
+   - 禁止用 end 作节点 id；每条语句独占一行；标签内不要出现换行。
 7. 逻辑图必须覆盖：输入 → 核心处理流程（含所有分支）→ 输出。
 8. 节点数量建议 3~8 个（MVP），复杂项目后续再扩展。
 9. 最终输出必须是一个合法 JSON 对象，仅包含 nodes / edges / mermaid_source 三个字段；
@@ -157,11 +164,24 @@ async def graph_generate_async(state: GlobalState) -> dict[str, Any]:
         d["code_ref"] = _normalize_code_ref(d.get("code_ref"))
         nodes.append(d)
 
+    # Mermaid 语法自检修复：剥代码块围栏、字面量 \n、特殊字符标签补引号、
+    # 缺声明行/classDef 自动补齐（详见 mermaid_fix 模块 docstring）
+    from ..mermaid_fix import mermaid_problems, sanitize_mermaid
+
+    mermaid_source = sanitize_mermaid(str(result["mermaid_source"] or ""))
+    residual = mermaid_problems(mermaid_source)
+    if residual:
+        # 修不干净的问题仅记录，不阻断流程（前端有源码视图兜底）
+        import logging
+        logging.getLogger(__name__).warning(
+            "mermaid 自检仍有问题（已尽力修复）: %s", "; ".join(residual)
+        )
+
     logic_graph = {
         "graph_id": new_graph_id(),
         "nodes": nodes,
         "edges": [_dump(e) for e in result["edges"]],
-        "mermaid_source": result["mermaid_source"],
+        "mermaid_source": mermaid_source,
     }
 
     # 先做一次校验；不通过的话 missing_fields（这里复用为错误列表）会有值
