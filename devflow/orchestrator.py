@@ -29,13 +29,13 @@ LangGraph 内部不阻塞等待 I/O。
   ... graph_generate
         │
         ▼
-  code_search_node ──▶ graph_render_node ──▶ code_gen_node
-        │ no_results              │               │
-        └→ abort/END              │               ▼
-                                 ▼          test_gen_node
-                             (回到 clarify)      │
-                                                 ▼
-                             abort/END ◄─ (retry 失败) ──▶ END(test_ok)
+  graph_review(门禁1) ── approve ──┬─ 有代码 ──▶ code_search ──▶ graph_render ──▶ code_gen
+        │                          └─ 无代码 ──▶ test_gen（仅需求模式：直接设计端到端用例）
+        └─ reject → graph_generate 重制图
+
+  code_gen ──▶ apply_code ──▶ test_gen ──▶ test_run ──▶ review(门禁2)
+  review reject ──┬─ 有代码 ──▶ code_gen 回修
+                 └─ 无代码 ──▶ test_gen 重新设计用例
 
   用 make_*_node(providers) 工厂注入 Provider 实例；
   节点函数是 async def，LangGraph 原生支持。
@@ -249,6 +249,19 @@ def _route_after_graph_generate(state: GlobalState) -> str:
     return "abort"
 
 
+def _route_after_graph_review(state: GlobalState) -> str:
+    """制图门禁后按业务路由 + 是否提供项目代码分流（仅需求模式分支）：
+      rejected          → 重制图
+      with_code（有代码）→ code_search 检索
+      no_code（无代码）  → 跳过检索/生成，直接 test_gen 设计端到端测试用例
+    """
+    if route_after_graph_review(state) == "rejected":
+        return "rejected"
+    from .schemas import has_project_code
+
+    return "with_code" if has_project_code(state.get("requirement")) else "no_code"
+
+
 def _route_after_code_search(state: GlobalState) -> str:
     """provider_nodes.route_after_code_search 已先算业务标签；本函数再叠 error→retry/abort。"""
     business = route_after_code_search(state)
@@ -412,7 +425,11 @@ def build_graph_with_providers(providers: Providers | None = None):
     """构建包含代码检索/渲染/生成/落盘/测试全链路的 LangGraph。
 
     与 build_graph() 的区别：
-      - graph_generate 后不再直接 END，而是进入 code_search_node
+      - graph_generate 后不再直接 END，而是进入制图门禁 graph_review
+      - 门禁 approve 后按是否提供项目代码分流（schemas.has_project_code）：
+          有代码 → code_search → graph_render → code_gen → apply_code → test_gen
+          无代码 → 直接 test_gen（仅需求模式：基于需求+逻辑图设计端到端测试用例）
+      - 终审 review 的 reject 同样分流：代码模式回 code_gen；仅需求模式回 test_gen
       - Provider 驱动的阶段二/三节点 + 本地执行闭环节点（apply_code / test_run）
       - 路由：
           检索成功 → 渲染；检索可重试错 → retry；检索不可重试或真没结果 → 回澄清
@@ -420,7 +437,7 @@ def build_graph_with_providers(providers: Providers | None = None):
           落盘成功/降级 → test_gen；diff 坏了可回炉一次 → code_gen
           测试设计 → test_run 真实执行；通过 → 人工验收；
           失败 → 回 code_gen（带失败摘要，上限 TEST_RUN_MAX_FIX_ROUNDS）；
-          超限带失败报告 → 人工验收；未执行（跳过）→ 人工验收
+          超限带失败报告 → 人工验收；未执行（跳过/仅需求模式）→ 人工验收
     """
     p = providers or get_providers()
     checkpointer = SqliteSaver(_get_sqlite_conn())
@@ -495,12 +512,13 @@ def build_graph_with_providers(providers: Providers | None = None):
         },
     )
 
-    # 制图门禁：approve → 代码检索；reject → 重制图
+    # 制图门禁：approve → 按有无项目代码分流（有代码先检索；无代码直接测试设计）；reject → 重制图
     workflow.add_conditional_edges(
         "graph_review",
-        route_after_graph_review,
+        _route_after_graph_review,
         {
-            "approved": "code_search",
+            "with_code": "code_search",
+            "no_code": "test_gen",  # 仅需求模式：跳过检索/生成，直接出端到端测试用例
             "rejected": "graph_generate",
         },
     )
@@ -569,13 +587,14 @@ def build_graph_with_providers(providers: Providers | None = None):
         },
     )
 
-    # 人工验收：approve → END；reject → 回代码生成
+    # 人工验收：approve → END；reject → 代码模式回代码生成 / 仅需求模式回测试用例设计
     workflow.add_conditional_edges(
         "review",
         route_after_review,
         {
             "approved": END,
             "rejected": "code_gen",
+            "rejected_test": "test_gen",
         },
     )
 

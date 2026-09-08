@@ -164,6 +164,8 @@ class MockTestGen(TestGenProvider):
         modified_branches_only: bool = True,
         logic_graph: dict[str, Any] | None = None,
         session_id: str | None = None,
+        requirement: dict[str, Any] | None = None,
+        feedback: str | None = None,
     ) -> TestReport:
         edge_ids: list[str] = []
         if logic_graph:
@@ -175,6 +177,8 @@ class MockTestGen(TestGenProvider):
                 {
                     "test_file": f"tests/test_{safe}.py",
                     "test_symbol": f"test_{safe}_ok",
+                    "case_id": f"TC-{i + 1:03d}",
+                    "case_type": "正向",
                     "line_start": 10 + i,
                     "line_end": 18 + i,
                     "code_snippet": (
@@ -199,4 +203,6 @@ class MockTestGen(TestGenProvider):
             "test_cases": cases,
             "run": run,
             "target_symbols": target_symbols,
+            "overview": "Mock 演示模式：用例为模板数据，接入真实 LLM 后按系统化设计策略产出。",
+            "self_check": [],
         }

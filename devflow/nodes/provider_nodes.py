@@ -381,30 +381,50 @@ def make_code_gen_node(providers: Providers | None = None):
 def make_test_gen_node(providers: Providers | None = None):
     """阶段三：测试生成节点。
 
-    读取 state: requirement, logic_graph, code_changes, opencode_sessions.test_gen
+    读取 state: requirement, logic_graph, code_changes, review_feedback,
+                opencode_sessions.test_gen
     写入 state: test_report, opencode_sessions.test_gen, current_stage + SPEC 5 错误字段
+
+    两种模式：
+      代码模式（has_project_code）：测试目标来自 code_changes；为空则报错回炉。
+      仅需求模式（无项目代码）：跳过代码检索/生成，直接基于需求 + 逻辑图设计
+      端到端测试场景；目标从 target_modules / 逻辑图改动节点推导。
     """
     p = providers or get_providers()
 
     async def test_gen_node_async(state: GlobalState) -> dict[str, Any]:
+        from ..schemas import has_project_code
+
         req = state.get("requirement") or {}
         project_root = req.get("project_root", "")
         logic_graph = state.get("logic_graph") or {}
         code_changes = state.get("code_changes") or []
         sessions = state.get("opencode_sessions") or {}
         session_id = sessions.get("test_gen")
+        requirement_only = not has_project_code(req)
 
-        # 从 code_changes 提取目标符号
-        target_symbols = [
-            f"{ch['file_path']}"
-            for ch in code_changes
-            if ch.get("file_path")
-        ]
-        if not target_symbols:
-            err = wrap_exception(
-                ValueError("code_changes 为空，无测试目标"), context="test_gen"
-            )
-            return _apply_error_out("test_gen", state, err, stage_when_fail="test")
+        if requirement_only:
+            # 仅需求模式：目标 = 需求里的模块列表，缺省则取逻辑图改动节点（兜底全部节点）
+            target_symbols = [m for m in (req.get("target_modules") or []) if m]
+            if not target_symbols:
+                nodes = logic_graph.get("nodes") or []
+                modified = [n.get("label") for n in nodes if n.get("is_modified") and n.get("label")]
+                target_symbols = modified or [n.get("label") for n in nodes if n.get("label")]
+                target_symbols = list(dict.fromkeys(target_symbols))
+            if not target_symbols:
+                target_symbols = ["端到端场景"]
+        else:
+            # 代码模式：从 code_changes 提取目标符号
+            target_symbols = [
+                f"{ch['file_path']}"
+                for ch in code_changes
+                if ch.get("file_path")
+            ]
+            if not target_symbols:
+                err = wrap_exception(
+                    ValueError("code_changes 为空，无测试目标"), context="test_gen"
+                )
+                return _apply_error_out("test_gen", state, err, stage_when_fail="test")
 
         try:
             report = await p.test_gen.generate(
@@ -414,6 +434,8 @@ def make_test_gen_node(providers: Providers | None = None):
                 modified_branches_only=True,
                 logic_graph=logic_graph,
                 session_id=session_id,
+                requirement=req if requirement_only else None,
+                feedback=state.get("review_feedback"),
             )
         except DevFlowError as e:
             return _apply_error_out(

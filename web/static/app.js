@@ -9,10 +9,16 @@ const $ = (id) => document.getElementById(id);
 const S = {
   tid: null, running: false, gate: null, gatePayload: null,
   stage: "clarify", startedAt: 0, lastNodeAt: 0, timer: null,
-  graph: null, report: null, health: null,
+  graph: null, report: null, health: null, noCode: false,
   autoScroll: true, live: new Map(), theme: document.documentElement.dataset.theme || "dark",
   mermaidReady: false,
 };
+
+/* 是否提供项目代码：true=代码模式（检索/生成）；false=仅需求模式（直接出端到端用例） */
+function reqNoCode(req) {
+  req = req || {};
+  return !(req.existing_code_accessible || String(req.project_root || "").trim());
+}
 
 /* ── 小工具 ──────────────────────────────────────────── */
 
@@ -137,7 +143,15 @@ function buildStepper() {
 }
 
 function setStep(idx, running) {
+  // 仅需求模式：代码检索/代码生成两步显示为跳过，不参与 done/active 标记
+  const skipped = (id) => S.noCode && (id === "search" || id === "code");
   document.querySelectorAll("#stepper .step").forEach((el, i) => {
+    if (skipped(el.dataset.s)) {
+      el.classList.add("skip");
+      el.classList.remove("done", "active", "running");
+      return;
+    }
+    el.classList.remove("skip");
     el.classList.toggle("done", i < idx || (idx === 7 && i === 7));
     el.classList.toggle("active", i === idx && idx !== 7);
     el.classList.toggle("running", !!(running && i === idx));
@@ -445,15 +459,32 @@ const tFilter = { tier: "all", prio: "all", q: "" };
 
 /* 兼容两种 case 形态：LLM 分级场景 / 代码级测试（mock provider） */
 function normCase(c) {
-  if (c.title) return c;
+  if (c.title) {
+    return {
+      case_id: c.case_id || "",
+      tier: c.tier || "functional",
+      priority: c.priority || "P2",
+      case_type: c.case_type || "",
+      title: c.title,
+      target: c.target || "",
+      precondition: c.precondition || "",
+      steps: c.steps || "",
+      expected: c.expected || "",
+      data_requirement: c.data_requirement || "",
+      rationale: c.rationale || "",
+    };
+  }
   return {
+    case_id: c.case_id || "",
     tier: c.tier || "functional",
     priority: c.priority || "P2",
+    case_type: c.case_type || "",
     title: c.test_symbol || c.symbol || "(未命名测试)",
     target: c.test_file || c.target || "",
     precondition: c.precondition || "",
     steps: c.code_snippet || c.steps || "",
     expected: c.expected || "",
+    data_requirement: "",
     rationale: c.covered_edges ? `覆盖边：${c.covered_edges.join("、")}` : (c.rationale || ""),
   };
 }
@@ -462,6 +493,14 @@ function renderTestCard(report) {
   S.report = report;
   const cases = (report.test_cases || []).map(normCase);
   const { card, actions } = cardShell(`TEST DESIGN · 测试场景 · ${cases.length}`);
+
+  // 测试概述（总-分结构的总文档；方法论来自 doc-based/functional testcase-generator skills）
+  if (report.overview || (report.self_check || []).length) {
+    const ov = h("div", "card-note t-overview");
+    if (report.overview) ov.appendChild(h("div", null, "📋 " + report.overview));
+    (report.self_check || []).forEach((s) => ov.appendChild(h("div", null, "✓ " + s)));
+    card.appendChild(ov);
+  }
 
   // 过滤器
   const filters = h("div", "t-filters");
@@ -497,7 +536,7 @@ function renderTestCard(report) {
   const wrap = h("div", "t-wrap");
   const table = h("table", "t-table");
   table.appendChild(h("thead", null, "")).innerHTML =
-    "<tr><th>层级</th><th>优先级</th><th>标题</th><th>目标</th><th>前置</th><th>步骤</th><th>预期</th><th>依据</th></tr>";
+    "<tr><th>标识</th><th>层级</th><th>优先级</th><th>类型</th><th>标题</th><th>所属模块</th><th>前置</th><th>步骤</th><th>预期</th><th>依据</th></tr>";
   const tbody = h("tbody");
   table.appendChild(tbody);
   wrap.appendChild(table);
@@ -510,7 +549,7 @@ function renderTestCard(report) {
     if (tFilter.tier !== "all" && c.tier !== tFilter.tier) return false;
     if (tFilter.prio !== "all" && String(c.priority).toUpperCase() !== tFilter.prio) return false;
     if (tFilter.q) {
-      const blob = [c.title, c.target, c.steps, c.expected, c.precondition].join(" ").toLowerCase();
+      const blob = [c.case_id, c.case_type, c.title, c.target, c.steps, c.expected, c.precondition].join(" ").toLowerCase();
       if (!blob.includes(tFilter.q)) return false;
     }
     return true;
@@ -520,18 +559,20 @@ function renderTestCard(report) {
     const shown = cases.filter(pass);
     if (!shown.length) {
       tbody.appendChild(h("tr", null, "")).appendChild(
-        Object.assign(document.createElement("td"), { colSpan: 8, className: "t-empty", textContent: "没有匹配的测试场景" }));
+        Object.assign(document.createElement("td"), { colSpan: 10, className: "t-empty", textContent: "没有匹配的测试场景" }));
       count.textContent = "0 条";
       return;
     }
     shown.forEach((c) => {
       const tr = h("tr");
+      tr.appendChild(h("td", "mono", c.case_id || "—"));
       const tdTier = h("td");
       tdTier.appendChild(h("span", `tier ${c.tier || ""}`, TIER_NAME[c.tier] || c.tier || "—"));
       tr.appendChild(tdTier);
       const tdP = h("td");
       tdP.appendChild(h("span", `prio ${String(c.priority).toUpperCase()}`, String(c.priority || "—").toUpperCase()));
       tr.appendChild(tdP);
+      tr.appendChild(h("td", null, c.case_type || "—"));
       tr.appendChild(h("td", "t-title", c.title || "—"));
       [c.target, c.precondition, c.steps, c.expected, c.rationale].forEach((v) =>
         tr.appendChild(h("td", null, v || "—")));
@@ -543,8 +584,8 @@ function renderTestCard(report) {
 
   // 导出
   actions.appendChild(miniBtn("⭳ CSV", () => exportTestCSV(cases), "导出 CSV（Excel 可开）"));
-  actions.appendChild(miniBtn("⭳ MD", () => exportTestMD(cases), "导出 Markdown"));
-  actions.appendChild(miniBtn("⧉ 复制", () => copyText(testToMD(cases), "测试场景 Markdown 已复制")));
+  actions.appendChild(miniBtn("⭳ MD", () => exportTestMD(cases, report), "导出 Markdown（总-分结构）"));
+  actions.appendChild(miniBtn("⧉ 复制", () => copyText(testToMD(cases, report), "测试用例文档已复制")));
 
   feedAppend(card);
   renderExportBar();
@@ -552,22 +593,66 @@ function renderTestCard(report) {
 }
 
 function testToCSV(cases) {
-  const head = ["层级", "优先级", "标题", "目标", "前置条件", "步骤", "预期结果", "设计依据"];
+  const head = ["标识", "层级", "优先级", "类型", "标题", "所属模块", "前置条件", "步骤", "预期结果", "数据要求", "设计依据"];
   const q = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
   const rows = cases.map((c) =>
-    [TIER_NAME[c.tier] || c.tier, c.priority, c.title, c.target, c.precondition, c.steps, c.expected, c.rationale].map(q).join(","));
+    [c.case_id, TIER_NAME[c.tier] || c.tier, c.priority, c.case_type, c.title, c.target,
+     c.precondition, c.steps, c.expected, c.data_requirement, c.rationale].map(q).join(","));
   return "\uFEFF" + [head.map(q).join(","), ...rows].join("\r\n");
 }
-function testToMD(cases) {
-  const lines = ["| 层级 | 优先级 | 标题 | 目标 | 前置 | 步骤 | 预期 | 依据 |",
-    "|---|---|---|---|---|---|---|---|"];
+
+/* 总-分结构 Markdown（方法论来自 doc-based/functional testcase-generator skills）：
+   概述（INDEX：范围/统计/口径）→ 分模块用例清单 → 质量自检结论 */
+function testToMD(cases, report) {
+  report = report || {};
+  const lines = ["# 测试用例文档", ""];
+
+  // ── 总文档：概述 + 公共口径 ──
+  lines.push("## 1. 概述（INDEX）", "");
+  if (report.overview) lines.push(report.overview, "");
+  const byTier = {};
+  cases.forEach((c) => { const t = TIER_NAME[c.tier] || c.tier || "其他"; byTier[t] = (byTier[t] || 0) + 1; });
+  const tierStat = Object.entries(byTier).map(([t, n]) => `${t} ${n}`).join(" · ");
+  const p0 = cases.filter((c) => String(c.priority).toUpperCase() === "P0").length;
+  lines.push(
+    `- 用例总数：${cases.length}（${tierStat || "—"}；P0 ${p0} 条）`,
+    "- 优先级口径：P0 核心路径与关键校验 · P1 边界与重要异常 · P2 次要异常与体验",
+    "- 类型口径：正向 / 反向 / 边界值 / 等价类 / 状态流转 / 场景法 / 性能 / 安全",
+    "",
+  );
+
+  // ── 分文档：按所属模块分组的用例清单 ──
+  const groups = new Map();
+  cases.forEach((c) => {
+    const mod = c.target || "通用";
+    if (!groups.has(mod)) groups.set(mod, []);
+    groups.get(mod).push(c);
+  });
+  lines.push("## 2. 分模块用例", "");
   const cell = (v) => String(v ?? "").replace(/\|/g, "\\|").replace(/\n/g, " ");
-  cases.forEach((c) => lines.push(
-    "| " + [TIER_NAME[c.tier] || c.tier, c.priority, c.title, c.target, c.precondition, c.steps, c.expected, c.rationale].map(cell).join(" | ") + " |"));
+  let gi = 0;
+  groups.forEach((modCases, mod) => {
+    gi += 1;
+    lines.push(`### 2.${gi} ${mod}`, "",
+      "| 标识 | 层级 | 优先级 | 类型 | 标题 | 前置 | 步骤 | 预期 | 依据 |",
+      "|---|---|---|---|---|---|---|---|---|");
+    modCases.forEach((c) => lines.push(
+      "| " + [c.case_id, TIER_NAME[c.tier] || c.tier, c.priority, c.case_type, c.title,
+       c.precondition, c.steps, c.expected, c.rationale].map(cell).join(" | ") + " |"));
+    lines.push("");
+  });
+
+  // ── 质量自检 ──
+  const checks = report.self_check || [];
+  if (checks.length) {
+    lines.push("## 3. 质量自检", "");
+    checks.forEach((s) => lines.push(`- ${s}`));
+    lines.push("");
+  }
   return lines.join("\n");
 }
 function exportTestCSV(cases) { download(`devflow-tests-${S.tid || "export"}.csv`, testToCSV(cases), "text/csv;charset=utf-8"); toast("已导出 CSV", `${cases.length} 条测试场景`); }
-function exportTestMD(cases) { download(`devflow-tests-${S.tid || "export"}.md`, testToMD(cases)); toast("已导出 Markdown", `${cases.length} 条测试场景`); }
+function exportTestMD(cases, report) { download(`devflow-tests-${S.tid || "export"}.md`, testToMD(cases, report)); toast("已导出 Markdown", `${cases.length} 条测试场景`); }
 
 function copyText(text, okMsg) {
   const done = () => toast("已复制", okMsg);
@@ -719,7 +804,8 @@ function onStreamEnd(e) {
   } else if (S.stage === "done") {
     setStep(7, false);
     addDivider("全流程完成 ✦", "产物可导出");
-    toast("全流程完成", "逻辑图、代码与测试场景已就绪，可在导出条打包带走。");
+    toast("全流程完成",
+      S.noCode ? "逻辑图与端到端测试用例已就绪，可在导出条打包带走。" : "逻辑图、代码与测试场景已就绪，可在导出条打包带走。");
     updateComposer();
   } else {
     updateComposer();
@@ -729,17 +815,29 @@ function onStreamEnd(e) {
 /* ── 门禁 ────────────────────────────────────────────── */
 
 const GATE_META = {
-  graph_review: { n: 1, title: "制图评审：逻辑图与需求对齐了吗？", sub: "REJECT 将回传意见并自动重制图" },
-  human_review: { n: 2, title: "人工验收：产物达到验收标准了吗？", sub: "REJECT 将回传意见并回到代码生成" },
+  graph_review: { n: 1, title: "制图评审：逻辑图与需求对齐了吗？" },
+  human_review: { n: 2, title: "人工验收：产物达到验收标准了吗？" },
 };
+
+function gateSubText(gate) {
+  if (gate === "graph_review") {
+    return S.noCode
+      ? "未提供项目代码 · APPROVE 将直接进入端到端测试用例设计"
+      : "REJECT 将回传意见并自动重制图";
+  }
+  return S.noCode
+    ? "REJECT 将回传意见并重新设计测试用例"
+    : "REJECT 将回传意见并回到代码生成";
+}
 
 function openGate(gate, payload) {
   S.gate = gate;
   S.gatePayload = payload || {};
-  const meta = GATE_META[gate] || { n: "?", title: "确认", sub: "" };
+  if (S.gatePayload.mode) S.noCode = S.gatePayload.mode === "no_code";
+  const meta = GATE_META[gate] || { n: "?", title: "确认" };
   $("gateTag").textContent = `GATE ${meta.n}/2`;
   $("gateTitle").textContent = meta.title;
-  $("gateSub").textContent = meta.sub;
+  $("gateSub").textContent = gateSubText(gate);
   $("gateComment").value = "";
   $("gateCommentWrap").classList.add("hidden");
   $("btnGateSubmit").classList.add("hidden");
@@ -818,12 +916,12 @@ function gateReviewBody(p) {
   stats.appendChild(stat("测试失败", ts.failed ?? "—", Number(ts.failed) > 0));
   stats.appendChild(stat("覆盖率", ts.coverage_pct !== undefined ? ts.coverage_pct + "%" : "—"));
   stats.appendChild(stat("测试场景", ts.case_count ?? "—"));
-  // 执行闭环：测试数字是否来自真实 pytest
+  // 执行闭环：测试数字是否来自真实 pytest（仅需求模式下不执行属预期，不标红）
   stats.appendChild(
     stat(
       "测试执行",
       ts.executed ? `pytest ✓ ${ts.duration_sec ?? 0}s` : `未执行${ts.skip_reason ? " · " + ts.skip_reason : ""}`,
-      ts.executed ? Number(ts.failed) > 0 || Number(ts.failure_count) > 0 : true,
+      ts.executed ? Number(ts.failed) > 0 || Number(ts.failure_count) > 0 : !S.noCode,
     ),
   );
   wrap.appendChild(stats);
@@ -940,7 +1038,8 @@ async function openSession(tid) {
     if (vals.logic_graph) renderGraphCard(vals.logic_graph);
     if (vals.code_changes?.length) renderChangesCard(vals.code_changes);
     if (vals.test_report) renderTestCard(vals.test_report);
-    // 阶段
+    // 阶段（先定模式再画步骤条，仅需求模式跳过检索/生成两步）
+    S.noCode = reqNoCode(vals.requirement);
     S.stage = snap.stage || "clarify";
     setStep(stepIdxForStage(S.stage), false);
     if (S.stage === "done" && !(snap.next || []).length) setStep(7, false);
@@ -950,6 +1049,7 @@ async function openSession(tid) {
       const g = vals.logic_graph || {};
       const req = vals.requirement || {};
       openGate("graph_review", {
+        mode: S.noCode ? "no_code" : "with_code",
         mermaid_source: g.mermaid_source || "",
         nodes: (g.nodes || []).map((n) => ({ node_id: n.node_id, label: n.label, node_type: n.node_type, is_modified: !!n.is_modified, code_ref: n.code_ref })),
         node_count: (g.nodes || []).length, edge_count: (g.edges || []).length,
@@ -962,12 +1062,17 @@ async function openSession(tid) {
     } else if (next.includes("review")) {
       const run = (vals.test_report || {}).run || {};
       openGate("human_review", {
+        mode: S.noCode ? "no_code" : "with_code",
         code_changes: vals.code_changes || [],
         code_changes_count: (vals.code_changes || []).length,
         test_summary: {
           passed: run.passed ?? "—", failed: run.failed ?? "—",
           coverage_pct: run.coverage_pct ?? 0,
           case_count: (vals.test_report?.test_cases || []).length,
+          executed: !!run.executed,
+          skip_reason: run.skip_reason,
+          duration_sec: run.duration_sec ?? 0,
+          failure_count: (Number(run.failed) || 0) + (Number(run.errors) || 0),
         },
       });
     }
@@ -1092,6 +1197,7 @@ function resetFeed() {
   S.autoScroll = true;
   liveClearAll();
   S.stage = "clarify";
+  S.noCode = false;
   setStep(0, false);
 }
 
@@ -1102,7 +1208,7 @@ function showEmptyState() {
   d.id = "feedEmpty";
   d.appendChild(h("div", "fe-mark"));
   d.appendChild(h("h2", null, "从一段需求，到一组测试场景"));
-  d.appendChild(h("p", null, "DevFlow 会澄清需求、生成可机读逻辑图、生成代码与测试设计；关键节点由你把关。在下方输入框描述需求即可开始。"));
+  d.appendChild(h("p", null, "DevFlow 会澄清需求、生成可机读逻辑图与测试场景；提供项目代码时还会检索代码、生成代码并真实执行测试，不提供代码则直接基于需求设计端到端测试用例。关键节点由你把关。在下方输入框描述需求即可开始。"));
   const ol = h("ol", "fe-steps");
   [["01", "输入需求，回答 AI 追问"], ["02", "评审逻辑图，通过或驳回"], ["03", "验收产物，导出测试场景"]]
     .forEach(([n, t]) => {

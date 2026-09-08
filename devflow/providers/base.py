@@ -160,7 +160,11 @@ class CodeEditProvider(CodeProvider, ABC):
 
 
 class TestGenProvider(CodeProvider, ABC):
-    """阶段三：测试生成。对应 SPEC 2.4.3。"""
+    """阶段三：测试生成。对应 SPEC 2.4.3。
+
+    generate 除代码级测试外也支持「仅需求模式」：project_root 为空、
+    通过 requirement + logic_graph 直接设计端到端测试场景。
+    """
 
     name: ClassVar[str] = "test_gen_base"
 
@@ -174,5 +178,11 @@ class TestGenProvider(CodeProvider, ABC):
         modified_branches_only: bool = True,
         logic_graph: dict[str, Any] | None = None,
         session_id: str | None = None,
+        requirement: dict[str, Any] | None = None,
+        feedback: str | None = None,
     ) -> TestReport:
-        """生成针对 target_symbols 的测试并运行，返回完整测试报告。"""
+        """生成针对 target_symbols 的测试并运行，返回完整测试报告。
+
+        requirement: 结构化需求（仅需求模式下的主要设计依据，代码模式可忽略）
+        feedback:    人工验收驳回的意见，重新设计用例时需针对性修正
+        """

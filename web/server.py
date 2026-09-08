@@ -284,13 +284,41 @@ def _build_export_md(vals: dict[str, Any]) -> str:
             lines += ["```diff", ch.get("diff", ""), "```"]
     if report:
         run = report.get("run") or {}
-        lines += ["", f"## 测试场景（passed={run.get('passed', 0)} failed={run.get('failed', 0)}）", "",
-                  "| 层级 | 优先级 | 标题 | 目标 | 前置 | 步骤 | 预期 | 依据 |",
-                  "|---|---|---|---|---|---|---|---|"]
-        for c in report.get("test_cases") or []:
-            cells = [str(c.get(k, "") or "").replace("|", "\\|").replace("\n", " ")
-                     for k in ("tier", "priority", "title", "target", "precondition", "steps", "expected", "rationale")]
-            lines.append("| " + " | ".join(cells) + " |")
+        cases = report.get("test_cases") or []
+        lines += ["", "## 测试用例文档", ""]
+
+        # ── 总文档：概述 + 公共口径（方法论来自 doc-based/functional testcase-generator skills）──
+        if report.get("overview"):
+            lines += [report["overview"], ""]
+        lines += [
+            f"用例总数：{len(cases)}"
+            f"（passed={run.get('passed', 0)} failed={run.get('failed', 0)}）",
+            "- 优先级口径：P0 核心路径与关键校验 · P1 边界与重要异常 · P2 次要异常与体验",
+            "- 类型口径：正向 / 反向 / 边界值 / 等价类 / 状态流转 / 场景法 / 性能 / 安全",
+            "",
+        ]
+
+        # ── 分文档：按所属模块分组的用例清单 ──
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for c in cases:
+            groups.setdefault(str(c.get("target") or "通用"), []).append(c)
+        for gi, (mod, mod_cases) in enumerate(groups.items(), start=1):
+            lines += [f"### 2.{gi} {mod}", "",
+                      "| 标识 | 层级 | 优先级 | 类型 | 标题 | 前置 | 步骤 | 预期 | 依据 |",
+                      "|---|---|---|---|---|---|---|---|---|"]
+            for c in mod_cases:
+                cells = [str(c.get(k, "") or "").replace("|", "\\|").replace("\n", " ")
+                         for k in ("case_id", "tier", "priority", "case_type", "title",
+                                   "precondition", "steps", "expected", "rationale")]
+                lines.append("| " + " | ".join(cells) + " |")
+            lines.append("")
+
+        # ── 质量自检结论 ──
+        checks = report.get("self_check") or []
+        if checks:
+            lines += ["### 质量自检", ""]
+            lines += [f"- {s}" for s in checks]
+            lines.append("")
     return "\n".join(lines)
 
 

@@ -58,6 +58,45 @@ _MOCK_DEMO_REQUIREMENT: dict[str, Any] = {
     "acceptance_criteria": ["四则运算结果正确", "除零给出错误提示", "GUI 可启动"],
 }
 
+# Mock 兜底用的测试设计模板（response_type=test_design）：按系统化设计策略
+# 产出 正向/边界值/反向 三类演示用例，保证无 Key 演示模式下用例表有完整结构。
+_MOCK_DEMO_TEST_DESIGN: dict[str, Any] = {
+    "overview": "Mock 演示：围绕需求要点设计端到端测试场景（功能优先，正向/反向/边界结合）。",
+    "scenarios": [
+        {
+            "tier": "functional", "priority": "P0",
+            "title": "用户按主流程完成一次核心操作，结果符合验收标准",
+            "case_type": "正向", "target": "核心流程",
+            "precondition": "应用已启动，环境就绪",
+            "steps": "1. 打开应用\n2. 按主流程执行一次核心操作",
+            "expected": "输出与验收标准一致，界面/状态正确更新",
+            "rationale": "核心 happy path",
+        },
+        {
+            "tier": "functional", "priority": "P1",
+            "title": "边界输入（0 / 空 / 超长）被正确处理",
+            "case_type": "边界值", "target": "输入边界",
+            "steps": "分别输入 0、空值、超长文本并提交",
+            "expected": "给出明确提示，不崩溃、不产生脏数据",
+            "rationale": "边界值策略",
+        },
+        {
+            "tier": "security", "priority": "P0",
+            "title": "非法/越权输入被拒绝且无副作用",
+            "case_type": "反向", "target": "异常与权限",
+            "steps": "输入非法字符或执行越权操作",
+            "expected": "操作被拒绝并提示，状态不变",
+            "rationale": "反向校验",
+        },
+    ],
+    "self_check": [
+        "核心功能均有正向用例",
+        "边界值与反向场景已覆盖",
+        "用例类型与优先级已标注",
+    ],
+    "summary": "Mock 演示：3 条场景（正向/边界值/反向）",
+}
+
 
 class _MockLLM:
     """SPEC 5.3 最后兜底：不依赖任何外部服务，始终返回模板 JSON / 文本。"""
@@ -65,6 +104,8 @@ class _MockLLM:
     async def ainvoke(self, messages: list[BaseMessage], **_: Any) -> BaseMessage:
         # 依据 prompt 猜需求：要求 extract requirement 时给空模板，graph 给模板
         joined = "\n".join(str(getattr(m, "content", "")) for m in messages)
+        if "测试架构师" in joined:
+            return AIMessage(content=json.dumps(_MOCK_DEMO_TEST_DESIGN, ensure_ascii=False))
         if "requirement" in joined.lower() and "json" in joined.lower():
             return AIMessage(content=json.dumps(_MOCK_DEMO_REQUIREMENT, ensure_ascii=False))
         if any(kw in joined.lower() for kw in ("logic", "graph", "逻辑图", "制图", "mermaid")):
@@ -114,7 +155,13 @@ class _MockStructured:
                     "mermaid_source": "graph TD\n  n-1(Input) --> n-2(Process)",
                 }
 
-        # 中英文关键词都匹配
+        class _TestDesignMocker:
+            def model_dump(self, mode: str = "python") -> dict[str, Any]:
+                return json.loads(json.dumps(_MOCK_DEMO_TEST_DESIGN, ensure_ascii=False))
+
+        # 中英文关键词都匹配（test_design 提示词含"测试架构师"，须先于制图分支判断）
+        if "测试架构师" in joined:
+            return _TestDesignMocker()
         if any(kw in joined_lower for kw in ("logic", "graph", "逻辑图", "制图", "mermaid")):
             return _GraphMocker()
         return _ReqMocker()

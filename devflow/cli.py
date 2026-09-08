@@ -110,6 +110,8 @@ def _print_stage_report(state: dict[str, Any]) -> None:
         table.add_row("Last Error", f"[red]{err}[/]")
 
     req = state.get("requirement") or {}
+    from .schemas import has_project_code
+
     filled = sum(
         1 for v in [
             req.get("project_root"),
@@ -121,7 +123,10 @@ def _print_stage_report(state: dict[str, Any]) -> None:
             (req.get("io_constraints") or {}).get("output"),
         ] if v
     )
-    table.add_row("Requirement", f"{filled}/7 字段已填")
+    # 仅需求模式下 project_root / target_modules 不计入应填字段
+    total = 7 if has_project_code(req) else 5
+    mode_tag = "" if total == 7 else "（仅需求模式）"
+    table.add_row("Requirement", f"{filled}/{total} 字段已填{mode_tag}")
 
     graph = state.get("logic_graph")
     if graph:
@@ -399,20 +404,31 @@ def _interactive_loop(tid: str, *, full: bool = False) -> None:
 
         if "review" in next_nodes or "graph_review" in next_nodes:
             # 人工门禁中断：graph_review=确认图↔需求对齐；review=终审验收
+            from .schemas import has_project_code
+
+            no_code = not has_project_code(snap.get("requirement"))
             if "graph_review" in next_nodes:
+                approve_hint = (
+                    "直接进入端到端测试用例设计（未提供项目代码）" if no_code
+                    else "进入代码检索"
+                )
                 gate_panel = Panel(
                     "[bold]请确认制图与需求对齐：[/]\n"
-                    "  输入 [green]approve[/] 制图通过，进入代码检索\n"
+                    f"  输入 [green]approve[/] 制图通过，{approve_hint}\n"
                     "  输入 [red]reject[/] 回退重新制图",
                     title="制图评审",
                     border_style="cyan",
                 )
                 prompt_label = "制图确认"
             else:
+                reject_hint = (
+                    "回退到测试用例设计重新出用例" if no_code
+                    else "回退到代码生成阶段"
+                )
                 gate_panel = Panel(
                     "[bold]请验收以下产物：[/]\n"
                     "  输入 [green]approve[/] 接受变更并结束流程\n"
-                    "  输入 [red]reject[/] 拒绝并回退到代码生成阶段",
+                    f"  输入 [red]reject[/] 拒绝并{reject_hint}",
                     title="人工验收",
                     border_style="yellow",
                 )
@@ -427,7 +443,8 @@ def _interactive_loop(tid: str, *, full: bool = False) -> None:
             if decision not in ("approve", "reject"):
                 console.print("[yellow]![/] 请输入 approve 或 reject")
                 continue
-            _resume_from_interrupt(graph, tid, decision)
+            gate = "graph_review" if "graph_review" in next_nodes else "review"
+            _resume_from_interrupt(graph, tid, decision, gate=gate)
             continue
 
         # ── 读用户输入 ─────────────────────────────────
@@ -531,12 +548,13 @@ def _render_event(event: dict) -> None:
             )
 
 
-def _resume_from_interrupt(graph, tid: str, decision: str) -> None:
+def _resume_from_interrupt(graph, tid: str, decision: str, *, gate: str = "review") -> None:
     """从门禁中断恢复：传 approve/reject 给 graph。
 
-    首个 stage 事件 = 门节点返回值（search/graph/done/code），其余 stage 是
-    下游节点推进标记，忽略；artifact/question/error 照常渲染（
-    制图门后的代码检索/生成/测试产物发生在 resume 阶段）。
+    gate 区分是制图门（graph_review）还是终审（review），用于把恢复后的首个
+    stage 事件翻译成模式感知的提示（代码模式 / 仅需求模式走不同分支）。
+    首个 stage 事件 = 门节点返回值（search/graph/done/code/test），其余 stage 是
+    下游节点推进标记，忽略；artifact/question/error 照常渲染。
     """
     from langgraph.types import Command
 
@@ -555,6 +573,10 @@ def _resume_from_interrupt(graph, tid: str, decision: str) -> None:
                         console.print("[green]✓[/] 验收通过，流程完成！")
                     elif stage == "code":
                         console.print("[yellow]![/] 验收被拒绝，回退到代码生成阶段")
+                    elif stage == "test" and gate == "review":
+                        console.print("[yellow]![/] 验收被拒绝，回退到测试用例设计")
+                    elif stage == "test" and gate == "graph_review":
+                        console.print("[green]✓[/] 制图已确认，进入端到端测试用例设计（仅需求模式）")
                     elif stage == "search":
                         console.print("[green]✓[/] 制图已确认，进入代码检索阶段")
                     elif stage == "graph":

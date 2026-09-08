@@ -180,10 +180,32 @@ async def test_test_gen_node_writes_report():
 
 @pytest.mark.asyncio
 async def test_test_gen_node_empty_changes():
+    """代码模式（提供了项目代码）下 code_changes 为空 → 报错回炉。"""
     node = make_test_gen_node(_mock_providers())
-    state = {"requirement": {}, "code_changes": []}
+    state = {"requirement": {"project_root": "/workspace"}, "code_changes": []}
     out = await node.async_version(state)  # type: ignore[arg-type]
     assert "code_changes" in (out["last_error"] or "")
+
+
+@pytest.mark.asyncio
+async def test_test_gen_node_requirement_only_needs_no_changes():
+    """仅需求模式（未提供代码）：code_changes 为空是常态，直接用需求+逻辑图设计用例。"""
+    node = make_test_gen_node(_mock_providers())
+    state = {
+        "requirement": {
+            "project_context": "计算器",
+            "target_modules": ["calc.py"],
+            "io_constraints": {"input": "x", "output": "y"},
+            "edge_cases": ["除零"],
+            "acceptance_criteria": ["结果正确"],
+        },
+        "logic_graph": {},
+        "code_changes": [],
+        "opencode_sessions": {},
+    }
+    out = await node.async_version(state)  # type: ignore[arg-type]
+    assert out.get("last_error_code") is None
+    assert out["test_report"]["test_cases"]
 
 
 # ═══════════════════════════════════════════════════════════════════

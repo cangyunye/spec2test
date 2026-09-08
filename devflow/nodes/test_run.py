@@ -191,6 +191,13 @@ def make_test_run_node():
             return _finish(stage="review", executed=False,
                            skip_reason="TEST_RUN_ENABLED=0，执行已关闭")
         if not project_root or not Path(project_root).is_dir():
+            from ..schemas import has_project_code
+
+            if not has_project_code(req):
+                # 仅需求模式：没有目标项目，测试场景本来就是设计交付物，不算异常
+                return _finish(stage="review", executed=False,
+                               skip_reason="仅需求模式（未提供项目代码），测试场景不执行，"
+                                           "以用例设计为交付物")
             return _finish(stage="review", executed=False,
                            skip_reason=f"project_root 不可用: {project_root or '(空)'}")
         if not (state.get("code_apply") or {}).get("applied"):

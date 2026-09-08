@@ -45,10 +45,18 @@ class RequirementExtract(BaseModel):
         default=None,
         description="需求类型：只能是 new_feature / component_iteration / bug_fix，不确定留 null",
     )
-    project_root: str | None = Field(default=None, description="项目根目录绝对路径")
+    project_root: str | None = Field(
+        default=None,
+        description="项目根目录绝对路径；用户未提供项目代码时留 null",
+    )
     project_context: str | None = Field(default=None, description="项目背景/技术栈/业务场景简述")
     target_modules: list[str] | None = Field(default=None, description="本次需求涉及的模块/目录列表")
-    existing_code_accessible: bool | None = Field(default=None, description="现有代码是否可读取访问")
+    existing_code_accessible: bool | None = Field(
+        default=None,
+        description=(
+            "用户是否提供现有项目代码；用户没提供代码或只想按需求生成测试用例时填 false"
+        ),
+    )
     reference_files: list[str] | None = Field(default=None, description="参考文件路径列表，无则空数组")
     io_constraints: _FieldIOConstraints | None = None
     edge_cases: list[str] | None = Field(default=None, description="边界/异常场景清单")
@@ -63,6 +71,10 @@ SYSTEM_PROMPT_EXTRACT = """你是一个严谨的需求分析师，任务是从�
 4. edge_cases、acceptance_criteria、target_modules 只要用户提到就提取成数组；
    用户没提到但有相关语义可从上下文提炼时，可用数组列出；完全没提就填 null。
 5. project_root 必须是绝对路径；用户没给绝对路径时就填 null，不要自己拼接。
+6. existing_code_accessible：仅当用户明确表示提供了/可访问现有项目代码时填 true
+   （通常会伴随项目路径）；用户说明没有现有代码、不提供代码、或只想基于需求直接生成
+   测试用例时，填 false。不提供项目代码完全可以继续，后续仅基于需求生成端到端测试用例，
+   所以不要为了凑字段而追问项目路径。
 """
 
 

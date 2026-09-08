@@ -384,7 +384,24 @@ class OpenCodeTestProvider(TestGenProvider):
         modified_branches_only: bool = True,
         logic_graph: dict[str, Any] | None = None,
         session_id: str | None = None,
+        requirement: dict[str, Any] | None = None,
+        feedback: str | None = None,
     ) -> TestReport:
+        if not project_root:
+            # 仅需求模式（未提供项目代码）：OpenCode 没有可操作的项目，委托 LLM
+            # 基于需求 + 逻辑图设计端到端测试场景。
+            from .llm_testgen import LlmTestGenProvider
+
+            return await LlmTestGenProvider().generate(
+                "",
+                target_symbols,
+                coverage_target=coverage_target,
+                modified_branches_only=modified_branches_only,
+                logic_graph=logic_graph,
+                session_id=session_id,
+                requirement=requirement,
+                feedback=feedback,
+            )
         if not self.base_url:
             # 供应商未启用 —— 不可重试；抛统一 DevFlowError，让 provider_nodes 可以走 fallback
             from ..errors import CliNotFoundError

@@ -54,13 +54,16 @@ def _complete_requirement():
 
 def test_tc101_empty_requirement_many_errors():
     errs = schemas.validate_requirement(schemas.empty_requirement())
-    assert len(errs) >= 7
+    # 仅需求模式下 project_root / target_modules 不再是空需求报错项（不提供代码也能继续）
+    assert len(errs) >= 5
     msgs = "\n".join(errs)
     for must in [
-        "project_root", "target_modules", "edge_cases", "acceptance_criteria",
+        "edge_cases", "acceptance_criteria",
         "project_context", "io_constraints.input", "io_constraints.output",
     ]:
         assert must in msgs, f"缺少 {must}"
+    for not_in in ["project_root", "target_modules"]:
+        assert not_in not in msgs, f"仅需求模式不应强制 {not_in}"
 
 
 # ═══════════════════════════════════════════════════════════════════

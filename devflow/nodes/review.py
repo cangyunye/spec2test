@@ -2,12 +2,14 @@
 
 SPEC 3.2 工作流图最后一步：「人工验收节点 ← 人工中断 (Interrupt)」。
 SPEC 3.4 节点输入输出契约表：人工验收读取 code_changes, test_report, logic_graph，
-等待人工输入 approve/reject，reject → 回代码生成阶段。
+等待人工输入 approve/reject，reject → 按模式回退：
+  - 代码模式（has_project_code）→ 回代码生成阶段（current_stage="code"）
+  - 仅需求模式（无项目代码）    → 回测试用例设计阶段（current_stage="test"）
 
 resume 值兼容两种形态：
   - "approve" / "reject"（CLI 旧路径）
   - {"decision": ..., "comment": "修改意见"}（Web 带意见回传）
-reject 的意见写入 state.review_feedback，code_gen 重做时针对性修正。
+reject 的意见写入 state.review_feedback，下游节点重做时针对性修正。
 
 LangGraph interrupt 机制：
   - interrupt(value) 会暂停 graph 执行，把 value 返回给调用方
@@ -20,6 +22,7 @@ from typing import Any
 
 from langgraph.types import interrupt
 
+from ..schemas import has_project_code
 from ..state import GlobalState
 from .graph_review import _parse_decision
 
@@ -27,15 +30,18 @@ from .graph_review import _parse_decision
 def review_node(state: GlobalState) -> dict[str, Any]:
     """人工验收节点。
 
-    读取：code_changes, test_report, logic_graph
-    写入：current_stage="done"（approve）或 current_stage="code"（reject）
+    读取：code_changes, test_report, logic_graph, requirement
+    写入：current_stage="done"（approve）或 current_stage="code"/"test"（reject，按模式）
     """
     code_changes = state.get("code_changes") or []
     test_report = state.get("test_report") or {}
     logic_graph = state.get("logic_graph") or {}
+    requirement_only = not has_project_code(state.get("requirement"))
 
     # 组装给用户看的验收摘要
     summary_parts: list[str] = []
+    if requirement_only:
+        summary_parts.append("模式: 仅需求（未提供项目代码，交付物为端到端测试用例设计）")
     summary_parts.append(f"逻辑图: graph_id={logic_graph.get('graph_id', '?')}")
 
     nodes = logic_graph.get("nodes", [])
@@ -62,6 +68,8 @@ def review_node(state: GlobalState) -> dict[str, Any]:
         "code_changes_count": len(code_changes),
         "test_passed": run.get("failed", 0) == 0 and run.get("passed", 0) > 0,
         "logic_graph_id": logic_graph.get("graph_id"),
+        # 流程分支标记（前端/CLI 提示用）：no_code=仅需求模式，with_code=代码模式
+        "mode": "no_code" if requirement_only else "with_code",
         # 结构化视图（Web 渲染用）
         "code_changes": [
             {
@@ -96,8 +104,15 @@ def review_node(state: GlobalState) -> dict[str, Any]:
             "last_error": None,
             "last_error_code": None,
         }
-    # reject → 回到代码生成阶段重做；意见随行
+    # reject：代码模式回代码生成重做；仅需求模式回测试用例设计重新出用例。意见随行。
     feedback = comment or "验收未通过（未填写具体意见），请重点自查边界场景与验收标准"
+    if requirement_only:
+        return {
+            "current_stage": "test",
+            "review_feedback": feedback,
+            "last_error": "[review] 用户拒绝验收，回退到测试用例设计",
+            "last_error_code": None,
+        }
     return {
         "current_stage": "code",
         "review_feedback": feedback,
@@ -107,7 +122,13 @@ def review_node(state: GlobalState) -> dict[str, Any]:
 
 
 def route_after_review(state: GlobalState) -> str:
-    """review 节点后的路由：approve → END；reject → code_gen。"""
-    if state.get("current_stage") == "done":
+    """review 节点后的路由：
+      approved → END；rejected（stage=code）→ code_gen；
+      rejected_test（stage=test，仅需求模式）→ test_gen 重新设计用例。
+    """
+    stage = state.get("current_stage")
+    if stage == "done":
         return "approved"
+    if stage == "test":
+        return "rejected_test"
     return "rejected"
