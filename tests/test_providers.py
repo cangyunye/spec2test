@@ -19,6 +19,7 @@ import pytest
 from devflow.providers import (
     ArchifyProvider,
     CodeGraphProvider,
+    LlmTestGenProvider,
     MockCodeEdit,
     MockCodeGraphRender,
     MockCodeSearch,
@@ -63,7 +64,8 @@ def test_get_providers_defaults_are_mock_based(monkeypatch):
     assert isinstance(p.code_search, MockCodeSearch)
     assert isinstance(p.graph_render, MockCodeGraphRender)
     assert isinstance(p.code_edit, MockCodeEdit)
-    assert isinstance(p.test_gen, MockTestGen)
+    # test_gen 默认 llm（纯 LLM 工作，无 Key 时内部自带 Mock 演示兜底）
+    assert isinstance(p.test_gen, LlmTestGenProvider)
 
 
 # ═══════════════════════════════════════════════════════════════════

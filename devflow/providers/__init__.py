@@ -20,6 +20,7 @@ from .base import (
     TestGenProvider,
 )
 from .codegraph import CodeGraphProvider
+from .llm_testgen import LlmTestGenProvider
 from .mock import MockCodeEdit, MockCodeGraphRender, MockCodeSearch, MockTestGen
 from .opencode import (
     OpenCodeEditProvider,
@@ -92,11 +93,16 @@ def get_providers(
     code_edit: str | None = None,
     test_gen: str | None = None,
 ) -> Providers:
-    """按 .env / 显式参数装配。显式参数优先于环境变量。"""
+    """按 .env / 显式参数装配。显式参数优先于环境变量。
+
+    test_gen 默认 llm：测试设计是纯 LLM 工作，配置了 Key 即产出真实用例；
+    未配置 Key 时 LlmTestGenProvider 内部经 invoke_json 自动降级 Mock 演示模板，
+    离线/无 Key 场景不需要专门的 mock 配置。
+    """
     cs = code_search or os.getenv("CODE_SEARCH_PROVIDER", "mock")
     gr = graph_render or os.getenv("CODE_GRAPH_RENDER_PROVIDER", "mermaid")
     ce = code_edit or os.getenv("CODE_EDIT_PROVIDER", "mock")
-    tg = test_gen or os.getenv("TEST_GEN_PROVIDER", "mock")
+    tg = test_gen or os.getenv("TEST_GEN_PROVIDER", "llm")
     return Providers(
         code_search=build_code_search(cs),
         graph_render=build_graph_render(gr),
@@ -118,6 +124,7 @@ __all__ = [
     "TestGenProvider",
     "ArchifyProvider",
     "CodeGraphProvider",
+    "LlmTestGenProvider",
     "MockCodeSearch",
     "MockCodeGraphRender",
     "MockCodeEdit",

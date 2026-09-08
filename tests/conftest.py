@@ -1,6 +1,7 @@
 """全局 pytest fixture：测试隔离（清理进程内全局单例）。"""
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -8,6 +9,25 @@ import pytest
 
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _force_mock_llm_unless_live():
+    """测试会话默认强制 Mock LLM：隔离网络与真实 Key（ Hermetic tests）。
+
+    开发者 .env 里的真实 Key 不应让单测打真实 API（变慢、耗 token、依赖网络）。
+    需要打真实 LLM 的用例：LLM_LIVE_TESTS=1 pytest（对应 tests/test_live_llm.py）。
+    """
+    if os.getenv("LLM_LIVE_TESTS"):
+        yield
+        return
+    from devflow.config import settings
+
+    saved = (list(settings.LLM_PROVIDERS), settings.LLM_USE_MOCK_FALLBACK)
+    settings.LLM_PROVIDERS = []
+    settings.LLM_USE_MOCK_FALLBACK = True
+    yield
+    settings.LLM_PROVIDERS, settings.LLM_USE_MOCK_FALLBACK = saved
 
 
 @pytest.fixture(autouse=True)

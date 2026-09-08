@@ -78,8 +78,10 @@ REQUIREMENT_SCHEMA: dict[str, Any] = {
             "type": "object",
             "required": ["input", "output"],
             "properties": {
-                "input": {"type": "string", "minLength": 1},
-                "output": {"type": "string", "minLength": 1},
+                # 不设 minLength：空串由 validate_requirement 的业务校验给中文提示，
+                # 避免 jsonschema 的原始英文报错（'': should be non-empty）混进追问卡片
+                "input": {"type": "string"},
+                "output": {"type": "string"},
             },
             "description": "输入输出约束",
         },

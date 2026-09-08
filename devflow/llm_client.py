@@ -396,18 +396,17 @@ async def invoke_json(
             last_err = e
             continue
 
-    # 走到这里，所有 provider 都失败
-    assert last_err is not None
-    # 保底：LLM_USE_MOCK_FALLBACK → 强制 MockLLM 兜底
+    # 走到这里，所有 provider 都失败（或一个都没配置，如测试强制 Mock 模式）
     if _use_mock_fallback():
         logger.warning("所有真实 LLM 失败，强制走 Mock 兜底。response_type=%s", response_type)
         mock = _get_model("mock")
         return await _invoke_json_once(
             llm=mock, messages=messages,
             response_model=response_model, json_schema=json_schema,
-            max_retries=1, breaker=breaker, budget=budget,
-            response_type=response_type, model_spec="mock",
+            max_retries=1, breaker=default_breaker("llm_mock"),
+            budget=budget, response_type=response_type, model_spec="mock",
         )
+    assert last_err is not None, "未配置任何 LLM provider 且 LLM_USE_MOCK_FALLBACK 未开启"
     dead_letter_record(last_err, state_snapshot={"response_type": response_type})
     raise last_err
 
@@ -472,11 +471,11 @@ async def invoke_text(
             last_err = e
             continue
 
-    # 全部失败 → mock（可配置）
+    # 全部失败（或未配置任何 provider）→ mock（可配置）
     if _use_mock_fallback():
         logger.warning("llm.invoke_text 全部模型失败，走 Mock。")
         return cast(str, (await _get_model("mock").ainvoke(messages)).content)
-    assert last_err is not None
+    assert last_err is not None, "未配置任何 LLM provider 且 LLM_USE_MOCK_FALLBACK 未开启"
     raise last_err
 
 

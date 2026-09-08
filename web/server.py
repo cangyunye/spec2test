@@ -226,7 +226,7 @@ def health() -> dict[str, Any]:
             "mode": "providers" if providers else "legacy",
         },
         "pipeline": {
-            "test_gen": __import__("os").getenv("TEST_GEN_PROVIDER", "mock"),
+            "test_gen": __import__("os").getenv("TEST_GEN_PROVIDER", "llm"),
             "code_search": __import__("os").getenv("CODE_SEARCH_PROVIDER", "mock"),
             "code_edit": __import__("os").getenv("CODE_EDIT_PROVIDER", "mock"),
         },
