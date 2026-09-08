@@ -12,7 +12,7 @@
 - **系统化用例设计方法论**：融入 doc-based / functional testcase-generator 方法——正向 / 反向 / 边界值 / 等价类 / 状态流转 / 场景法六类设计策略，P0-P2 优先级，输出前质量自检；用例带标识与所属模块，导出为「概述 → 分模块用例 → 自检」的总-分结构文档
 - **双门禁人工把关**：逻辑图评审、最终验收两处中断等待决策；**驳回必须带修改意见**，意见回传给制图 / 代码生成节点做针对性修正
 - **Web Shell（推荐）**：黑白双主题界面，聊天式单入口、LLM 逐字流式输出、节点级耗时进度、逻辑图缩放 / 平移 / 节点检查器、测试场景表筛选与 CSV / Markdown 导出
-- **CLI 孪生客户端**：同一套图与事件协议，`devflow new / resume / list / export / check-providers`
+- **CLI 孪生客户端**：同一套图与事件协议，`devflow setup / new / resume / list / export / check-providers / check-llm`
 - **永不卡死的演示模式**：未配置 API Key 时自动 Mock 兜底，全流程可跑通（输出为演示数据）
 - **可插拔 Provider**：检索 / 制图 / 代码生成 / 测试生成各能力独立选择 codegraph / opencode / llm / mock 后端
 
@@ -20,11 +20,16 @@
 
 ```bash
 pip install -r requirements.txt
+python3 -m devflow.cli setup                          # 首次启动引导：检测 → 装服务 → 配 .env
 python3 -m uvicorn web.server:app --port 8100
 # 打开 http://127.0.0.1:8100，输入框直接描述需求回车即可
 ```
 
-配置真实 LLM：`cp .env.example .env` 后填入 DeepSeek / SiliconFlow 等 OpenAI 兼容服务的 Key（不配置则 Mock 演示模式）。完整步骤与 CLI 用法见 **[QUICKSTART.md](QUICKSTART.md)**。
+`setup` 向导会检测 `.env` 与外部服务（OpenCode / CodeGraph / Archify），多选引导安装缺失项
+（GitHub Releases 最新版，超时自动降级为手动指引并跳过），按已装服务写好 `.env`，
+最后输出供应商测试与启动指令。配置真实 LLM：`cp .env.example .env` 后填入 DeepSeek /
+SiliconFlow 等 OpenAI 兼容服务的 Key（不配置则 Mock 演示模式）。完整步骤与 CLI 用法见
+**[QUICKSTART.md](QUICKSTART.md)**。
 
 ## 架构一览
 

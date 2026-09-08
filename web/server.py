@@ -28,6 +28,7 @@ from pydantic import BaseModel
 from devflow.cli import _config, _thread_exists, apply_assignments
 from devflow.config import settings
 from devflow.doc_reader import read_doc
+from devflow.doctor import first_run_notice
 from devflow.events import events_from_stream
 from devflow.orchestrator import _get_sqlite_conn, build_graph_with_providers, initial_state
 
@@ -429,6 +430,15 @@ async def decide_gate(tid: str, body: GateDecision) -> StreamingResponse:
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 首次启动预检（非阻塞）：缺 .env 时打印一次引导，不拦启动
+# ═══════════════════════════════════════════════════════════════════
+
+_note = first_run_notice()
+if _note:
+    print(_note, flush=True)
 
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

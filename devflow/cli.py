@@ -1,6 +1,8 @@
 """CLI 入口：交互式对话，演示全流程。
 
 用法：
+  devflow setup                           # 首次启动引导（检测 .env/服务 → 多选安装 → 配置 → 测试指引）
+  devflow setup --check                   # 只打印检测报告，不交互
   devflow new                             # 新开会话（阶段一：澄清→制图）
   devflow new --full                      # 新开会话（全链路：澄清→制图→检索→生成→测试→验收）
   devflow new --from-doc requirements.docx  # 从 .docx/.txt/.md 文件读取初始需求
@@ -267,6 +269,17 @@ def cmd_check_providers(
         f"{ok_n}/{len(reports)} 个后端可用。"
         + ("未装的后端会自动回退 Mock/Mermaid，不影响流程。" if ok_n < len(reports) else "全链路可真实执行。")
     )
+
+
+@app.command("setup")
+def cmd_setup(
+    check: bool = typer.Option(False, "--check", help="只打印检测报告与建议，不交互"),
+) -> None:
+    """首次启动引导：检测 .env 与外部服务 → 多选安装（GitHub 最新版，超时转手动）
+    → 按已装服务配置 .env → 输出供应商测试与启动指令。"""
+    from .doctor import run_setup
+
+    run_setup(console, check_only=check)
 
 
 @app.command("new")

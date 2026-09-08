@@ -2,6 +2,25 @@
 
 > 前置：Python ≥ 3.11。本指南对应当前版本的 Web Shell 与 CLI；架构细节见 [SPEC.md](SPEC.md)。
 
+## 0. 首次启动引导（推荐）
+
+```bash
+python3 -m devflow.cli setup
+```
+
+向导自动完成首启检测与配置，全程可随时回车跳过、绝不阻塞启动：
+
+1. **检测** `.env` 是否存在、LLM Key 是否仍是占位符；
+2. **探测** mock 以外的服务后端（OpenCode / CodeGraph / Archify）；
+3. **多选安装**缺失服务——CodeGraph 自动从 GitHub Releases 检测最新版本并下载安装
+   （SHA256 校验）；网络超时 / 失败时打印官方下载页并跳过该步骤，之后可自行安装；
+4. **配置 `.env`**：按已安装的服务写入各能力后端选择（只改示例默认值，不覆盖你的自定义配置）；
+5. **收尾指引**：按要求自行填入 LLM 供应商 Key 后，运行测试指令
+   （`devflow check-providers` / `devflow check-llm`），再启动服务（见下文）。
+
+只想看检测报告不交互：`python3 -m devflow.cli setup --check`。
+Web 服务启动时若未检测到 `.env`，也会打印一次性 Mock 模式提示（不影响启动）。
+
 ## 1. 安装
 
 ```bash
@@ -81,12 +100,15 @@ python3 -m devflow.cli check-llm         # LLM 连通性检查
 ## 5. CLI 用法（与 Web 共享会话数据）
 
 ```bash
+python3 -m devflow.cli setup                  # 首次启动引导（检测 → 多选安装 → 配 .env → 测试指引）
 python3 -m devflow.cli new                    # 新会话（澄清 → 制图）
 python3 -m devflow.cli new --full             # 新会话（全链路到验收）
 python3 -m devflow.cli new --full --from-doc requirements.md   # 从文档读取需求
 python3 -m devflow.cli resume <thread_id>     # 断点续跑
 python3 -m devflow.cli list                   # 列出所有会话
 python3 -m devflow.cli export <thread_id>     # 导出产物到 ./artifacts/<thread_id>/
+python3 -m devflow.cli check-providers        # 各后端可用性自检（不发真实调用）
+python3 -m devflow.cli check-llm              # LLM 供应商连通性测试
 ```
 
 会话内命令：`:export` 导出产物、`:reset` 重开、`:quit` 退出。Web 与 CLI 共用 `data/checkpoints.db`，一边创建的会话另一边可以继续。
@@ -95,7 +117,7 @@ python3 -m devflow.cli export <thread_id>     # 导出产物到 ./artifacts/<thr
 
 | 现象 | 原因与处理 |
 |------|-----------|
-| 页面右上角显示「Mock 模式」 | 未配置 Key，LLM 输出为演示数据；按第 4 节配置后重启 |
+| 页面右上角显示「Mock 模式」 | 未配置 Key，LLM 输出为演示数据；运行 `devflow setup` 向导或按第 4 节配置后重启 |
 | 报 LLM 调用失败 / 401 / 余额 | Key 无效或欠费；检查 `.env`，运行 `check-providers` 定位 |
 | 8000 端口被占 | 换端口启动：`--port 8100`（任意空闲端口均可） |
 | 代码检索始终 0 条 / mock | 真实检索需部署 CodeGraph 并在目标项目 `codegraph init` 建索引（见 `.env.example`） |
