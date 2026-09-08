@@ -17,3 +17,7 @@ data/
 
 # 源码快照备份，不纳入版本库
 从需求到测试的工具_ai_工具.zip
+
+# Python 构建/打包产物
+*.egg-info/
+build/

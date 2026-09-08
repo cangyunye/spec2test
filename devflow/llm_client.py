@@ -1,9 +1,11 @@
 """LLM 调用封装：统一走 ChatOpenAI（兼容所有 OpenAI 格式服务）+ SPEC 5 弹性治理。
 
 模型配置支持两种方式：
-  1) 推荐：LLM_PROVIDERS_JSON = [{name, base_url, api_key, model, temperature}, ...]
+  1) 推荐：LLM_PROVIDERS_JSON = [{name, base_url, api_key, model, models?, temperature}, ...]
            每个 provider 独立熔断器，接口统一走 langchain_openai.ChatOpenAI
-           兼容：DeepSeek / SiliconFlow / vLLM / OneAPI / Ollama OpenAI 兼容层 / ...
+           兼容：DeepSeek / OpenCode Go / SiliconFlow / vLLM / OneAPI / Ollama OpenAI 兼容层 / ...
+           可选 models 模型池在 config 解析时展开为同供应商多模型 fallback 链，
+           LLM_ACTIVE_MODEL 环境变量可切换激活模型（不改 JSON）
   2) 旧版兼容：LLM_BASE_URL + LLM_MODEL + LLM_FALLBACKS（自动转成 providers 列表）
 
 最后可选 mock 兜底（LLM_USE_MOCK_FALLBACK=True）。

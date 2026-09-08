@@ -1,7 +1,8 @@
-"""LLM 多提供商配置测试：DeepSeek / SiliconFlow / 自建 / Mock 切换。
+"""LLM 多提供商配置测试：DeepSeek / OpenCode Go / SiliconFlow / 自建 / Mock 切换。
 
 覆盖：
   - settings.LLM_PROVIDERS_JSON 解析：多提供商结构化列表
+  - models 模型池：同供应商多模型展开为 fallback 链 + LLM_ACTIVE_MODEL 切换
   - 旧版 LLM_BASE_URL + LLM_MODEL 兼容解析
   - _get_model 返回 ChatOpenAI 实例 + 正确 base_url/model/temperature
   - _breaker_name_for 独立熔断器命名
@@ -109,6 +110,110 @@ class TestParseProvidersJson:
         providers = _parse_llm_providers_from_env()
         assert providers[0]["api_key"] == "sk-global"
         assert providers[1]["api_key"] == "sk-local"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 1b. models 模型池：同供应商多模型 fallback 链 + LLM_ACTIVE_MODEL 切换
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestMultiModelPool:
+    JSON_BASE = "https://opencode.ai/zen/go/v1"
+
+    def _set_pool(self, monkeypatch, **extra):
+        cfg = [{
+            "name": "opencode-go",
+            "base_url": self.JSON_BASE,
+            "api_key": "sk-og",
+            "model": "deepseek-v4-flash",
+            "models": ["deepseek-v4-flash", "deepseek-v4-pro", "glm-5.3", "qwen3.8-max"],
+            **extra,
+        }]
+        monkeypatch.setenv("LLM_PROVIDERS_JSON", json.dumps(cfg))
+        monkeypatch.delenv("LLM_ACTIVE_MODEL", raising=False)
+        return _parse_llm_providers_from_env()
+
+    def test_models_pool_expands_to_fallback_chain(self, monkeypatch):
+        """激活模型沿用原 name 打头，其余模型命名 name:模型名 依次跟随。"""
+        providers = self._set_pool(monkeypatch)
+        assert [p["model"] for p in providers] == [
+            "deepseek-v4-flash", "deepseek-v4-pro", "glm-5.3", "qwen3.8-max",
+        ]
+        assert providers[0]["name"] == "opencode-go"
+        assert providers[1]["name"] == "opencode-go:deepseek-v4-pro"
+        assert providers[3]["name"] == "opencode-go:qwen3.8-max"
+        # 展开条目共享 base_url / api_key / temperature
+        assert all(p["base_url"] == self.JSON_BASE for p in providers)
+        assert all(p["api_key"] == "sk-og" for p in providers)
+        assert all(p["temperature"] == 0.1 for p in providers)
+
+    def test_models_without_model_field_uses_first_as_active(self, monkeypatch):
+        cfg = [{
+            "name": "og",
+            "base_url": self.JSON_BASE,
+            "api_key": "sk-x",
+            "models": ["glm-5.3", "deepseek-v4-pro"],
+        }]
+        monkeypatch.setenv("LLM_PROVIDERS_JSON", json.dumps(cfg))
+        monkeypatch.delenv("LLM_ACTIVE_MODEL", raising=False)
+        providers = _parse_llm_providers_from_env()
+        assert providers[0]["model"] == "glm-5.3"
+        assert providers[0]["name"] == "og"
+        assert len(providers) == 2
+
+    def test_model_outside_pool_prepended_as_active(self, monkeypatch):
+        providers = self._set_pool(
+            monkeypatch, model="kimi-k3",
+            models=["deepseek-v4-flash", "glm-5.3"],
+        )
+        assert providers[0]["model"] == "kimi-k3"
+        assert providers[0]["name"] == "opencode-go"
+        assert [p["model"] for p in providers[1:]] == ["deepseek-v4-flash", "glm-5.3"]
+
+    def test_active_model_bare_switch(self, monkeypatch):
+        """裸模型名：池里含该模型的 provider 都切换，激活模型排最前。"""
+        providers = self._set_pool(monkeypatch)
+        monkeypatch.setenv("LLM_ACTIVE_MODEL", "glm-5.3")
+        providers = _parse_llm_providers_from_env()
+        assert providers[0]["model"] == "glm-5.3"
+        assert providers[0]["name"] == "opencode-go"
+        assert [p["model"] for p in providers[1:]] == [
+            "deepseek-v4-flash", "deepseek-v4-pro", "qwen3.8-max",
+        ]
+
+    def test_active_model_qualified_switch(self, monkeypatch):
+        """provider名/模型名：只切换同名 provider。"""
+        self._set_pool(monkeypatch)
+        monkeypatch.setenv("LLM_ACTIVE_MODEL", "opencode-go/deepseek-v4-pro")
+        providers = _parse_llm_providers_from_env()
+        assert providers[0]["model"] == "deepseek-v4-pro"
+        assert providers[0]["name"] == "opencode-go"
+
+    def test_active_model_qualified_other_provider_noop(self, monkeypatch):
+        """限定名不匹配任何 provider → 不切换。"""
+        self._set_pool(monkeypatch)
+        monkeypatch.setenv("LLM_ACTIVE_MODEL", "deepseek/deepseek-v4-pro")
+        providers = _parse_llm_providers_from_env()
+        assert providers[0]["model"] == "deepseek-v4-flash"
+
+    def test_active_model_not_in_pool_noop(self, monkeypatch):
+        self._set_pool(monkeypatch)
+        monkeypatch.setenv("LLM_ACTIVE_MODEL", "glm-9.9")
+        providers = _parse_llm_providers_from_env()
+        assert providers[0]["model"] == "deepseek-v4-flash"
+
+    def test_pool_entries_dedup_preserving_order(self, monkeypatch):
+        cfg = [{
+            "name": "og",
+            "base_url": self.JSON_BASE,
+            "api_key": "sk-x",
+            "model": "glm-5.3",
+            "models": ["glm-5.3", "glm-5.3", "kimi-k3", "glm-5.3"],
+        }]
+        monkeypatch.setenv("LLM_PROVIDERS_JSON", json.dumps(cfg))
+        monkeypatch.delenv("LLM_ACTIVE_MODEL", raising=False)
+        providers = _parse_llm_providers_from_env()
+        assert [p["model"] for p in providers] == ["glm-5.3", "kimi-k3"]
 
 
 # ═══════════════════════════════════════════════════════════════════

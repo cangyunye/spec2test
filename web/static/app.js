@@ -211,6 +211,28 @@ function addAsk(items) {
   card.appendChild(ul);
   feedAppend(card);
 }
+/* 澄清方式选择卡：普通澄清首轮追问后出现一次，点按钮即以该指令继续会话 */
+function addModeChoice() {
+  const card = h("div", "mode-choice");
+  card.appendChild(h("div", "mc-title", "换一种澄清方式？（也可以不选，直接在下方输入补充内容）"));
+  const btns = h("div", "mc-btns");
+  const pick = (label, text) => {
+    const b = h("button", "mc-btn", label);
+    b.onclick = () => {
+      if (S.running || S.gate) return;
+      card.classList.add("picked");
+      btns.querySelectorAll(".mc-btn").forEach((x) => { x.disabled = true; });
+      addUserMsg(text);
+      setRunning(true);
+      startStream({ op: "message", text });
+    };
+    return b;
+  };
+  btns.appendChild(pick("🧠 头脑风暴 · 逐条探讨", "头脑风暴"));
+  btns.appendChild(pick("🔥 拷问 · 逐题深挖", "拷问"));
+  card.appendChild(btns);
+  feedAppend(card);
+}
 function addError(text) {
   const c = classifyError(text);
   const card = h("div", "err-card");
@@ -768,6 +790,9 @@ function onEvent(e) {
     case "question":
       addAsk(e.missing || e.questions || []);
       break;
+    case "mode_choice":
+      addModeChoice();
+      break;
     case "artifact":
       liveClearAll();
       renderArtifact(e.kind, e.payload);
@@ -1025,6 +1050,7 @@ async function openSession(tid) {
     const snap = await api(`/api/sessions/${tid}`);
     resetFeed();
     S.tid = tid;
+    updateCfgBtn();
     S.gate = null; S.graph = null; S.report = null;
     const vals = snap.values || {};
     // 回放对话
@@ -1110,7 +1136,9 @@ function updateComposer() {
     send.disabled = true;
     input.disabled = false;
   } else {
-    hint.textContent = `当前阶段：${stageName(S.stage)} · 回答或补充，Enter 发送`;
+    hint.textContent = S.stage === "clarify"
+      ? "当前阶段：需求澄清 · 回答或补充，Enter 发送 · 可回复「头脑风暴」或「拷问」切换澄清方式"
+      : `当前阶段：${stageName(S.stage)} · 回答或补充，Enter 发送`;
     send.disabled = !input.value.trim();
     input.disabled = false;
   }
@@ -1149,6 +1177,7 @@ async function createAndStart(text) {
     setRunning(true);
     startStream({ op: "message", text });
     renderCfgChips();
+    updateCfgBtn();
     refreshSessions();
     closeSidebar();
   } catch (err) {
@@ -1167,6 +1196,7 @@ function newSession() {
   showEmptyState();
   setStep(0, false);
   updateComposer();
+  updateCfgBtn();
   refreshSessions();
   closeSidebar();
   $("chatInput").focus();
@@ -1280,6 +1310,13 @@ function toggleCfgPop(force) {
   pop.classList.toggle("hidden", !show);
 }
 
+/* ⚙ 仅新会话创建前可开配置；已有会话时置灰（仍可点击以提示原因），chips 一并隐藏 */
+function updateCfgBtn() {
+  renderCfgChips();
+  $("btnCfg").setAttribute("aria-disabled", String(!!S.tid));
+  if (S.tid) $("btnCfg").classList.remove("on");
+}
+
 /* ── 标签输入组件 ────────────────────────────────────── */
 
 function tagAdd(el, input, text) {
@@ -1317,16 +1354,30 @@ function initTags(el, initial) {
 
 /* ── 配置状态 ────────────────────────────────────────── */
 
+// 模型池条目的命名约定（见 devflow/config.py）：激活模型叫 "name"，池内其余叫 "name:model"。
+// 这里把展开后的条目聚合回 provider 分组，避免多模型时把页面挤爆。
+function groupProviders(providers) {
+  const groups = new Map();
+  (providers || []).forEach((p) => {
+    const i = p.name.indexOf(":");
+    const base = i > 0 ? p.name.slice(0, i) : p.name;
+    const model = i > 0 ? p.name.slice(i + 1) : p.model;
+    if (!groups.has(base)) groups.set(base, { name: base, key: p.key, models: [] });
+    groups.get(base).models.push(model || p.name);
+  });
+  return [...groups.values()];
+}
+
 async function loadHealth() {
   try {
     S.health = await api("/api/health");
     const llm = S.health.llm || {};
-    const providers = llm.providers || [];
-    const realKey = providers.some((p) => p.key);
+    const groups = groupProviders(llm.providers);
+    const realKey = groups.some((g) => g.key);
     const dot = $("healthDot");
     dot.className = "dot" + (realKey ? " ok" : llm.mock_fallback ? " mock" : " bad");
     $("healthText").textContent = realKey
-      ? providers.map((p) => p.name).join(" · ")
+      ? groups.map((g) => g.name).join(" · ") + (llm.providers.length > 1 ? " ▾" : "")
       : llm.mock_fallback ? "Mock 模式" : "未配置";
   } catch {
     $("healthDot").className = "dot bad";
@@ -1339,7 +1390,7 @@ function toggleHealthPop() {
   if (!pop.classList.contains("hidden")) { pop.classList.add("hidden"); return; }
   if (!S.health) return;
   pop.innerHTML = "";
-  const h4 = h("h4", null, "PIPELINE 配置");
+  const h4 = h("h4", null, "LLM 提供商");
   pop.appendChild(h4);
   const row = (k, v) => {
     const r = h("div", "row");
@@ -1347,13 +1398,21 @@ function toggleHealthPop() {
     r.appendChild(h("span", "mono", String(v)));
     return r;
   };
-  (S.health.llm?.providers || []).forEach((p) => {
-    pop.appendChild(row(`LLM · ${p.name}`, `${p.model}${p.key ? " · " + p.key : " · key 未配置"}`));
+  const groups = groupProviders(S.health.llm?.providers);
+  if (!groups.length) pop.appendChild(row("LLM", "未配置提供商"));
+  groups.forEach((g) => {
+    const keyTxt = g.key || "key 未配置";
+    pop.appendChild(row(`LLM · ${g.name}`,
+      g.models.length > 1 ? `${keyTxt} · ${g.models.length} 个模型` : `${g.models[0]} · ${keyTxt}`));
+    if (g.models.length > 1) {
+      const box = h("div", "models");
+      g.models.forEach((m) => box.appendChild(h("span", "m-chip", m)));
+      pop.appendChild(box);
+    }
   });
-  if (!(S.health.llm?.providers || []).length) pop.appendChild(row("LLM", "未配置提供商"));
-  pop.appendChild(row("Mock 兜底", S.health.llm?.mock_fallback ? "开启" : "关闭"));
   const pipe = S.health.pipeline || {};
   const sec = h("div", "sec");
+  sec.appendChild(row("Mock 兜底", S.health.llm?.mock_fallback ? "开启" : "关闭"));
   sec.appendChild(row("代码检索", pipe.code_search || "mock"));
   sec.appendChild(row("代码生成", pipe.code_edit || "mock"));
   sec.appendChild(row("测试生成", pipe.test_gen || "mock"));
@@ -1423,7 +1482,7 @@ function boot() {
   $("btnHealth").onclick = toggleHealthPop;
   document.addEventListener("click", (e) => {
     if (!$("healthPop").classList.contains("hidden") &&
-        !$("healthPop").contains(e.target) && e.target !== $("btnHealth")) {
+        !$("healthPop").contains(e.target) && !$("btnHealth").contains(e.target)) {
       $("healthPop").classList.add("hidden");
     }
     if (!$("cfgPop").classList.contains("hidden") &&
@@ -1490,6 +1549,7 @@ function boot() {
 
   updateComposer();
   renderCfgChips();
+  updateCfgBtn();
   loadHealth();
   refreshSessions();
   showEmptyState();

@@ -96,6 +96,8 @@ class GlobalState(TypedDict, total=False):
 
     # ── 4. 流程控制字段 ────────────────────────────────
     current_stage: StageType
+    clarify_mode: Literal["normal", "brainstorm", "grill"]   # 澄清模式：普通列表 / 头脑风暴 / 拷问
+    clarify_mode_prompt: bool                # 首轮追问后弹「头脑风暴 / 拷问」选择卡（一次即收）
     missing_fields: list[str]                # 校验节点输出的缺失字段/错误
     review_feedback: Optional[str]           # 门禁 reject 时用户填写的修改意见
     test_failure: Optional[str]              # test_run 失败摘要，code_gen 修复时拼进 instruction

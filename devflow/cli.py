@@ -88,7 +88,8 @@ def _banner(thread_id: str, stage: str) -> None:
     console.print(
         Panel.fit(
             f"[bold cyan]Thread ID:[/] {thread_id}    [bold cyan]Stage:[/] {stage}\n"
-            f"[dim]输入需求开始对话；输入 :quit 退出；:export 导出产物；:reset 清会话重开[/]",
+            f"[dim]输入需求开始对话；澄清阶段可回复「头脑风暴」或「拷问」切换澄清方式；"
+            f"输入 :quit 退出；:export 导出产物；:reset 清会话重开[/]",
             title="devflow · AI 全流程开发工具",
             border_style="cyan",
         )
@@ -105,6 +106,10 @@ def _print_stage_report(state: dict[str, Any]) -> None:
     table.add_column(style="bold", width=14)
     table.add_column()
     table.add_row("Stage", f"[bold {'green' if stage=='done' else 'yellow'}]{stage}[/]")
+    mode = state.get("clarify_mode") or "normal"
+    if stage == "clarify" and mode != "normal":
+        mode_label = "头脑风暴（一轮一问）" if mode == "brainstorm" else "拷问（一轮一问 + 推荐答案）"
+        table.add_row("Clarify Mode", f"[magenta]{mode_label}[/]")
     table.add_row("Missing", f"[red]{len(missing)}[/] 项" if missing else "[green]0 项 ✓[/]")
     if err:
         table.add_row("Last Error", f"[red]{err}[/]")
@@ -526,6 +531,15 @@ def _render_event(event: dict) -> None:
         fields = event.get("missing") or event.get("questions")
         if fields:
             console.print("[yellow]?[/] 需要补充: " + "; ".join(fields))
+    elif etype == "mode_choice":
+        console.print(
+            Panel(
+                "也可以换一种澄清方式（回复指令即可，或忽略直接回答上方问题）：\n"
+                "  [green]头脑风暴[/] —— 想法还模糊时逐条探讨（每问附候选方向与推荐，可回「你来定」）\n"
+                "  [magenta]拷问[/]     —— 需求已成型时逐题深挖（每问附推荐答案，回「同意」采纳）",
+                title="澄清方式", border_style="magenta",
+            )
+        )
     elif etype == "error":
         console.print(f"[red]×[/] 节点错误: {event.get('error')}")
     elif etype == "artifact":

@@ -7,6 +7,15 @@
   validate → 有缺失 → build_question → 等待用户输入 → extract → validate → ...
   validate → 无缺失 → 进入下一阶段
 
+追问有三种模式（state.clarify_mode）：
+  normal    列表模式（默认）：一次把所有缺失字段列成问题清单
+  brainstorm 头脑风暴：用户消息以「头脑风暴」开头进入；一次一问、探索式，
+            每问附 2-3 个候选方向及推荐，帮用户把模糊想法聊成可填入需求清单的具体内容
+  grill     拷问模式：用户消息以「拷问」开头进入；一次只问优先级最高的一个缺失项，
+            并附「推荐答案」（可直接回复「同意」采纳），逐题施压验证需求完备性
+  两种对话模式均以「退出头脑风暴 / 退出拷问」返回 normal；
+  轮次上限单独放宽（CLARIFY_DIALOG_MAX_ROUNDS，默认 12；normal 仍为 CLARIFY_MAX_ROUNDS）
+
 注意：对外同时暴露 sync/async 两份入口：
 - sync 版 `clarify_extract` / `clarify_build_question` / `graph_generate` 用于 LangGraph .invoke() 同步流程
 - async 版 `clarify_extract_async` / `clarify_build_question_async` / `graph_generate_async` 用于 .ainvoke() 和内部链
@@ -15,7 +24,10 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import re
 from typing import Any
+
+from langchain_core.messages import AIMessage
 
 from pydantic import BaseModel, Field
 
@@ -28,6 +40,66 @@ from ..schemas import (
     validate_requirement,
 )
 from ..state import GlobalState
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 澄清模式（brainstorm / grill）：入口指令识别
+# ═══════════════════════════════════════════════════════════════════
+
+# 模式关键词 → clarify_mode 值；检测顺序即优先级（先查退出，再查进入）
+_MODE_KEYWORDS: dict[str, str] = {
+    "头脑风暴": "brainstorm",
+    "风暴": "brainstorm",
+    "拷问": "grill",
+}
+
+_EXIT_PREFIXES = ("退出", "结束", "关闭", "停止")
+
+
+def detect_mode_switch(text: str) -> tuple[str | None, str]:
+    """识别用户消息里的澄清模式切换指令。
+
+    返回 (新模式或 None, 剩余文本)：
+      - 「拷问」/「头脑风暴」→ 进入对应模式，剩余文本为空
+      - 「拷问：顺便重点关注边界」→ 进入 grill，剩余文本为指令后的补充内容（仍走抽取）
+      - 「退出拷问」/「结束头脑风暴」→ 退回 normal
+      - 普通消息 → (None, 原文)
+    """
+    t = (text or "").strip()
+    if not t:
+        return None, t
+
+    # 退出：前缀 + 含任一模式关键词（如「退出拷问」「结束头脑风暴模式」）
+    if t.startswith(_EXIT_PREFIXES) and any(k in t for k in _MODE_KEYWORDS):
+        return "normal", ""
+
+    for kw, mode in _MODE_KEYWORDS.items():
+        if t == kw or t.startswith(kw):
+            # 「拷问」/「头脑风暴」或其开头（容忍「拷问模式」「头脑风暴一下」）；
+            # 跳过关键词与其后紧邻的分隔符，剩下的是用户附加语境（可为空）
+            rest = t[len(kw):]
+            rest = re.sub(r"^[\s：:，,。.]+", "", rest)
+            return mode, rest.strip()
+    return None, t
+
+
+def _mode_announce(mode: str) -> str:
+    """模式切换的确认话术（作为 AIMessage 追加，告知用户如何退出）。"""
+    if mode == "brainstorm":
+        return (
+            "已进入【头脑风暴模式】。\n"
+            "接下来一次只聊一个问题：我会先了解目的、约束和成功标准，"
+            "每个问题给出几个候选方向和我的推荐，帮你把想法聊成完整需求。\n"
+            "随时回复「退出头脑风暴」回到普通模式。"
+        )
+    if mode == "grill":
+        return (
+            "已进入【拷问模式】。\n"
+            "接下来一次只问一个最关键的缺口：每个问题都附上我的推荐答案，"
+            "回复「同意」直接采纳，或给出你自己的答案。\n"
+            "随时回复「退出拷问」回到普通模式。"
+        )
+    return "已退出对话式澄清，回到普通模式。后续会一次性列出待补充清单。"
 
 
 # ── Pydantic 响应模型：让 LLM 严格按需求 Schema 抽取 ────────
@@ -75,6 +147,8 @@ SYSTEM_PROMPT_EXTRACT = """你是一个严谨的需求分析师，任务是从�
    （通常会伴随项目路径）；用户说明没有现有代码、不提供代码、或只想基于需求直接生成
    测试用例时，填 false。不提供项目代码完全可以继续，后续仅基于需求生成端到端测试用例，
    所以不要为了凑字段而追问项目路径。
+7. 如果「上一轮 AI 追问」存在：本轮用户消息若是对该追问的简短确认（如「同意」「可以」「就按你说的」），
+   应结合追问里的推荐答案提取出对应字段值；无法对应时仍填 null。
 """
 
 
@@ -82,6 +156,9 @@ USER_PROMPT_TEMPLATE = """
 # 已有的需求上下文（仅供参考，不要覆盖你不确定的字段）
 已有需求：
 {existing_requirement}
+
+# 上一轮 AI 追问（可能为空；用户本轮若只是简短确认，从这里对应字段与推荐答案）
+{latest_ai_message}
 
 # 本轮用户新输入
 {latest_user_message}
@@ -98,23 +175,46 @@ def clarify_extract(state: GlobalState) -> dict[str, Any]:
 async def clarify_extract_async(state: GlobalState) -> dict[str, Any]:
     """异步入口：从最新一轮用户对话中抽取信息，合并更新 requirement。
 
-    输入（读 state）: messages, requirement（旧值）
-    输出（写回 state）: requirement（新合并值）, retry_count, last_error_code, last_error_retryable
+    输入（读 state）: messages, requirement（旧值）, clarify_mode
+    输出（写回 state）: requirement（新合并值）, clarify_mode, retry_count,
+                       last_error_code, last_error_retryable
+
+    模式指令短路：最新用户消息若是「头脑风暴 / 拷问 / 退出…」切换指令，
+    直接更新 clarify_mode 并追加确认消息，不做需求抽取（指令不是需求信息）；
+    「拷问：补充语境」这类带后缀的指令切换模式后，用剩余文本继续正常抽取。
     """
     messages = state.get("messages", [])
     existing = copy.deepcopy(state.get("requirement") or empty_requirement())
 
-    # 1. 找最后一条 HumanMessage
+    # 1. 找最后一条 HumanMessage / AIMessage
     latest_user_text = ""
+    latest_ai_text = ""
     for m in reversed(messages):
         mtype = getattr(m, "type", None)
-        if mtype == "human":
+        if mtype == "human" and not latest_user_text:
             latest_user_text = getattr(m, "content", "") or ""
+        elif mtype == "ai" and not latest_ai_text:
+            latest_ai_text = getattr(m, "content", "") or ""
+        if latest_user_text and latest_ai_text:
             break
+
+    ok_ret = {"last_error": None, "last_error_code": None, "last_error_retryable": None}
 
     # 若完全没用户输入，直接返回（不做事）
     if not latest_user_text.strip():
-        return {"requirement": existing}
+        return {"requirement": existing, **ok_ret}
+
+    # 1.5 模式切换指令识别（短路）；mode_update 会透传到本轮所有返回路径
+    mode_update: dict[str, Any] = {}
+    new_mode, residual = detect_mode_switch(latest_user_text)
+    if new_mode is not None:
+        mode_update["clarify_mode"] = new_mode
+        if new_mode != (state.get("clarify_mode") or "normal"):
+            mode_update["messages"] = [AIMessage(content=_mode_announce(new_mode))]
+        if residual:
+            latest_user_text = residual  # 指令后带的补充内容仍做一次抽取
+        else:
+            return {"requirement": existing, **ok_ret, **mode_update}
 
     # 2. LLM 结构化抽取
     try:
@@ -122,6 +222,7 @@ async def clarify_extract_async(state: GlobalState) -> dict[str, Any]:
             system_prompt=SYSTEM_PROMPT_EXTRACT,
             user_prompt=USER_PROMPT_TEMPLATE.format(
                 existing_requirement=_format_requirement_for_llm(existing),
+                latest_ai_message=latest_ai_text or "（无）",
                 latest_user_message=latest_user_text,
             ),
             response_model=RequirementExtract,
@@ -135,6 +236,7 @@ async def clarify_extract_async(state: GlobalState) -> dict[str, Any]:
             "last_error_code": e.code,
             "last_error_retryable": e.retryable,
             "retry_count": retry,
+            **mode_update,
         }
     except Exception as e:
         from ..errors import wrap_exception
@@ -146,6 +248,7 @@ async def clarify_extract_async(state: GlobalState) -> dict[str, Any]:
             "last_error_code": err.code,
             "last_error_retryable": err.retryable,
             "retry_count": retry,
+            **mode_update,
         }
 
     # 3. 合并：已有值优先，只覆盖本轮提取中明确非空的字段
@@ -156,6 +259,7 @@ async def clarify_extract_async(state: GlobalState) -> dict[str, Any]:
         "last_error": None,
         "last_error_code": None,
         "last_error_retryable": None,
+        **mode_update,
     }
 
 
@@ -166,19 +270,26 @@ def clarify_validate(state: GlobalState) -> dict[str, Any]:
 
     澄清轮次控制（评审稿 §2.3 D2）：
       - 每次进入把 retry_count["clarify_loop_cnt"] +1
-      - 达到 settings.CLARIFY_MAX_ROUNDS 仍缺失 → 写 CLARIFY.LOOP_EXHAUSTED
-        （不可重试），由 _route_after_validate 路由到 abort → dead_letter → END，
-        避免无限追问循环。
+      - 达到轮次上限仍缺失 → 写 CLARIFY.LOOP_EXHAUSTED（不可重试），
+        由 _route_after_validate 路由到 abort → dead_letter → END，避免无限追问循环。
+      - 对话式澄清（头脑风暴 / 拷问）一轮只推进一个缺口，上限放宽为
+        CLARIFY_DIALOG_MAX_ROUNDS（默认 12）；normal 仍为 CLARIFY_MAX_ROUNDS（默认 6）。
     """
     req = state.get("requirement") or empty_requirement()
     errors = validate_requirement(req)
 
+    mode = state.get("clarify_mode") or "normal"
+    max_rounds = (
+        settings.CLARIFY_DIALOG_MAX_ROUNDS if mode in ("brainstorm", "grill")
+        else settings.CLARIFY_MAX_ROUNDS
+    )
+
     retry = dict(state.get("retry_count") or {})
     retry["clarify_loop_cnt"] = retry.get("clarify_loop_cnt", 0) + 1
 
-    if errors and retry["clarify_loop_cnt"] > settings.CLARIFY_MAX_ROUNDS:
+    if errors and retry["clarify_loop_cnt"] > max_rounds:
         err = ClarifyLoopExhaustedError(
-            f"澄清已达 {settings.CLARIFY_MAX_ROUNDS} 轮上限，仍有 {len(errors)} 项缺失: "
+            f"澄清已达 {max_rounds} 轮上限（{mode} 模式），仍有 {len(errors)} 项缺失: "
             + "; ".join(errors)
         )
         return {
@@ -190,11 +301,33 @@ def clarify_validate(state: GlobalState) -> dict[str, Any]:
             "retry_count": retry,
         }
 
-    return {
+    # 需求完备时的确定性确认（不花 LLM token）：
+    #   一次说清 → 「需求已足够清晰，无需再发散」；补齐缺口 → 「缺口已补齐」。
+    # 只在完备的那一刻发一次（上轮有缺口 / 首轮直达），不会每轮重复。
+    confirm: str | None = None
+    if not errors:
+        old_missing = state.get("missing_fields") or []
+        if old_missing:
+            confirm = (
+                f"✅ 缺口已补齐（{len(old_missing)} 项 → 0 项）。"
+                "需求清单已完整，无需再发散，进入下一阶段。"
+            )
+        elif retry["clarify_loop_cnt"] <= 1:
+            confirm = (
+                "✅ 你的需求描述已足够清晰，关键信息齐备，无需再发散澄清，"
+                "直接进入逻辑制图；后续对需求有任何调整，可在制图评审时驳回补充。"
+            )
+
+    out: dict[str, Any] = {
         "missing_fields": errors,
         "current_stage": "clarify" if errors else "graph",  # 阶段一跳过 search，直接去制图
         "retry_count": retry,
+        "clarify_mode_prompt": False,  # 进入追问 / 完备确认后选择卡即收
     }
+    if confirm is not None:
+        # 键序：stage 事件先触发（分隔线），确认消息随后落在下方
+        out["messages"] = [AIMessage(content=confirm)]
+    return out
 
 
 SYSTEM_PROMPT_QUESTION = """你是一个沟通能力很强的产品经理。根据【缺失字段列表】和【当前已填内容】，
@@ -207,29 +340,105 @@ SYSTEM_PROMPT_QUESTION = """你是一个沟通能力很强的产品经理。根�
 """
 
 
+# ═══════════════════════════════════════════════════════════════════
+# 对话式澄清（brainstorm / grill）：一轮一问
+# ═══════════════════════════════════════════════════════════════════
+
+# 缺失字段的提问优先级：越靠前越影响下游阶段形态，先问
+_FIELD_PRIORITY = [
+    "req_type",
+    "existing_code_accessible",
+    "project_context",
+    "io_constraints.input",
+    "io_constraints.output",
+    "edge_cases",
+    "acceptance_criteria",
+    "project_root",
+    "target_modules",
+]
+
+
+def pick_dialog_field(missing: list[str]) -> tuple[str, str]:
+    """从缺失列表中选出本轮该问的字段。
+
+    返回 (字段 key, 完整缺失条目)。缺失条目形如 "edge_cases: 至少列出 1 个边界场景"。
+    按提优先级表排序；不在表中的字段排在已知字段之后，保持原有相对顺序。
+    """
+    def _rank(entry: str) -> tuple[int, int]:
+        key = entry.split(":", 1)[0].strip()
+        try:
+            return (_FIELD_PRIORITY.index(key), 0)
+        except ValueError:
+            return (len(_FIELD_PRIORITY), 1)
+
+    ordered = sorted(list(missing), key=_rank)
+    top = ordered[0]
+    return top.split(":", 1)[0].strip(), top
+
+
+SYSTEM_PROMPT_GRILL = """你是「拷问模式」下的资深需求评审，对需求做逐题施压验证。
+本轮只允许问【一个】指定字段的缺口，绝对不要列出其他缺失项。
+要求：
+1. 针对该字段提出一个尖锐、具体的问题，点明它模糊或缺失会让下游（制图 / 用例设计）付出什么代价；
+2. 必须给出「推荐答案」并用一句话说明理由（从已有需求上下文合理推断）；
+3. 结尾明确告知用户：回复「同意」采纳推荐答案，或直接给出你自己的答案；
+4. 输出纯文本，控制在 6 行以内，不要 JSON。
+"""
+
+
+SYSTEM_PROMPT_BRAINSTORM = """你是「头脑风暴模式」下的产品伙伴，帮用户把模糊想法聊成完整需求。
+本轮只允许问【一个】问题，聚焦目的 / 约束 / 成功标准，探索式引导而不是质询。
+要求：
+1. 围绕指定缺口提问，问题开放、口语化；
+2. 给出 2-3 个候选方向，每个一句话（可从已有需求上下文推断），并标出你的推荐；
+3. 告诉用户可以选方向、自由描述，或说「你来定」；
+4. 输出纯文本，控制在 7 行以内，不要 JSON，不要一次列出所有缺口。
+"""
+
+
 def clarify_build_question(state: GlobalState) -> dict[str, Any]:
     """同步入口（LangGraph .invoke 使用）：内部用 asyncio.run 跑 async 实现。"""
     return asyncio.run(clarify_build_question_async(state))
 
 
 async def clarify_build_question_async(state: GlobalState) -> dict[str, Any]:
-    """异步入口：根据 missing_fields 生成追问，作为 AIMessage 追加到 messages。"""
-    from langchain_core.messages import AIMessage
+    """异步入口：根据 missing_fields 与 clarify_mode 生成追问，作为 AIMessage 追加到 messages。
 
+    normal     —— 一次列出所有缺失字段的问题清单（原有行为）；
+                  首轮置 clarify_mode_prompt=True，客户端据此弹「头脑风暴 / 拷问」选择卡
+    brainstorm —— 一轮一问：围绕优先级最高的缺口，给 2-3 个候选方向及推荐
+    grill      —— 一轮一问：只问优先级最高的一个缺口，附推荐答案，「同意」即可采纳
+    """
     missing = state.get("missing_fields") or []
     req = state.get("requirement") or empty_requirement()
+    mode = state.get("clarify_mode") or "normal"
 
     if not missing:
         return {}
 
+    if mode in ("brainstorm", "grill"):
+        field_key, field_entry = pick_dialog_field(missing)
+        system_prompt = SYSTEM_PROMPT_GRILL if mode == "grill" else SYSTEM_PROMPT_BRAINSTORM
+        mode_name = "拷问" if mode == "grill" else "头脑风暴"
+        user_prompt = (
+            f"【本轮只问这一个缺口】\n字段: {field_key}\n缺失原因: {field_entry}\n\n"
+            f"【当前已填内容】\n{_format_requirement_for_llm(req)}\n\n"
+            "请输出追问（纯文本）："
+        )
+        fallback = f"（{mode_name}模式）请先补充【{field_key}】：{field_entry}"
+    else:
+        system_prompt = SYSTEM_PROMPT_QUESTION
+        user_prompt = (
+            f"【缺失字段 / 错误】\n{chr(10).join('- ' + m for m in missing)}\n\n"
+            f"【当前已填内容】\n{_format_requirement_for_llm(req)}\n\n"
+            "请输出追问文本（纯文本多行）："
+        )
+        fallback = "需要您补充以下信息：\n" + "\n".join(f"- {m}" for m in missing)
+
     try:
         question_text = await invoke_json(
-            system_prompt=SYSTEM_PROMPT_QUESTION,
-            user_prompt=(
-                f"【缺失字段 / 错误】\n{chr(10).join('- ' + m for m in missing)}\n\n"
-                f"【当前已填内容】\n{_format_requirement_for_llm(req)}\n\n"
-                "请输出追问文本（纯文本多行）："
-            ),
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
             json_schema={
                 "type": "object",
                 "required": ["questions"],
@@ -241,16 +450,18 @@ async def clarify_build_question_async(state: GlobalState) -> dict[str, Any]:
         )
         text = question_text["questions"]
     except DevFlowError as e:
-        text = (
-            "需要您补充以下信息：\n" + "\n".join(f"- {m}" for m in missing)
-            + f"\n(LLM 出错: [{e.code}] {e.message})"
-        )
+        text = fallback + f"\n(LLM 出错: [{e.code}] {e.message})"
     except Exception as e:
         # 兜底：直接把缺失字段原样展示给用户
-        text = "需要您补充以下信息：\n" + "\n".join(f"- {m}" for m in missing) + f"\n(LLM 出错: {e})"
+        text = fallback + f"\n(LLM 出错: {e})"
+
+    # 选择卡只在普通模式首轮出现一次（键序保证事件在 AI 追问之后触发，卡片落在问题下方）
+    loop_cnt = (state.get("retry_count") or {}).get("clarify_loop_cnt", 0)
+    mode_prompt = mode == "normal" and loop_cnt <= 1
 
     return {
         "messages": [AIMessage(content=text)],
+        "clarify_mode_prompt": mode_prompt,
     }
 
 

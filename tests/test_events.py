@@ -146,6 +146,28 @@ class TestQuestionAndError:
         err = [e for e in events if e["type"] == "error"]
         assert err and "LLM.XXX" in err[0]["error"]
 
+    def test_clarify_mode_prompt_becomes_mode_choice(self):
+        """clarify_mode_prompt=True → mode_choice 事件；False/缺省 → 不触发。"""
+        from langchain_core.messages import AIMessage
+
+        items = [
+            {"clarify_validate": {"missing_fields": ["req_type"], "current_stage": "clarify"}},
+            {"clarify_build_question": {
+                "messages": [AIMessage(content="请问是什么类型的需求？")],
+                "clarify_mode_prompt": True,
+            }},
+            {"clarify_build_question": {
+                "messages": [AIMessage(content="还差哪些边界？")],
+                "clarify_mode_prompt": False,
+            }},
+        ]
+        events = _seq(events_from_stream(iter(items)))
+        mc = [e for e in events if e["type"] == "mode_choice"]
+        assert len(mc) == 1
+        # mode_choice 在对应 AI 追问之后触发（卡片落在问题下方）
+        ai_idx = events.index(next(e for e in events if e["type"] == "messages"))
+        assert events.index(mc[0]) > ai_idx
+
 
 # ═══════════════════════════════════════════════════════════════════
 # 多流模式（Web 路径）：(mode, data) 元组

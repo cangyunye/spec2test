@@ -7,6 +7,7 @@
 
 输出：事件 dict，type ∈
   stage / question / messages / artifact / error      —— 与旧版一致
+  mode_choice {}                                      —— 澄清首轮追问后弹「头脑风暴 / 拷问」选择卡
   node_done   {node, label}                           —— 节点完成（含友好名）
   token       {node, content}                         —— LLM 增量输出（messages 模式）
   gate        {gate, payload}                         —— 门禁中断
@@ -115,6 +116,9 @@ def _events_for_update(node_name: str, update: Any) -> Iterator[dict[str, Any]]:
             yield {"type": "question", "missing": val}
         elif key == "questions" and val:
             yield {"type": "question", "questions": val}
+        elif key == "clarify_mode_prompt" and val:
+            # 普通澄清首轮追问后弹「头脑风暴 / 拷问」选择卡（一次即收）
+            yield {"type": "mode_choice"}
         elif key == "messages" and isinstance(val, list) and val:
             yield {"type": "messages", "messages": _serialize_messages(val)}
         elif key == "logic_graph" and val:
