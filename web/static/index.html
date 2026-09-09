@@ -72,47 +72,47 @@
           <button id="btnSend" class="send" title="发送（Enter）" disabled>↑</button>
         </div>
         <input type="file" id="fileDoc" accept=".md,.txt,.docx" hidden>
+
+        <!-- 运行配置弹层（须留在 composer 内：CSS 以它为定位锚，弹出在输入区上方） -->
+        <div id="cfgPop" class="cfg-pop hidden">
+          <div class="cfg-head">运行配置 <span class="label-hint">仅在新会话创建时生效</span></div>
+          <div class="field">
+            <label for="fRoot">project_root</label>
+            <input id="fRoot" value="." spellcheck="false">
+          </div>
+          <div class="field">
+            <label>目标模块 <span class="label-hint">回车添加</span></label>
+            <div class="tags" id="tagModules"></div>
+          </div>
+          <div class="field">
+            <label>边界场景 <span class="label-hint">回车添加</span></label>
+            <div class="tags" id="tagEdges"></div>
+          </div>
+          <div class="field">
+            <label>验收标准 <span class="label-hint">回车添加</span></label>
+            <div class="tags" id="tagAccept"></div>
+          </div>
+          <div class="field">
+            <label for="fCtx">项目背景</label>
+            <input id="fCtx" value="桌面 GUI 计算器应用（tkinter）">
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label for="fIoIn">输入约束</label>
+              <input id="fIoIn" value="按钮点击与表达式">
+            </div>
+            <div class="field">
+              <label for="fIoOut">输出约束</label>
+              <input id="fIoOut" value="结果或错误提示">
+            </div>
+          </div>
+          <div class="cfg-foot">
+            <button id="btnCfgClear" class="chip-btn">清空配置</button>
+            <button id="btnCfgSample" class="chip-btn">✦ 示例配置</button>
+          </div>
+        </div>
       </footer>
     </main>
-  </div>
-</div>
-
-<!-- 运行配置弹层（composer 上方） -->
-<div id="cfgPop" class="cfg-pop hidden">
-  <div class="cfg-head">运行配置 <span class="label-hint">仅在新会话创建时生效</span></div>
-  <div class="field">
-    <label for="fRoot">project_root</label>
-    <input id="fRoot" value="." spellcheck="false">
-  </div>
-  <div class="field">
-    <label>目标模块 <span class="label-hint">回车添加</span></label>
-    <div class="tags" id="tagModules"></div>
-  </div>
-  <div class="field">
-    <label>边界场景 <span class="label-hint">回车添加</span></label>
-    <div class="tags" id="tagEdges"></div>
-  </div>
-  <div class="field">
-    <label>验收标准 <span class="label-hint">回车添加</span></label>
-    <div class="tags" id="tagAccept"></div>
-  </div>
-  <div class="field">
-    <label for="fCtx">项目背景</label>
-    <input id="fCtx" value="桌面 GUI 计算器应用（tkinter）">
-  </div>
-  <div class="field-row">
-    <div class="field">
-      <label for="fIoIn">输入约束</label>
-      <input id="fIoIn" value="按钮点击与表达式">
-    </div>
-    <div class="field">
-      <label for="fIoOut">输出约束</label>
-      <input id="fIoOut" value="结果或错误提示">
-    </div>
-  </div>
-  <div class="cfg-foot">
-    <button id="btnCfgClear" class="chip-btn">清空配置</button>
-    <button id="btnCfgSample" class="chip-btn">✦ 示例配置</button>
   </div>
 </div>
 
