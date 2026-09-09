@@ -97,11 +97,11 @@ class TestBuildQuestion:
 
     @pytest.mark.asyncio
     async def test_c6_success_appends_aimessage(self, monkeypatch):
-        """LLM 成功 → 追加 1 条 AIMessage 且内容为 questions。"""
-        async def fake_invoke_json(**kwargs):
-            return {"questions": "请补充：\n- 项目根目录？\n- 验收标准？"}
+        """LLM 成功 → 追加 1 条 AIMessage 且内容为追问文本。"""
+        async def fake_invoke_text(**kwargs):
+            return "请补充：\n- 项目根目录？\n- 验收标准？"
 
-        monkeypatch.setattr("devflow.nodes.clarify.invoke_json", fake_invoke_json)
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_text", fake_invoke_text)
         state = {
             "missing_fields": ["project_root", "acceptance_criteria"],
             "requirement": empty_requirement(),
@@ -113,12 +113,50 @@ class TestBuildQuestion:
         assert "项目根目录" in msgs[0].content
 
     @pytest.mark.asyncio
+    async def test_digit_led_plain_text_passes_through(self, monkeypatch):
+        """回归：模型输出「1. …」数字开头纯文本 → 原样展示，不炸 int 下标。
+
+        历史缺陷：走 invoke_json 时 JsonOutputParser 把数字开头的纯文本宽容解析成
+        裸 int，question_text["questions"] 抛 'int' object is not subscriptable。
+        """
+        async def fake_invoke_text(**kwargs):
+            return "1. 请补充边界场景（如除零）？\n2. 验收标准是什么？"
+
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_text", fake_invoke_text)
+        state = {
+            "missing_fields": ["edge_cases", "acceptance_criteria"],
+            "requirement": empty_requirement(),
+        }
+        out = await clarify_build_question_async(state)  # type: ignore[arg-type]
+        msgs = out["messages"]
+        assert len(msgs) == 1
+        assert "1. 请补充边界场景（如除零）？" in msgs[0].content
+        assert "LLM 出错" not in msgs[0].content
+
+    @pytest.mark.asyncio
+    async def test_blank_text_falls_back_to_missing_list(self, monkeypatch):
+        """LLM 返回空白文本 → 降级为缺失字段原样列表。"""
+        async def fake_invoke_text(**kwargs):
+            return "   "
+
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_text", fake_invoke_text)
+        state = {
+            "missing_fields": ["edge_cases"],
+            "requirement": empty_requirement(),
+        }
+        out = await clarify_build_question_async(state)  # type: ignore[arg-type]
+        msgs = out["messages"]
+        assert len(msgs) == 1
+        assert "edge_cases" in msgs[0].content
+        assert "LLM 出错" not in msgs[0].content
+
+    @pytest.mark.asyncio
     async def test_c7_llm_error_falls_back_to_missing_list(self, monkeypatch):
         """LLM 抛 DevFlowError → 降级为缺失字段原样列表（流程不中断）。"""
         async def boom(**kwargs):
             raise LlmRefusedError("provider quota exceeded")
 
-        monkeypatch.setattr("devflow.nodes.clarify.invoke_json", boom)
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_text", boom)
         state = {
             "missing_fields": ["edge_cases", "io_constraints.input"],
             "requirement": empty_requirement(),
@@ -350,9 +388,9 @@ class TestDialogModeBuildQuestion:
 
         async def fake(**kwargs):
             captured.update(kwargs)
-            return {"questions": "这个需求是全新功能、迭代还是缺陷修复？推荐：new_feature。"}
+            return "这个需求是全新功能、迭代还是缺陷修复？推荐：new_feature。"
 
-        monkeypatch.setattr("devflow.nodes.clarify.invoke_json", fake)
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_text", fake)
         state = {
             "missing_fields": [
                 "acceptance_criteria: 至少定义 1 条验收标准",
@@ -376,9 +414,9 @@ class TestDialogModeBuildQuestion:
 
         async def fake(**kwargs):
             captured.update(kwargs)
-            return {"questions": "你想解决什么问题？候选：a/b/c，也可以说「你来定」。"}
+            return "你想解决什么问题？候选：a/b/c，也可以说「你来定」。"
 
-        monkeypatch.setattr("devflow.nodes.clarify.invoke_json", fake)
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_text", fake)
         state = {
             "missing_fields": ["edge_cases: 至少列出 1 个边界场景"],
             "requirement": empty_requirement(),
@@ -395,7 +433,7 @@ class TestDialogModeBuildQuestion:
         async def boom(**kwargs):
             raise LlmRefusedError("provider quota exceeded")
 
-        monkeypatch.setattr("devflow.nodes.clarify.invoke_json", boom)
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_text", boom)
         state = {
             "missing_fields": ["req_type: 必填字段缺失"],
             "requirement": empty_requirement(),
@@ -410,9 +448,9 @@ class TestDialogModeBuildQuestion:
     async def test_normal_first_round_sets_mode_choice_flag(self, monkeypatch):
         """普通模式首轮追问 → clarify_mode_prompt=True（客户端弹选择卡）；后续轮 False。"""
         async def fake(**kwargs):
-            return {"questions": "请补充验收标准"}
+            return "请补充验收标准"
 
-        monkeypatch.setattr("devflow.nodes.clarify.invoke_json", fake)
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_text", fake)
         base = {
             "missing_fields": ["acceptance_criteria: 至少定义 1 条验收标准"],
             "requirement": empty_requirement(),

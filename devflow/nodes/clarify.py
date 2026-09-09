@@ -33,7 +33,7 @@ from pydantic import BaseModel, Field
 
 from ..config import settings
 from ..errors import CLARIFY_LOOP_EXHAUSTED, ClarifyLoopExhaustedError, DevFlowError
-from ..llm_client import invoke_json
+from ..llm_client import invoke_json, invoke_text
 from ..schemas import (
     REQUIREMENT_SCHEMA,
     empty_requirement,
@@ -436,19 +436,12 @@ async def clarify_build_question_async(state: GlobalState) -> dict[str, Any]:
         fallback = "需要您补充以下信息：\n" + "\n".join(f"- {m}" for m in missing)
 
     try:
-        question_text = await invoke_json(
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            json_schema={
-                "type": "object",
-                "required": ["questions"],
-                "properties": {
-                    "questions": {"type": "string", "minLength": 2}
-                },
-            },
-            response_type="clarify_question",
-        )
-        text = question_text["questions"]
+        # 追问产物是纯文本（system prompt 明确「不要 JSON 格式」），必须走 invoke_text。
+        # 若走 invoke_json，JsonOutputParser 会把「1. …」这类数字开头的纯文本宽容解析成
+        # 裸 int，下标取值直接抛 'int' object is not subscriptable（弱模型必踩）。
+        text = str(await invoke_text(system_prompt=system_prompt, user_prompt=user_prompt)).strip()
+        if not text:
+            text = fallback
     except DevFlowError as e:
         text = fallback + f"\n(LLM 出错: [{e.code}] {e.message})"
     except Exception as e:

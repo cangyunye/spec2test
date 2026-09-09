@@ -686,6 +686,19 @@ async def _invoke_json_once(
                     validation_errors=[str(e)],
                     extra={"raw_tail": str(content)[-200:]},
                 ) from e
+            # JsonOutputParser 对宽容解析很放开：模型输出「1. …」这类数字开头的纯文本
+            # 会成功解析成裸 int/float 而不是抛错。schema 声明 object 时必须卡住类型，
+            # 否则裸标量流到调用方下标取值处炸 TypeError（不可重试、错误码失真）。
+            if (
+                json_schema is not None
+                and json_schema.get("type") == "object"
+                and not isinstance(payload, dict)
+            ):
+                raise LlmOutputFormatError(
+                    f"要求输出 JSON object，实际解析到 {type(payload).__name__}: {str(payload)[:80]}",
+                    validation_errors=[f"expected object, got {type(payload).__name__}"],
+                    extra={"raw_tail": str(content)[-200:]},
+                )
             _account(msgs2, payload, budget)
             return payload
         except LlmOutputFormatError as e:

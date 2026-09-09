@@ -152,3 +152,93 @@ class TestInvokeJsonStructuredFallback:
         )
         assert result["nodes"][0]["node_id"] == "n-1"
         assert llm.used_methods == ["function_calling", "json_mode"]
+
+
+# ── 分支 B（json_schema / 裸 parser）的 object 类型守卫 ──────────
+class _ScriptedLLM:
+    """按脚本顺序返回 content 的伪 LLM：模拟弱模型输出数字开头纯文本。"""
+
+    def __init__(self, contents: list[str]) -> None:
+        self._contents = contents
+        self.calls = 0
+
+    async def ainvoke(self, messages: list[BaseMessage], **_: Any) -> BaseMessage:
+        content = self._contents[min(self.calls, len(self._contents) - 1)]
+        self.calls += 1
+        return AIMessage(content=content)
+
+
+_QUESTION_SCHEMA = {
+    "type": "object",
+    "required": ["questions"],
+    "properties": {"questions": {"type": "string", "minLength": 2}},
+}
+
+
+class TestInvokeJsonObjectTypeGuard:
+    @pytest.mark.asyncio
+    async def test_bare_int_output_raises_output_format_error(self):
+        """回归：模型输出裸数字 → 必须归一为 LlmOutputFormatError，而不是把 int
+        透传给调用方去下标取值（历史症状：'int' object is not subscriptable）。"""
+        from devflow.errors import LlmOutputFormatError
+        from devflow.llm_client import _invoke_json_once
+        from devflow.resilience import CircuitBreaker, TokenBudget
+
+        llm = _ScriptedLLM(["123"])
+        with pytest.raises(LlmOutputFormatError) as ei:
+            await _invoke_json_once(
+                llm=llm,
+                messages=[SystemMessage(content="s"), HumanMessage(content="请输出追问")],
+                response_model=None,
+                json_schema=_QUESTION_SCHEMA,
+                max_retries=0,
+                breaker=CircuitBreaker("t-int"),
+                budget=TokenBudget(),
+                response_type="clarify_question",
+                model_spec="t-int",
+            )
+        assert "expected object, got int" in " ".join(ei.value.extra.get("validation_errors", []))
+
+    @pytest.mark.asyncio
+    async def test_digit_led_output_retried_into_object(self):
+        """模型首轮输出「1. …」数字开头纯文本 → 守卫拦下 → 重试拿到合法 object。"""
+        from devflow.llm_client import _invoke_json_once
+        from devflow.resilience import CircuitBreaker, TokenBudget
+
+        llm = _ScriptedLLM([
+            "1. 请补充边界场景（如除零）？",
+            '{"questions": "请补充边界场景（如除零）？"}',
+        ])
+        result = await _invoke_json_once(
+            llm=llm,
+            messages=[SystemMessage(content="s"), HumanMessage(content="请输出追问")],
+            response_model=None,
+            json_schema=_QUESTION_SCHEMA,
+            max_retries=1,
+            breaker=CircuitBreaker("t-retry"),
+            budget=TokenBudget(),
+            response_type="clarify_question",
+            model_spec="t-retry",
+        )
+        assert llm.calls == 2
+        assert result["questions"].startswith("请补充边界场景")
+
+    @pytest.mark.asyncio
+    async def test_object_schema_without_type_declaration_untouched(self):
+        """schema 未声明 type=object 时不加守卫（保持旧行为：数组等合法 JSON 直接透传）。"""
+        from devflow.llm_client import _invoke_json_once
+        from devflow.resilience import CircuitBreaker, TokenBudget
+
+        llm = _ScriptedLLM(['["a", "b"]'])
+        result = await _invoke_json_once(
+            llm=llm,
+            messages=[SystemMessage(content="s"), HumanMessage(content="列出")],
+            response_model=None,
+            json_schema={"type": "array", "items": {"type": "string"}},
+            max_retries=0,
+            breaker=CircuitBreaker("t-arr"),
+            budget=TokenBudget(),
+            response_type="general",
+            model_spec="t-arr",
+        )
+        assert result == ["a", "b"]
