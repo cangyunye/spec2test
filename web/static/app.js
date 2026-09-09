@@ -9,7 +9,7 @@ const $ = (id) => document.getElementById(id);
 const S = {
   tid: null, running: false, gate: null, gatePayload: null,
   stage: "clarify", startedAt: 0, lastNodeAt: 0, timer: null,
-  graph: null, report: null, health: null, noCode: false,
+  graph: null, report: null, health: null, noCode: false, testCardEl: null,
   autoScroll: true, live: new Map(), theme: document.documentElement.dataset.theme || "dark",
   mermaidReady: false,
 };
@@ -611,7 +611,10 @@ function renderTestCard(report) {
   actions.appendChild(miniBtn("⭳ MD", () => exportTestMD(cases, report), "导出 Markdown（总-分结构）"));
   actions.appendChild(miniBtn("⧉ 复制", () => copyText(testToMD(cases, report), "测试用例文档已复制")));
 
-  feedAppend(card);
+  // test_run 会把同一份报告再推一次（回填执行统计）：已有卡片就原地替换，不重复插卡
+  if (S.testCardEl && S.testCardEl.isConnected) S.testCardEl.replaceWith(card);
+  else feedAppend(card);
+  S.testCardEl = card;
   renderExportBar();
   return card;
 }
