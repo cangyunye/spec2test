@@ -363,3 +363,57 @@ class TestPromptJsonParsing:
         with pytest.raises(LlmOutputFormatError) as ei:
             await _drive_structured(llm, _Req)
         assert "expected object, got list" in " ".join(ei.value.extra.get("validation_errors", []))
+
+
+# ── 回归：模型未吐 tool call 时 with_structured_output 返回 None ─────
+class _FcNoneReturnLLM:
+    """模拟 DeepSeek 偶发纯文本回答：结构化档 ainvoke 返回 None（langchain 对
+    「消息里没有 tool_calls」不抛错而是返回 None），裸 ainvoke 返回 raw_content。"""
+
+    def __init__(self, *, json_mode_none_too: bool = False,
+                 raw_content: str = '{"req_type": "bug_fix", "project_context": "计算器"}') -> None:
+        self._json_mode_none_too = json_mode_none_too
+        self._raw_content = raw_content
+        self.used_methods: list[str] = []
+
+    def with_structured_output(self, schema: Any, *, method: str = "function_calling"):
+        self.used_methods.append(method)
+        none_too = self._json_mode_none_too
+
+        class _Structured:
+            async def ainvoke(self, msgs: list[BaseMessage], **_: Any) -> Any:
+                if method == "function_calling" or none_too:
+                    return None
+
+                class _Out:
+                    def model_dump(self, mode: str = "python") -> dict[str, Any]:
+                        return {"req_type": "bug_fix", "project_context": "计算器"}
+
+                return _Out()
+
+        return _Structured()
+
+    async def ainvoke(self, messages: list[BaseMessage], **_: Any) -> BaseMessage:
+        return AIMessage(content=self._raw_content)
+
+
+class TestNoToolCallNoneGuard:
+    @pytest.mark.asyncio
+    async def test_fc_none_degrades_to_json_mode(self):
+        """回归（历史症状 'NoneType' object is not iterable）：模型未触发 tool call 时
+        with_structured_output 返回 None，必须退化到下一档，而不是 dict(None) 炸 TypeError。"""
+        llm = _FcNoneReturnLLM()
+        result = await _drive_structured(llm, _Req)
+        assert result == {"req_type": "bug_fix", "project_context": "计算器"}
+        assert llm.used_methods == ["function_calling", "json_mode"]
+
+    @pytest.mark.asyncio
+    async def test_fc_none_all_methods_raises_output_format(self):
+        """结构化档全 None 且裸补全不可解析 → 归一 LlmOutputFormatError（可重试），
+        不漏 TypeError('NoneType' object is not iterable)。"""
+        from devflow.errors import LlmOutputFormatError
+
+        llm = _FcNoneReturnLLM(json_mode_none_too=True, raw_content="我无法回答这个问题")
+        # 三档全试过后抛最后一档（prompt_json）的可重试格式错误，而非 TypeError
+        with pytest.raises(LlmOutputFormatError):
+            await _drive_structured(llm, _Req)

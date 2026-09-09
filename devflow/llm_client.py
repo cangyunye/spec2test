@@ -339,7 +339,8 @@ def _get_model(spec: str | LlmProviderSpec):
         # 导致 function_calling 结构化输出必败。本工具链以结构化 JSON 为主，
         # 直接关掉 thinking；如需推理能力改用非结构化 invoke_text 或换模型。
         if spec["model"].startswith("deepseek-v4"):
-            kwargs["model_kwargs"] = {"extra_body": {"thinking": {"type": "disabled"}}}
+            # extra_body 是 langchain-openai 的一等参数，塞 model_kwargs 会触发弃用告警
+            kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
         _model_cache[key] = ChatOpenAI(
             model=spec["model"],
             base_url=spec["base_url"],
@@ -454,6 +455,14 @@ def _make_structured(llm: Any, response_model: Type[BaseModel], method: str | No
                     else:
                         structured = llm.with_structured_output(response_model, method=m)
                         out = await structured.ainvoke(msgs)
+                        # 模型未触发 tool call 时（如 DeepSeek 偶发纯文本回答），
+                        # with_structured_output 不抛错而是返回 None；这里必须转成
+                        # 可重试的 OUTPUT_FORMAT 错误走退化链，否则上层 dict(None)
+                        # 会炸成不可重试的 TypeError('NoneType' object is not iterable)
+                        if out is None:
+                            raise OutputParserException(
+                                f"模型未返回 tool_call（method={m}），未触发 function calling"
+                            )
                     return out
                 except OutputParserException as e:
                     # 模型输出不合 schema → 归类 LLM.OUTPUT_FORMAT（可重试）

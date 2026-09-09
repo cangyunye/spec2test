@@ -261,6 +261,35 @@ class TestGetModel:
         b = _get_model(spec)
         assert a is b
 
+    def test_deepseek_v4_extra_body_first_class_param(self):
+        """回归：DeepSeek V4 关 thinking 走一等参数 extra_body，
+        不再塞 model_kwargs（langchain-openai 1.x 会发弃用 UserWarning）。"""
+        import warnings
+
+        spec: LlmProviderSpec = {
+            "name": "ds4",
+            "base_url": "https://api.deepseek.com/v1",
+            "api_key": "sk-ds4",
+            "model": "deepseek-v4-flash",
+        }
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            llm = _get_model(spec)
+        assert not [w for w in caught if "extra_body" in str(w.message)]
+        assert llm.extra_body == {"thinking": {"type": "disabled"}}
+        assert llm.model_kwargs == {}
+
+    def test_non_deepseek_no_extra_body(self):
+        spec: LlmProviderSpec = {
+            "name": "glm",
+            "base_url": "https://open.bigmodel.cn/api/paas/v4",
+            "api_key": "sk-glm",
+            "model": "glm-5.3",
+        }
+        llm = _get_model(spec)
+        assert not llm.extra_body
+        assert llm.model_kwargs == {}
+
     def test_different_providers_different_instances(self):
         s1: LlmProviderSpec = {
             "name": "A", "base_url": "https://a.com/v1", "api_key": "k", "model": "m1"
