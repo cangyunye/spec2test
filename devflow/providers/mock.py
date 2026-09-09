@@ -166,6 +166,7 @@ class MockTestGen(TestGenProvider):
         session_id: str | None = None,
         requirement: dict[str, Any] | None = None,
         feedback: str | None = None,
+        checklists: list[dict[str, str]] | None = None,
     ) -> TestReport:
         edge_ids: list[str] = []
         if logic_graph:

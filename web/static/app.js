@@ -831,7 +831,8 @@ function onStreamEnd(e) {
   refreshSessions();
   if (S.gate) {
     const gateStage = S.gate === "graph_review" ? "graph_review"
-      : S.gate === "graph_type_select" ? "graph" : "review";
+      : S.gate === "graph_type_select" ? "graph"
+      : S.gate === "checklist_route" ? "test" : "review";
     setStep(stepIdxForStage(gateStage), false);
     updateComposer();
   } else if (S.stage === "done") {
@@ -851,6 +852,7 @@ const GATE_META = {
   graph_type_select: { n: 0, title: "制图前 · 选择逻辑图种类" },
   graph_review: { n: 1, title: "制图评审：逻辑图与需求对齐了吗？" },
   human_review: { n: 2, title: "人工验收：产物达到验收标准了吗？" },
+  checklist_route: { n: 0, tag: "GATE · 清单路由", title: "业务清单路由：确认要注入的检查清单" },
 };
 
 const GRAPH_TYPE_ICONS = { flowchart: "⎯>", sequence: "⇄", state: "◉", er: "▤" };
@@ -859,6 +861,9 @@ const GRAPH_TYPE_LABELS = { flowchart: "流程图", sequence: "时序图", state
 function gateSubText(gate) {
   if (gate === "graph_type_select") {
     return "选择将决定制图视角与结构化产物形态 · 选定后本次需求内不再重复询问";
+  }
+  if (gate === "checklist_route") {
+    return "AI 已按需求匹配业务清单 · 取消勾选即不加载 · 确认后清单作为用例设计依据";
   }
   if (gate === "graph_review") {
     return S.noCode
@@ -875,7 +880,7 @@ function openGate(gate, payload) {
   S.gatePayload = payload || {};
   if (S.gatePayload.mode) S.noCode = S.gatePayload.mode === "no_code";
   const meta = GATE_META[gate] || { n: "?", title: "确认" };
-  $("gateTag").textContent = meta.n ? `GATE ${meta.n}/2` : "GATE · 制图选项";
+  $("gateTag").textContent = meta.tag || (meta.n ? `GATE ${meta.n}/2` : "GATE · 制图选项");
   $("gateTitle").textContent = meta.title;
   $("gateSub").textContent = gateSubText(gate);
   $("gateComment").value = "";
@@ -889,7 +894,17 @@ function openGate(gate, payload) {
     $("btnReject").classList.add("hidden");
     $("btnApprove").classList.add("hidden");
     body.appendChild(gateTypeBody(S.gatePayload));
+  } else if (gate === "checklist_route") {
+    // 清单路由确认：★预选勾选树，「通过」=确认加载所选，「驳回」=跳过注入
+    S.clSelected = new Set(collectSuggested(S.gatePayload.candidates || []));
+    $("btnApprove").textContent = `确认加载（${S.clSelected.size}）`;
+    $("btnReject").textContent = "跳过，不注入清单";
+    $("btnApprove").classList.remove("hidden");
+    $("btnReject").classList.remove("hidden");
+    body.appendChild(gateChecklistBody(S.gatePayload));
   } else {
+    $("btnReject").textContent = "驳回";
+    $("btnApprove").textContent = "通过";
     $("btnReject").classList.remove("hidden");
     $("btnApprove").classList.remove("hidden");
     $("btnGatePeek").classList.remove("hidden");
@@ -901,6 +916,59 @@ function openGate(gate, payload) {
   $("gatePill").classList.add("hidden");
   setStep(stepIdxForStage(gate === "graph_type_select" ? "graph" : gate), false);
   updateComposer();
+}
+
+/* 清单路由：收集 AI 预选（suggested）的 rel_dir（业务 + 子业务一起预选） */
+function collectSuggested(candidates, out = []) {
+  (candidates || []).forEach((c) => {
+    if (c.suggested) out.push(c.rel_dir);
+    collectSuggested(c.children || [], out);
+  });
+  return out;
+}
+
+/* 清单路由确认树：业务/子业务两级勾选，勾业务联动全选子业务 */
+function gateChecklistBody(p) {
+  const wrap = h("div", "cl-route");
+  const root = p.root ? h("div", "cl-root mono", `清单库：${p.root}`) : null;
+  if (root) wrap.appendChild(root);
+  const list = h("div", "cl-list");
+  (p.candidates || []).forEach((biz) => {
+    list.appendChild(clCheckbox(biz, 0, (on) => {
+      // 业务勾选联动子业务
+      (biz.children || []).forEach((sub) => setClSelected(sub.rel_dir, on));
+    }));
+    (biz.children || []).forEach((sub) => list.appendChild(clCheckbox(sub, 1)));
+  });
+  wrap.appendChild(list);
+  wrap.appendChild(h("p", "cl-hint", "勾选业务会联动其子业务；可单独取消某个子业务。确认后清单内容将注入测试设计，并在用例卡片标注来源。"));
+  return wrap;
+}
+
+function clCheckbox(node, depth, onChange) {
+  const row = h("label", "cl-item" + (depth ? " sub" : ""));
+  const cb = h("input");
+  cb.type = "checkbox";
+  cb.checked = S.clSelected.has(node.rel_dir);
+  cb.dataset.rel = node.rel_dir;
+  cb.onchange = () => {
+    setClSelected(node.rel_dir, cb.checked);
+    if (onChange) onChange(cb.checked);
+    $("btnApprove").textContent = `确认加载（${S.clSelected.size}）`;
+  };
+  row.appendChild(cb);
+  const text = h("span", "cl-text");
+  text.appendChild(h("b", null, node.name || node.rel_dir));
+  text.appendChild(h("span", "cl-dir mono", node.rel_dir));
+  row.appendChild(text);
+  if (node.description) row.appendChild(h("span", "cl-desc", node.description));
+  if (node.reason) row.appendChild(h("span", "cl-reason mono", "↳ " + node.reason));
+  return row;
+}
+
+function setClSelected(rel, on) {
+  if (on) S.clSelected.add(rel);
+  else S.clSelected.delete(rel);
 }
 
 /* 图种类选择卡：候选 + 推荐/推断标记，点卡片即选定并继续制图 */
@@ -1042,6 +1110,7 @@ function closeGateToPeek() {
   $("gateModal").classList.add("hidden");
   $("gatePillText").textContent =
     S.gate === "graph_type_select" ? "图种类待选择" :
+    S.gate === "checklist_route" ? "清单路由待确认" :
     S.gate === "graph_review" ? "制图评审待决策" : "人工验收待决策";
   $("gatePill").classList.remove("hidden");
 }
@@ -1052,16 +1121,34 @@ function reopenGate() {
 function submitGate(decision, comment) {
   if (!S.gate) return;
   const gate = S.gate;
+  const isRoute = gate === "checklist_route";
+  // 清单路由门禁：approve/reject 映射为 confirm/skip，携带勾选的业务路径
+  const routeDecision = isRoute ? (decision === "approve" ? "confirm" : "skip") : null;
+  const selected = isRoute ? [...(S.clSelected || [])].join(",") : "";
   $("gateModal").classList.add("hidden");
   $("gatePill").classList.add("hidden");
   S.gate = null;
-  addDivider(decision === "approve" ? "评审通过 · 继续推进" : "已驳回 · 意见回传",
-    comment ? `「${comment.slice(0, 40)}${comment.length > 40 ? "…" : ""}」` : null, true);
+  if (isRoute) {
+    const n = routeDecision === "confirm" ? (S.clSelected || []).length : 0;
+    addDivider(
+      routeDecision === "confirm" ? `清单已确认 · 注入 ${n} 项` : "已跳过清单注入",
+      null, true,
+    );
+  } else {
+    addDivider(decision === "approve" ? "评审通过 · 继续推进" : "已驳回 · 意见回传",
+      comment ? `「${comment.slice(0, 40)}${comment.length > 40 ? "…" : ""}」` : null, true);
+  }
   if (decision === "approve") setStep(stepIdxForStage(gate) + 1, true);
   setRunning(true);
-  startStream({ op: "gate", decision, comment: comment || "" });
-  toast(decision === "approve" ? "已通过" : "意见已回传",
-    decision === "approve" ? "流程继续推进" : "正在按意见重新执行");
+  startStream(isRoute
+    ? { op: "gate", decision: routeDecision, comment: "", selected }
+    : { op: "gate", decision, comment: comment || "" });
+  toast(
+    isRoute ? (routeDecision === "confirm" ? "清单已加载" : "已跳过清单")
+      : decision === "approve" ? "已通过" : "意见已回传",
+    isRoute ? (routeDecision === "confirm" ? "业务检查清单将作为用例设计依据" : "按常规流程设计用例")
+      : decision === "approve" ? "流程继续推进" : "正在按意见重新执行",
+  );
 }
 
 /* ── 会话 ────────────────────────────────────────────── */
@@ -1140,6 +1227,12 @@ async function openSession(tid) {
         const cand = await api(`/api/sessions/${tid}/graph-type-candidates`);
         if (cand.pending) openGate("graph_type_select", cand);
       } catch { /* 恢复候选失败不阻塞会话打开 */ }
+    } else if (next.includes("checklist_route_gate")) {
+      // 清单路由确认门禁：候选树已由 match 节点落 checkpoint，恢复端点直接回放
+      try {
+        const cand = await api(`/api/sessions/${tid}/checklist-candidates`);
+        if (cand.pending) openGate("checklist_route", cand);
+      } catch { /* 恢复候选失败不阻塞会话打开 */ }
     } else if (next.includes("graph_review")) {
       const g = vals.logic_graph || {};
       const req = vals.requirement || {};
@@ -1193,6 +1286,8 @@ function updateComposer() {
   } else if (S.gate) {
     hint.textContent = S.gate === "graph_type_select"
       ? "图种类待选择 — 请在弹窗中挑选本次逻辑图的种类"
+      : S.gate === "checklist_route"
+      ? "业务清单路由待确认 — 请在弹窗中勾选要注入的检查清单"
       : S.gate === "graph_review"
       ? "制图评审待决策 — 请在评审窗中通过或驳回"
       : "人工验收待决策 — 请在验收窗中通过或驳回";
@@ -1614,6 +1709,8 @@ function boot() {
   // 门禁
   $("btnApprove").onclick = () => submitGate("approve", null);
   $("btnReject").onclick = () => {
+    // 清单路由门禁的「跳过」无需填意见，直接决策
+    if (S.gate === "checklist_route") { submitGate("reject", null); return; }
     $("gateCommentWrap").classList.remove("hidden");
     $("btnReject").classList.add("hidden");
     $("btnGateSubmit").classList.remove("hidden");

@@ -386,6 +386,7 @@ class OpenCodeTestProvider(TestGenProvider):
         session_id: str | None = None,
         requirement: dict[str, Any] | None = None,
         feedback: str | None = None,
+        checklists: list[dict[str, str]] | None = None,
     ) -> TestReport:
         if not project_root:
             # 仅需求模式（未提供项目代码）：OpenCode 没有可操作的项目，委托 LLM
@@ -401,6 +402,7 @@ class OpenCodeTestProvider(TestGenProvider):
                 session_id=session_id,
                 requirement=requirement,
                 feedback=feedback,
+                checklists=checklists,
             )
         if not self.base_url:
             # 供应商未启用 —— 不可重试；抛统一 DevFlowError，让 provider_nodes 可以走 fallback

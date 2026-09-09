@@ -427,6 +427,7 @@ def make_test_gen_node(providers: Providers | None = None):
                 return _apply_error_out("test_gen", state, err, stage_when_fail="test")
 
         try:
+            checklist_ctx = state.get("checklist_context") or {}
             report = await p.test_gen.generate(
                 project_root,
                 target_symbols,
@@ -436,6 +437,7 @@ def make_test_gen_node(providers: Providers | None = None):
                 session_id=session_id,
                 requirement=req if requirement_only else None,
                 feedback=state.get("review_feedback"),
+                checklists=checklist_ctx.get("checklists") or None,
             )
         except DevFlowError as e:
             return _apply_error_out(

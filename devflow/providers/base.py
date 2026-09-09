@@ -85,11 +85,16 @@ class TestRun(TypedDict):
     logs: str
 
 
-class TestReport(TypedDict):
+class TestReport(TypedDict, total=False):
     session_id: str | None
     test_cases: list[TestCase]
     run: TestRun
     target_symbols: list[str]
+    # 总-分结构（LLM 设计模式）
+    overview: str | None
+    self_check: list[str] | None
+    # 注入的业务检查清单来源（checklist 库 rel_dir 列表，空 = 未加载）
+    checklist_refs: list[str]
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -180,9 +185,12 @@ class TestGenProvider(CodeProvider, ABC):
         session_id: str | None = None,
         requirement: dict[str, Any] | None = None,
         feedback: str | None = None,
+        checklists: list[dict[str, str]] | None = None,
     ) -> TestReport:
         """生成针对 target_symbols 的测试并运行，返回完整测试报告。
 
         requirement: 结构化需求（仅需求模式下的主要设计依据，代码模式可忽略）
         feedback:    人工验收驳回的意见，重新设计用例时需针对性修正
+        checklists:  路由确认后加载的业务检查清单 [{rel_dir, name, content}]，
+                     非空时用例设计必须逐条核对覆盖（None = 库未命中）
         """

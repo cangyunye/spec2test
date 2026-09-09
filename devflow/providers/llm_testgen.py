@@ -104,6 +104,7 @@ def _build_user_prompt(
     *,
     requirement: dict[str, Any] | None = None,
     feedback: str | None = None,
+    checklists: list[dict[str, str]] | None = None,
 ) -> str:
     graph_ctx = {
         "graph_id": logic_graph.get("graph_id"),
@@ -146,6 +147,19 @@ def _build_user_prompt(
             "【上轮验收意见（用户驳回测试设计后给出的修改要求，本轮必须针对性修正）】\n"
             f"{feedback.strip()}\n"
         )
+    if checklists:
+        # 业务检查清单注入：路由门禁确认后加载的历史沉淀规则（checklist 库）
+        cl_parts = [
+            "【业务检查清单（业务方沉淀的历史规则，设计前逐条核对）】\n"
+            "以下每条清单规则必须被 scenarios 覆盖：可在对应用例的 rationale 里注明"
+            "「清单:<业务>/<条目摘要>」；若某条规则与本需求明确无关，在 self_check 中说明豁免原因。\n"
+        ]
+        for cl in checklists:
+            label = cl.get("name") or cl.get("rel_dir") or "业务清单"
+            cl_parts.append(f"—— {label}（{cl.get('rel_dir', '')}）——")
+            cl_parts.append(str(cl.get("content", "")).strip())
+            cl_parts.append("")
+        parts.append("\n".join(cl_parts) + "\n")
     parts.append(
         "请按上述设计策略系统化输出测试场景组：先写 overview 测试概述（总-分结构的总文档），"
         "再输出 scenarios（每条标注 case_type 设计方法与 target 所属模块），最后给出 self_check 自检结论。"
@@ -166,13 +180,14 @@ class LlmTestGenProvider(TestGenProvider):
         session_id: str | None = None,
         requirement: dict[str, Any] | None = None,
         feedback: str | None = None,
+        checklists: list[dict[str, str]] | None = None,
     ) -> TestReport:
         graph = logic_graph or {}
         result = await invoke_json(
             system_prompt=SYSTEM_PROMPT_TEST_DESIGN,
             user_prompt=_build_user_prompt(
                 project_root, target_symbols, graph,
-                requirement=requirement, feedback=feedback,
+                requirement=requirement, feedback=feedback, checklists=checklists,
             ),
             response_model=_TestDesign,
             response_type="test_design",
@@ -226,10 +241,17 @@ class LlmTestGenProvider(TestGenProvider):
                 "failed": 0,
                 "skipped": 0,
                 "coverage_pct": None,
-                "logs": f"LLM 设计 {total} 个测试场景（功能/性能/安全分级），未执行真实测试",
+                "logs": f"LLM 设计 {total} 个测试场景（功能/性能/安全分级），未执行真实测试"
+                + (
+                    f"；已注入业务检查清单：{', '.join(cl.get('rel_dir', '') for cl in checklists)}"
+                    if checklists
+                    else ""
+                ),
             },
             "target_symbols": target_symbols,
             # 总-分结构 + 质量自检（方法论来自 doc-based / functional testcase-generator skills）
             "overview": result.get("overview") if isinstance(result, dict) else None,
             "self_check": result.get("self_check") if isinstance(result, dict) else None,
+            # 注入的清单来源（前端卡片标注用）
+            "checklist_refs": [cl.get("rel_dir", "") for cl in checklists] if checklists else [],
         }
