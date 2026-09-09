@@ -379,6 +379,90 @@ def cmd_export(
 
 
 # ═══════════════════════════════════════════════════════════════════
+# Checklist 库管理（.checklist）
+# ═══════════════════════════════════════════════════════════════════
+
+checklist_app = typer.Typer(help="业务 Checklist 库（.checklist）管理：init / list / show")
+app.add_typer(checklist_app, name="checklist")
+
+
+@checklist_app.command("init")
+def checklist_init(
+    root: Path = typer.Option(
+        Path(""), "--root", help="库根目录；缺省按 DEVFLOW_CHECKLIST_ROOT → data/checklist 解析"
+    ),
+    no_example: bool = typer.Option(False, "--no-example", help="不生成 payment 示例业务"),
+) -> None:
+    """初始化 Checklist 库：README + _template 模板（默认附 payment 示例，可立即体验路由）。"""
+    from .checklist.scaffold import init_library
+
+    target = root if str(root) else None
+    written = init_library(target, with_example=not no_example)
+    console.print(f"[green]✓[/] Checklist 库已就绪 → [bold]{target or '（自动解析根）'}[/]")
+    for p in written:
+        console.print(f"  · {p}")
+
+
+@checklist_app.command("list")
+def checklist_list(
+    root: Path = typer.Option(Path(""), "--root", help="库根目录；缺省按默认优先级解析"),
+) -> None:
+    """列示库全树：业务 → 子业务（描述 / 关键词 / 条目数）。"""
+    from .checklist.library import checklist_tree, resolve_root
+
+    # --root 传的是库根本身；缺省时才按优先级自动解析
+    lib_root = Path(str(root)) if str(root) else resolve_root("")
+    tree = checklist_tree(lib_root)
+    if not tree:
+        console.print(
+            f"[yellow]—[/] 库为空（{lib_root}）。运行 [bold]devflow checklist init[/] 生成模板与示例"
+        )
+        return
+    table = Table(title=f"Checklist 库（{lib_root}）")
+    table.add_column("业务 / 子业务")
+    table.add_column("名称")
+    table.add_column("路由描述")
+    table.add_column("条目", justify="right")
+    for biz in tree:
+        table.add_row(
+            f"[bold]{biz['rel_dir']}[/]",
+            biz["name"],
+            biz["description"] or "—",
+            str(biz["item_count"]) if biz["has_checklist"] else "—",
+        )
+        for sub in biz["children"]:
+            table.add_row(
+                f"  ↳ {sub['rel_dir']}",
+                sub["name"],
+                sub["description"] or "—",
+                str(sub["item_count"]) if sub["has_checklist"] else "—",
+            )
+    console.print(table)
+
+
+@checklist_app.command("show")
+def checklist_show(
+    business: str = typer.Argument(..., help="业务/子业务相对路径，如 payment 或 payment/refund"),
+    root: Path = typer.Option(Path(""), "--root", help="库根目录；缺省按默认优先级解析"),
+) -> None:
+    """查看某业务目录下的 scenario.md 与 checklist.md 原文。"""
+    from .checklist.library import CHECKLIST_FILE, SCENARIO_FILE, resolve_root, validate_rel_dir
+
+    lib_root = Path(str(root)) if str(root) else resolve_root("")
+    rel = validate_rel_dir(business)
+    if rel is None:
+        console.print(f"[red]×[/] 非法的业务路径: {business!r}")
+        raise typer.Exit(code=1)
+    d = lib_root / rel
+    for fname, title in ((SCENARIO_FILE, "scenario.md（路由标签）"), (CHECKLIST_FILE, "checklist.md（检查清单）")):
+        f = d / fname
+        if not f.is_file():
+            console.print(f"[yellow]—[/] {rel}/{fname} 不存在")
+            continue
+        console.print(Panel(Syntax(f.read_text(encoding="utf-8"), "markdown", theme="monokai"), title=f"{title} · {rel}"))
+
+
+# ═══════════════════════════════════════════════════════════════════
 # 交互主循环
 # ═══════════════════════════════════════════════════════════════════
 
