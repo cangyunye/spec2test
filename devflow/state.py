@@ -156,6 +156,7 @@ class GlobalState(TypedDict, total=False):
     opencode_sessions: OpenCodeSessions
 
     # ── 4. 流程控制字段 ────────────────────────────────
+    session_title: str                        # 会话名称：澄清阶段从主要功能生成（LLM 起名，失败退 project_context 截断）
     current_stage: StageType
     graph_type: Optional[str]                # 制图前门禁选定：flowchart/sequence/state/er
     clarify_mode: Literal["normal", "brainstorm", "grill"]   # 澄清模式：普通列表 / 头脑风暴 / 拷问

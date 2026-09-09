@@ -633,6 +633,7 @@ def initial_state() -> dict[str, Any]:
         "test_report": None,
         "opencode_sessions": {"search": None, "code_gen": None, "test_gen": None},
         "current_stage": "clarify",
+        "session_title": "",
         "clarify_mode": "normal",
         "clarify_mode_prompt": False,
         "missing_fields": [],

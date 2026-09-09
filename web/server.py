@@ -85,9 +85,23 @@ def create_session(body: CreateSession) -> dict[str, Any]:
     return {"thread_id": tid, "stage": "clarify"}
 
 
+def _session_title(vals: dict[str, Any]) -> str:
+    """会话展示名的确定性优先级：
+    state.session_title（澄清阶段 LLM 起名）→ project_context 截断 → 首条用户消息（调用方兜底）。
+    """
+    t = str(vals.get("session_title") or "").strip()
+    if t:
+        return t
+    req = vals.get("requirement") or {}
+    ctx = str(req.get("project_context") or "").strip()
+    if ctx:
+        return ctx[:30]
+    return ""
+
+
 @app.get("/api/sessions")
 def list_sessions() -> list[dict[str, Any]]:
-    """会话列表：thread_id + 标题（首条用户消息）+ 阶段 + 是否有图。按最近活动排序。"""
+    """会话列表：thread_id + 标题（需求名 → 背景摘要 → 首条用户消息）+ 阶段 + 是否有图。按最近活动排序。"""
     conn = _get_sqlite_conn()
     try:
         rows = conn.execute(
@@ -107,12 +121,14 @@ def list_sessions() -> list[dict[str, Any]]:
             vals = graph.get_state(_config(thread_id=tid)).values or {}
             entry["stage"] = vals.get("current_stage", "clarify")
             entry["has_graph"] = bool(vals.get("logic_graph"))
-            for m in vals.get("messages") or []:
-                mtype = getattr(m, "type", None) or (m.get("type") if isinstance(m, dict) else "")
-                if mtype == "human":
-                    content = str(getattr(m, "content", "") or (m.get("content") if isinstance(m, dict) else ""))
-                    entry["title"] = content.strip().splitlines()[0][:60] if content.strip() else ""
-                    break
+            entry["title"] = _session_title(vals)
+            if not entry["title"]:
+                for m in vals.get("messages") or []:
+                    mtype = getattr(m, "type", None) or (m.get("type") if isinstance(m, dict) else "")
+                    if mtype == "human":
+                        content = str(getattr(m, "content", "") or (m.get("content") if isinstance(m, dict) else ""))
+                        entry["title"] = content.strip().splitlines()[0][:60] if content.strip() else ""
+                        break
         except Exception:
             pass
         out.append(entry)

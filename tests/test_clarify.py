@@ -580,3 +580,91 @@ class TestBuildQuestionFailureVisibility:
         out = await clarify_build_question_async(state)  # type: ignore[arg-type]
         content = out["messages"][0].content
         assert "抽取失败" not in content
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 会话命名：澄清阶段从主要功能生成 session_title
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestSessionTitle:
+    @pytest.mark.asyncio
+    async def test_title_from_llm_on_first_context(self, monkeypatch):
+        """首次抽出 project_context → LLM 起名写入 session_title（拿到起名 prompt）。"""
+        captured: dict = {}
+
+        async def fake_extract(**kwargs):
+            return {"project_context": "桌面计算器加科学计算功能"}
+
+        async def fake_name(**kwargs):
+            captured.update(kwargs)
+            return "计算器科学计算"
+
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_json", fake_extract)
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_text", fake_name)
+        state = {"messages": [HumanMessage(content="做个计算器")]}
+        out = await clarify_extract_async(state)  # type: ignore[arg-type]
+        assert out["session_title"] == "计算器科学计算"
+        assert "请输出会话名称" in captured["user_prompt"]
+
+    @pytest.mark.asyncio
+    async def test_title_falls_back_to_context_truncation_on_llm_error(self, monkeypatch):
+        """LLM 起名失败（熔断/无 provider）→ 退回 project_context 截断，抽取不受影响。"""
+        async def fake_extract(**kwargs):
+            return {"project_context": "桌面计算器加科学计算功能，含三角函数与对数"}
+
+        async def boom(**kwargs):
+            raise LlmRefusedError("provider quota exceeded")
+
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_json", fake_extract)
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_text", boom)
+        out = await clarify_extract_async(
+            {"messages": [HumanMessage(content="做个计算器")]}
+        )  # type: ignore[arg-type]
+        assert out["session_title"] == "桌面计算器加科学计算功能，含三角函数与对数"[:20]
+        assert out["last_error_code"] is None  # 主流程不受命名失败影响
+
+    @pytest.mark.asyncio
+    async def test_no_renaming_when_title_exists(self, monkeypatch):
+        """已有标题 → 不再发起命名调用（一次性）。"""
+        async def fake_extract(**kwargs):
+            return {"project_context": "另一个需求背景"}
+
+        async def must_not_call(**kwargs):
+            raise AssertionError("已有标题时不应再调用起名")
+
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_json", fake_extract)
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_text", must_not_call)
+        out = await clarify_extract_async({
+            "messages": [HumanMessage(content="再补一点")],
+            "session_title": "已有名称",
+        })  # type: ignore[arg-type]
+        assert "session_title" not in out
+
+    @pytest.mark.asyncio
+    async def test_no_title_without_project_context(self, monkeypatch):
+        """project_context 缺失 → 不起名（澄清循环本就会追问主要功能）。"""
+        async def fake_extract(**kwargs):
+            return {"req_type": "bug_fix"}
+
+        async def must_not_call(**kwargs):
+            raise AssertionError("无 project_context 时不应调用起名")
+
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_json", fake_extract)
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_text", must_not_call)
+        out = await clarify_extract_async(
+            {"messages": [HumanMessage(content="修个 bug")]}
+        )  # type: ignore[arg-type]
+        assert "session_title" not in out
+
+    @pytest.mark.asyncio
+    async def test_mock_provider_names_session(self):
+        """无 provider（mock 兜底）模式：起名 prompt 走 mock 分支，返回像样的标题。"""
+        from devflow.llm_client import invoke_text
+        from devflow.nodes.clarify import SYSTEM_PROMPT_SESSION_TITLE
+
+        name = await invoke_text(
+            system_prompt=SYSTEM_PROMPT_SESSION_TITLE,
+            user_prompt="需求信息：\n{}\n\n请输出会话名称（只输出名称本身）：",
+        )
+        assert name == "桌面计算器科学计算"

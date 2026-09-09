@@ -208,6 +208,8 @@ class _MockLLM:
                 {"graph_id": "mock-graph", **graph_payload}, ensure_ascii=False))
         if "测试架构师" in joined:
             return AIMessage(content=json.dumps(_MOCK_DEMO_TEST_DESIGN, ensure_ascii=False))
+        if "会话名称" in joined:
+            return AIMessage(content="桌面计算器科学计算")
         if "requirement" in joined.lower() and "json" in joined.lower():
             return AIMessage(content=json.dumps(_MOCK_DEMO_REQUIREMENT, ensure_ascii=False))
         if any(kw in joined.lower() for kw in ("logic", "graph", "逻辑图", "制图", "mermaid")):

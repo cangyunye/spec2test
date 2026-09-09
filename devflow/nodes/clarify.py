@@ -266,8 +266,12 @@ async def clarify_extract_async(state: GlobalState) -> dict[str, Any]:
             len(latest_user_text.strip()),
         )
 
+    # 4. 会话命名：首次拿到主要功能时生成（LLM 起名，失败退 project_context 截断）
+    title_update = await _ensure_session_title(state, merged)
+
     return {
         "requirement": merged,
+        **title_update,
         "last_error": None,
         "last_error_code": None,
         "last_error_retryable": None,
@@ -350,6 +354,46 @@ SYSTEM_PROMPT_QUESTION = """你是一个沟通能力很强的产品经理。根�
 3. 不要问已经填好的字段；
 4. 输出为纯文本，多问题用换行分隔，不要 JSON 格式。
 """
+
+
+SYSTEM_PROMPT_SESSION_TITLE = """你是一个需求分析师。根据需求信息，给这个需求起一个简短、具体的名称，
+用作会话列表里的展示名。
+要求：
+1. 只输出名称本身，不要引号、句号、前缀或任何解释，不要换行；
+2. 长度 4-12 个字，体现主要功能或模块（如「桌面计算器科学计算」「订单导出Excel」）；
+3. 不要用「需求」「功能」「模块」这类空泛词收尾。
+"""
+
+
+async def _ensure_session_title(state: GlobalState, requirement: dict[str, Any]) -> dict[str, Any]:
+    """首次拿到 project_context 时生成会话名称（一次性，供会话列表展示）。
+
+    LLM 起名失败（熔断 / 无 provider / 输出不可用）→ 退回 project_context 截断；
+    project_context 一直缺失时澄清循环本来就会追问它（「项目背景/主要功能」即
+    project_context），无需额外的提问环节。命名是锦上添花，任何异常都不得影响
+    抽取主流程。
+    """
+    if str(state.get("session_title") or "").strip():
+        return {}
+    ctx = str(requirement.get("project_context") or "").strip()
+    if not ctx:
+        return {}
+    name = ""
+    try:
+        raw = (await invoke_text(
+            system_prompt=SYSTEM_PROMPT_SESSION_TITLE,
+            user_prompt=(
+                "需求信息：\n"
+                f"{_format_requirement_for_llm(requirement)}\n\n"
+                "请输出会话名称（只输出名称本身）："
+            ),
+            max_retries=0,  # 命名不值得重试拖慢主流程，失败直接截断兜底
+        )).strip()
+        if raw and "mock fallback" not in raw:
+            name = raw.splitlines()[0].strip().strip("\"'「」『』` ").rstrip("。.，,")[:30]
+    except Exception as e:  # noqa: BLE001 - 命名尽力而为
+        logger.info("[clarify] LLM 会话起名失败，退回 project_context 截断: %s", e)
+    return {"session_title": name or ctx[:20]}
 
 
 # ═══════════════════════════════════════════════════════════════════
