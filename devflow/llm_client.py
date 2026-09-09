@@ -351,6 +351,59 @@ def _get_model(spec: str | LlmProviderSpec):
     return _model_cache[key]
 
 
+def _extract_json_object(text: str) -> dict[str, Any]:
+    """从模型输出提取 JSON object（prompt_json 档专用）。
+
+    JsonOutputParser 已能处理裸 JSON / ```json 围栏 / 尾部散文；这里补它不认的
+    散文前后包裹（「好的，结果如下：{...} 以上。」）——扫描首个 '{' 做括号配对
+    （跳过字符串字面量内的括号）。裸标量（数字开头的纯文本等）归一为
+    LlmOutputFormatError，绝不把非 dict 透传给调用方。
+    """
+    try:
+        payload = JsonOutputParser().parse(text)
+    except Exception:
+        payload = None
+    if isinstance(payload, dict):
+        return payload
+
+    start = text.find("{")
+    if start != -1:
+        depth = 0
+        in_str = False
+        escape = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if in_str:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        cand = json.loads(text[start:i + 1])
+                    except Exception:
+                        break  # 括号配对成功但内容不是合法 JSON → 放弃扫描
+                    if isinstance(cand, dict):
+                        return cand
+                    break
+
+    type_desc = type(payload).__name__ if payload is not None else "不可解析文本"
+    raise LlmOutputFormatError(
+        f"prompt_json 解析失败（期望 JSON object，实际 {type_desc}）: {text[:80]}",
+        validation_errors=[f"expected object, got {type_desc}"],
+        extra={"raw_tail": text[-200:]},
+    )
+
+
 def _make_structured(llm: Any, response_model: Type[BaseModel], method: str | None = None):
     """结构化输出兼容层（D1）。
 
@@ -414,42 +467,46 @@ def _make_structured(llm: Any, response_model: Type[BaseModel], method: str | No
             raise last_err
 
         async def _ainvoke_prompt_json(self, msgs: list[BaseMessage]) -> BaseModel:
-            """prompt_json 档：schema 进提示词，裸补全 + 本地解析校验。"""
+            """prompt_json 档：schema 进提示词，裸补全 + 本地解析校验。
+
+            自带一次纠错重试：解析/校验失败时把错误与原始输出尾拼回提示词再要一次
+            （弱模型首轮常见散文包裹 / 缺字段，盲重同样输入大概率复刻同样错误）。
+            """
             msgs2 = list(msgs)
             last_human = max(
                 (i for i, mm in enumerate(msgs2) if isinstance(mm, HumanMessage)), default=0
             )
-            prev = str(msgs2[last_human].content)
-            msgs2[last_human] = HumanMessage(content=prev + _schema_instruction())
-
-            resp = await llm.ainvoke(msgs2)
-            text = str(getattr(resp, "content", "") or "")
-            # 自部署推理模型（DeepSeek-R1 系蒸馏等）常把思考过程放在 <think> 块里，先剥掉
-            text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
-            try:
-                payload = JsonOutputParser().parse(text)
-            except Exception as e:
-                raise LlmOutputFormatError(
-                    f"prompt_json 解析失败: {e}",
-                    validation_errors=[str(e)],
-                    extra={"raw_tail": text[-200:]},
-                ) from e
-            # 宽容解析的坑：裸数字/数字开头文本会被解析成 int 而不是抛错，必须卡类型
-            if not isinstance(payload, dict):
-                raise LlmOutputFormatError(
-                    f"prompt_json 要求 JSON object，实际解析到 {type(payload).__name__}: "
-                    f"{str(payload)[:80]}",
-                    validation_errors=[f"expected object, got {type(payload).__name__}"],
-                    extra={"raw_tail": text[-200:]},
+            base_content = str(msgs2[last_human].content)
+            last_err: LlmOutputFormatError | None = None
+            raw_tail = ""
+            for attempt in range(2):
+                hint = "" if attempt == 0 else (
+                    "\n\n# 上一次错误输出（请修正）\n"
+                    f"错误: {last_err.message}\n"
+                    f"你输出的末尾: {raw_tail}\n"
+                    "请只输出一个符合 schema 的合法 JSON 对象，不要加任何说明文字。"
                 )
-            try:
-                return response_model.model_validate(payload)
-            except ValidationError as e:
-                raise LlmOutputFormatError(
-                    f"prompt_json 输出不符合 {response_model.__name__} schema: {e}",
-                    validation_errors=[err["msg"] for err in e.errors()],
-                    extra={"raw_tail": text[-200:]},
-                ) from e
+                msgs2[last_human] = HumanMessage(content=base_content + _schema_instruction() + hint)
+                resp = await llm.ainvoke(msgs2)
+                text = str(getattr(resp, "content", "") or "")
+                # 自部署推理模型（DeepSeek-R1 系蒸馏等）常把思考过程放在 <think> 块里，先剥掉
+                text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+                raw_tail = text[-200:]
+                try:
+                    payload = _extract_json_object(text)
+                except LlmOutputFormatError as e:
+                    last_err = e
+                    continue
+                try:
+                    return response_model.model_validate(payload)
+                except ValidationError as e:
+                    last_err = LlmOutputFormatError(
+                        f"prompt_json 输出不符合 {response_model.__name__} schema: {e}",
+                        validation_errors=[err["msg"] for err in e.errors()],
+                        extra={"raw_tail": raw_tail},
+                    )
+            assert last_err is not None
+            raise last_err
 
     return _StructuredWithFallback()
 

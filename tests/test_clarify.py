@@ -540,3 +540,43 @@ class TestClarifyCompleteConfirm:
             "retry_count": {"clarify_loop_cnt": 3},
         })  # type: ignore[arg-type]
         assert "messages" not in out
+
+
+class TestBuildQuestionFailureVisibility:
+    @pytest.mark.asyncio
+    async def test_surfaces_extract_failure_when_last_error_set(self, monkeypatch):
+        """回归：本轮抽取失败（last_error 非空）→ 追问开头必须明说「回答没被写入」，
+        否则用户只看到同样的问题反复出现，无从知道抽取在失败。"""
+        async def fake_invoke_text(**kwargs):
+            return "请补充项目背景。"
+
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_text", fake_invoke_text)
+        state = {
+            "missing_fields": ["project_context"],
+            "requirement": empty_requirement(),
+            "last_error": "[clarify_extract:LLM.OUTPUT_FORMAT] prompt_json 解析失败",
+            "last_error_code": "LLM.OUTPUT_FORMAT",
+        }
+        out = await clarify_build_question_async(state)  # type: ignore[arg-type]
+        content = out["messages"][0].content
+        assert "需求抽取失败" in content
+        assert "没能写入需求清单" in content
+        assert "LLM.OUTPUT_FORMAT" in content
+        assert "请补充项目背景。" in content  # 原追问内容保留
+
+    @pytest.mark.asyncio
+    async def test_no_warning_when_extract_ok(self, monkeypatch):
+        """抽取成功（last_error 为 None）→ 追问不带警告前缀。"""
+        async def fake_invoke_text(**kwargs):
+            return "请补充项目背景。"
+
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_text", fake_invoke_text)
+        state = {
+            "missing_fields": ["project_context"],
+            "requirement": empty_requirement(),
+            "last_error": None,
+            "last_error_code": None,
+        }
+        out = await clarify_build_question_async(state)  # type: ignore[arg-type]
+        content = out["messages"][0].content
+        assert "抽取失败" not in content

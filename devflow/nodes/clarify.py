@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import logging
 import re
 from typing import Any
 
@@ -40,6 +41,8 @@ from ..schemas import (
     validate_requirement,
 )
 from ..state import GlobalState
+
+logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -254,6 +257,15 @@ async def clarify_extract_async(state: GlobalState) -> dict[str, Any]:
     # 3. 合并：已有值优先，只覆盖本轮提取中明确非空的字段
     merged = _merge_requirement(existing, extracted)
 
+    # 无进展观测：抽取「成功」但什么都没抽到，而用户输入相当具体——多半是模型
+    # 没按 schema 输出（成功返回了空壳），在日志里留个显眼线索
+    if merged == existing and len(latest_user_text.strip()) >= 30:
+        logger.warning(
+            "[clarify] 需求抽取未产出任何新字段（用户输入 %d 字）——"
+            "疑似模型未按 schema 输出，请检查 LLM 日志中的 LLM.OUTPUT_FORMAT",
+            len(latest_user_text.strip()),
+        )
+
     return {
         "requirement": merged,
         "last_error": None,
@@ -447,6 +459,17 @@ async def clarify_build_question_async(state: GlobalState) -> dict[str, Any]:
     except Exception as e:
         # 兜底：直接把缺失字段原样展示给用户
         text = fallback + f"\n(LLM 出错: {e})"
+
+    # 失败可见化：last_error 非空 ⇒ 本轮 clarify_extract 失败（成功时节点会写 None 清掉）。
+    # 此时 requirement 没有更新，用户上一轮的回答等于没被记录——必须明说，
+    # 否则表现为「反复重复同一个问题清单」，用户无从知道抽取在失败。
+    err_code = state.get("last_error_code")
+    if err_code:
+        err_msg = str(state.get("last_error") or "")[:160]
+        text = (
+            f"⚠️ 上一轮回答的需求抽取失败（[{err_code}] {err_msg}），"
+            "你的回答这次没能写入需求清单，请重试一次或换种说法。\n\n" + text
+        )
 
     # 选择卡只在普通模式首轮出现一次（键序保证事件在 AI 追问之后触发，卡片落在问题下方）
     loop_cnt = (state.get("retry_count") or {}).get("clarify_loop_cnt", 0)

@@ -333,3 +333,33 @@ class TestPromptJsonFallbackTier:
         with pytest.raises(LlmOutputFormatError) as ei:
             await _drive_structured(llm, _Req)
         assert ei.value.extra.get("validation_errors")
+
+
+class TestPromptJsonParsing:
+    @pytest.mark.asyncio
+    async def test_prose_wrapped_json_parsed_via_brace_scan(self):
+        """回归：散文前后包裹的 JSON（弱模型常见习惯）→ 花括号扫描兜底提取成功。"""
+        llm = _NoStructuredSupportLLM([
+            '好的，以下是抽取结果：\n{"req_type": "bug_fix", "project_context": "计算器"}\n以上。'
+        ])
+        result = await _drive_structured(llm, _Req)
+        assert result == {"req_type": "bug_fix", "project_context": "计算器"}
+        assert llm.ainvoke_calls == 1  # 首轮即成功，无需纠错重试
+
+    @pytest.mark.asyncio
+    async def test_corrective_retry_carries_error_hint(self):
+        """首轮输出不可解析 → 带上错误与原始输出尾的纠错提示重试 → 成功。"""
+        llm = _NoStructuredSupportLLM(["我觉得没法回答这个问题", '{"req_type": "new_feature"}'])
+        result = await _drive_structured(llm, _Req)
+        assert result["req_type"] == "new_feature"
+        assert llm.ainvoke_calls == 2
+
+    @pytest.mark.asyncio
+    async def test_json_array_rejected_as_object(self):
+        """合法 JSON 但顶层是数组 → 期望 object 报错（可重试），不透传非 dict。"""
+        from devflow.errors import LlmOutputFormatError
+
+        llm = _NoStructuredSupportLLM(['["a", "b"]'])
+        with pytest.raises(LlmOutputFormatError) as ei:
+            await _drive_structured(llm, _Req)
+        assert "expected object, got list" in " ".join(ei.value.extra.get("validation_errors", []))
