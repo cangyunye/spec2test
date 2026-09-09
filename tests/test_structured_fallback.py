@@ -2,6 +2,7 @@
 
 覆盖：
   - make_structured：function_calling 优先，失败自动退化 json_mode
+  - D1c 第三档 prompt_json：tools/response_format 皆不支持的裸网关（自部署 vLLM/Ollama）
   - mock LLM 兼容 method 参数
   - invoke_json 结构化路径在 function_calling 抛错时能退化成功
 运行: pytest -v tests/test_structured_fallback.py
@@ -12,6 +13,7 @@ from typing import Any
 
 import pytest
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from pydantic import BaseModel
 
 from devflow.llm_client import _get_model, invoke_json
 
@@ -242,3 +244,92 @@ class TestInvokeJsonObjectTypeGuard:
             model_spec="t-arr",
         )
         assert result == ["a", "b"]
+
+
+# ── D1c 第三档退化：prompt_json（裸网关，tools/response_format 皆不支持）──
+class _NoStructuredSupportLLM:
+    """模拟裸网关（vLLM 未开 tool-choice / 旧 Ollama 兼容层）：
+    with_structured_output 无论 method 一律 400；裸 ainvoke 可用（能补全）。"""
+
+    def __init__(self, contents: list[str]) -> None:
+        self._contents = contents
+        self.ws_calls: list[str] = []
+        self.ainvoke_calls = 0
+
+    def with_structured_output(self, schema: Any, *, method: str = "function_calling"):
+        self.ws_calls.append(method)
+        raise ValueError("Error code: 400 - {'error': {'message': 'tools is not supported'}}")
+
+    async def ainvoke(self, messages: list[BaseMessage], **_: Any) -> BaseMessage:
+        content = self._contents[min(self.ainvoke_calls, len(self._contents) - 1)]
+        self.ainvoke_calls += 1
+        return AIMessage(content=content)
+
+
+class _Req(BaseModel):
+    req_type: str | None = None
+    project_context: str | None = None
+
+
+def _drive_structured(llm: Any, model: type, *, max_retries: int = 0):
+    from devflow.llm_client import _invoke_json_once
+    from devflow.resilience import CircuitBreaker, TokenBudget
+
+    return _invoke_json_once(
+        llm=llm,
+        messages=[SystemMessage(content="s"), HumanMessage(content="抽取需求")],
+        response_model=model,
+        json_schema=None,
+        max_retries=max_retries,
+        breaker=CircuitBreaker("t-pj"),
+        budget=TokenBudget(),
+        response_type="requirement_extract",
+        model_spec="t-pj",
+    )
+
+
+class TestPromptJsonFallbackTier:
+    @pytest.mark.asyncio
+    async def test_bare_gateway_degrades_to_prompt_json(self):
+        """tools/response_format 均 400 → 退化 prompt_json：schema 进提示词 + 本地校验。"""
+        llm = _NoStructuredSupportLLM([
+            '<think>让我想想</think>\n{"req_type": "new_feature", "project_context": "桌面计算器"}'
+        ])
+        result = await _drive_structured(llm, _Req)
+        assert result == {"req_type": "new_feature", "project_context": "桌面计算器"}
+        assert llm.ws_calls == ["function_calling", "json_mode"]  # 两档都试过才退化
+        assert llm.ainvoke_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_retry_reuses_prompt_json_without_rehitting_400(self):
+        """纠错重试记住上次成功的档位：不再反复撞 function_calling/json_mode 的 400。"""
+        llm = _NoStructuredSupportLLM([
+            "1. 先聊聊需求再说",           # 首轮：宽容解析成 int → 被守卫拦下
+            '{"req_type": "bug_fix"}',    # 重试：合法
+        ])
+        result = await _drive_structured(llm, _Req, max_retries=1)
+        assert result["req_type"] == "bug_fix"
+        assert llm.ainvoke_calls == 2
+        # 两次 400 只发生在首轮探测；重试直接走 prompt_json
+        assert llm.ws_calls == ["function_calling", "json_mode"]
+
+    @pytest.mark.asyncio
+    async def test_bare_int_output_raises_output_format(self):
+        """prompt_json 档下模型输出裸数字 → LlmOutputFormatError（可重试），不漏 TypeError。"""
+        from devflow.errors import LlmOutputFormatError
+
+        llm = _NoStructuredSupportLLM(["123"])
+        with pytest.raises(LlmOutputFormatError) as ei:
+            await _drive_structured(llm, _Req)
+        assert "expected object, got int" in " ".join(ei.value.extra.get("validation_errors", []))
+
+    @pytest.mark.asyncio
+    async def test_schema_violation_raises_output_format_not_validationerror(self):
+        """输出不符合 pydantic schema → 归一 LlmOutputFormatError（可重试），
+        而不是裸 ValidationError 被 wrap 成不可重试的 NODE.CONTEXT。"""
+        from devflow.errors import LlmOutputFormatError
+
+        llm = _NoStructuredSupportLLM(['{"req_type": 123}'])  # req_type 必须是 str
+        with pytest.raises(LlmOutputFormatError) as ei:
+            await _drive_structured(llm, _Req)
+        assert ei.value.extra.get("validation_errors")

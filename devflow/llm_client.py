@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import textwrap
 from typing import Any, Iterator, Type, cast
 
@@ -356,25 +357,49 @@ def _make_structured(llm: Any, response_model: Type[BaseModel], method: str | No
     不同 OpenAI 兼容供应商对 with_structured_output 的支持不一致：
       - OpenAI / DeepSeek（deepseek-chat）     : 支持 function_calling 与 json_mode
       - 部分自建 vLLM / OneAPI 网关           : 不支持 tools，需退化 json_mode
+      - 裸网关（vLLM 未开 tool-choice / 旧 Ollama 兼容层）: 两者皆不支持，
+        退化 prompt_json——把 schema 写进提示词 + 本地解析校验，只要求能补全
 
-    method=None（auto）时：先试 function_calling，创建或调用阶段抛错 → 自动退化 json_mode；
-    全部失败则抛最后一个错误（不吞异常）。
+    method=None（auto）时按 function_calling → json_mode → prompt_json 逐档退化；
+    全部失败则抛最后一个错误（不吞异常）。method 显式指定时不加 prompt_json 档。
 
     D1b：模型输出不严格符合 json_schema 时（如 code_ref 输出成字符串），langchain
     会抛 OutputParserException。此处统一转成 LlmOutputFormatError（retryable=True），
     让上层 retry_with_backoff 有机会重试，而不是被 wrap 成 NODE.CONTEXT（不可重试）直接放弃。
     """
     from langchain_core.exceptions import OutputParserException
+    from pydantic import ValidationError
 
-    methods = ["function_calling", "json_mode"] if method is None else [method]
+    methods: list[str] = ["function_calling", "json_mode"] if method is None else [method]
+    if method is None:
+        methods.append("prompt_json")
+    # 单调下探 memo：记住已探测到的最深档位，纠错重试从该档继续，
+    # 不再反复撞已知会 400 的 function_calling / json_mode（省往返也省熔断样本）
+    deepest: list[str] = []
+
+    def _schema_instruction() -> str:
+        schema = response_model.model_json_schema()
+        return (
+            "\n\n# 输出约束\n"
+            "请只输出一个符合以下 JSON Schema 的 JSON 对象，"
+            "不要加 Markdown 代码块，不要加任何额外文字：\n"
+            f"{json.dumps(schema, ensure_ascii=False, indent=2)}"
+        )
 
     class _StructuredWithFallback:
         async def ainvoke(self, msgs: list[BaseMessage], **_: Any) -> Any:
+            start = methods.index(deepest[0]) if deepest else 0
+            order = methods[start:]
             last_err: Exception | None = None
-            for m in methods:
+            for m in order:
+                deepest[:] = [m]  # 无论成败，下次从当前档位继续
                 try:
-                    structured = llm.with_structured_output(response_model, method=m)
-                    return await structured.ainvoke(msgs)
+                    if m == "prompt_json":
+                        out = await self._ainvoke_prompt_json(msgs)
+                    else:
+                        structured = llm.with_structured_output(response_model, method=m)
+                        out = await structured.ainvoke(msgs)
+                    return out
                 except OutputParserException as e:
                     # 模型输出不合 schema → 归类 LLM.OUTPUT_FORMAT（可重试）
                     last_err = LlmOutputFormatError(
@@ -383,10 +408,48 @@ def _make_structured(llm: Any, response_model: Type[BaseModel], method: str | No
                 except Exception as e:  # noqa: BLE001 - 兼容层需兜底全部创建/调用异常
                     last_err = e
                     # 还有下一个 method 可试 → 继续退化；否则抛出最后一个错误
-                    if m is methods[-1]:
+                    if m is order[-1]:
                         break
             assert last_err is not None
             raise last_err
+
+        async def _ainvoke_prompt_json(self, msgs: list[BaseMessage]) -> BaseModel:
+            """prompt_json 档：schema 进提示词，裸补全 + 本地解析校验。"""
+            msgs2 = list(msgs)
+            last_human = max(
+                (i for i, mm in enumerate(msgs2) if isinstance(mm, HumanMessage)), default=0
+            )
+            prev = str(msgs2[last_human].content)
+            msgs2[last_human] = HumanMessage(content=prev + _schema_instruction())
+
+            resp = await llm.ainvoke(msgs2)
+            text = str(getattr(resp, "content", "") or "")
+            # 自部署推理模型（DeepSeek-R1 系蒸馏等）常把思考过程放在 <think> 块里，先剥掉
+            text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+            try:
+                payload = JsonOutputParser().parse(text)
+            except Exception as e:
+                raise LlmOutputFormatError(
+                    f"prompt_json 解析失败: {e}",
+                    validation_errors=[str(e)],
+                    extra={"raw_tail": text[-200:]},
+                ) from e
+            # 宽容解析的坑：裸数字/数字开头文本会被解析成 int 而不是抛错，必须卡类型
+            if not isinstance(payload, dict):
+                raise LlmOutputFormatError(
+                    f"prompt_json 要求 JSON object，实际解析到 {type(payload).__name__}: "
+                    f"{str(payload)[:80]}",
+                    validation_errors=[f"expected object, got {type(payload).__name__}"],
+                    extra={"raw_tail": text[-200:]},
+                )
+            try:
+                return response_model.model_validate(payload)
+            except ValidationError as e:
+                raise LlmOutputFormatError(
+                    f"prompt_json 输出不符合 {response_model.__name__} schema: {e}",
+                    validation_errors=[err["msg"] for err in e.errors()],
+                    extra={"raw_tail": text[-200:]},
+                ) from e
 
     return _StructuredWithFallback()
 

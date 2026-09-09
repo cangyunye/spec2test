@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 from langchain_core.exceptions import OutputParserException
-from langchain_core.messages import BaseMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from pydantic import BaseModel, Field
 
 from devflow.errors import LLM_OUTPUT_FORMAT, LlmOutputFormatError
@@ -24,7 +24,8 @@ from devflow.llm_client import _make_structured
 
 
 class _NeverParses:
-    """with_structured_output 每次调用都抛 OutputParserException（模拟模型输出不符合 schema）。"""
+    """with_structured_output 每次调用都抛 OutputParserException（模拟模型输出不符合 schema）；
+    裸 ainvoke 也只回不可解析的散文（prompt_json 档同样解析失败）。"""
 
     def __init__(self) -> None:
         self.methods_used: list[str] = []
@@ -36,6 +37,9 @@ class _NeverParses:
             async def ainvoke(self, msgs: list[BaseMessage], **_: Any) -> Any:
                 raise OutputParserException("Failed to parse X from completion {...}")
         return _S()
+
+    async def ainvoke(self, messages: list[BaseMessage], **_: Any) -> BaseMessage:
+        return AIMessage(content="抱歉，我需要更多信息才能回答。")
 
 
 class _Graph(BaseModel):
