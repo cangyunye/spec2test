@@ -84,6 +84,7 @@ from .nodes import (
     route_after_test_gen,
     route_after_test_run,
 )
+from .nodes.checklist_route import checklist_route_gate, checklist_route_match
 from .providers import Providers, get_providers
 from .resilience import dead_letter_record
 from .schemas import empty_requirement
@@ -435,8 +436,10 @@ def build_graph_with_providers(providers: Providers | None = None):
     与 build_graph() 的区别：
       - graph_generate 后不再直接 END，而是进入制图门禁 graph_review
       - 门禁 approve 后按是否提供项目代码分流（schemas.has_project_code）：
-          有代码 → code_search → graph_render → code_gen → apply_code → test_gen
-          无代码 → 直接 test_gen（仅需求模式：基于需求+逻辑图设计端到端测试用例）
+          有代码 → code_search → graph_render → code_gen → apply_code → checklist_route → test_gen
+          无代码 → checklist_route → test_gen（仅需求模式：基于需求+逻辑图设计端到端测试用例）
+      - checklist_route：进入测试设计前先按需求路由 .checklist 业务清单库，
+        有候选才弹确认门禁（勾选后注入用例设计）；空库/无匹配/已路由静默放行
       - 终审 review 的 reject 同样分流：代码模式回 code_gen；仅需求模式回 test_gen
       - Provider 驱动的阶段二/三节点 + 本地执行闭环节点（apply_code / test_run）
       - 路由：
@@ -471,6 +474,8 @@ def build_graph_with_providers(providers: Providers | None = None):
     workflow.add_node("graph_review", graph_review_node)
     workflow.add_node("code_gen", make_code_gen_node(p))
     workflow.add_node("apply_code", make_apply_code_node())
+    workflow.add_node("checklist_route_match", checklist_route_match)
+    workflow.add_node("checklist_route_gate", checklist_route_gate)
     workflow.add_node("test_gen", make_test_gen_node(p))
     workflow.add_node("test_run", make_test_run_node())
     workflow.add_node("review", review_node)
@@ -524,13 +529,13 @@ def build_graph_with_providers(providers: Providers | None = None):
         },
     )
 
-    # 制图门禁：approve → 按有无项目代码分流（有代码先检索；无代码直接测试设计）；reject → 重制图
+    # 制图门禁：approve → 按有无项目代码分流（有代码先检索；无代码先清单路由再测试设计）；reject → 重制图
     workflow.add_conditional_edges(
         "graph_review",
         _route_after_graph_review,
         {
             "with_code": "code_search",
-            "no_code": "test_gen",  # 仅需求模式：跳过检索/生成，直接出端到端测试用例
+            "no_code": "checklist_route_match",  # 仅需求模式：先清单路由，再出端到端测试用例
             "rejected": "graph_generate",
         },
     )
@@ -550,28 +555,32 @@ def build_graph_with_providers(providers: Providers | None = None):
     # 渲染 → 代码生成
     workflow.add_edge("graph_render", "code_gen")
 
-    # 代码生成：lint_ok → 落盘；force_test（lint 超限）不落盘直接设计；
+    # 代码生成：lint_ok → 落盘；force_test（lint 超限）不落盘，先清单路由再设计；
     #           retry → code_gen；abort → drain
     workflow.add_conditional_edges(
         "code_gen",
         _route_after_code_gen,
         {
             "lint_ok": "apply_code",
-            "force_test": "test_gen",
+            "force_test": "checklist_route_match",
             "retry": "code_gen",
             "abort": "dead_letter_drain",
         },
     )
 
-    # diff 落盘：成功/降级 → 测试设计；diff 坏了可回炉一次 → code_gen
+    # diff 落盘：成功/降级 → 清单路由 → 测试设计；diff 坏了可回炉一次 → code_gen
     workflow.add_conditional_edges(
         "apply_code",
         _route_after_code_apply,
         {
-            "continue": "test_gen",
+            "continue": "checklist_route_match",
             "retry": "code_gen",
         },
     )
+
+    # 清单路由：match（LLM 匹配，结果落 state）→ gate（有候选才 interrupt 确认）→ 测试设计
+    workflow.add_edge("checklist_route_match", "checklist_route_gate")
+    workflow.add_edge("checklist_route_gate", "test_gen")
 
     # 测试设计完成后一律交给 test_run 做真实执行判定
     workflow.add_conditional_edges(
@@ -606,7 +615,7 @@ def build_graph_with_providers(providers: Providers | None = None):
         {
             "approved": END,
             "rejected": "code_gen",
-            "rejected_test": "test_gen",
+            "rejected_test": "checklist_route_match",  # 仅需求模式打回：路由已做过，节点内直接放行
         },
     )
 
@@ -640,6 +649,9 @@ def initial_state() -> dict[str, Any]:
         "review_feedback": None,
         "code_apply": None,
         "test_failure": None,
+        "checklist_route": None,
+        "checklist_context": None,
+        "checklist_routed": False,
         "last_error": None,
         "last_error_code": None,
         "last_error_retryable": False,

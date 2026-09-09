@@ -32,6 +32,8 @@ NODE_LABELS: dict[str, str] = {
     "graph_render": "图表渲染",
     "code_gen": "代码生成",
     "apply_code": "代码落盘",
+    "checklist_route_match": "清单路由",
+    "checklist_route_gate": "清单确认",
     "test_gen": "测试设计",
     "test_run": "测试执行",
     "review": "人工验收",

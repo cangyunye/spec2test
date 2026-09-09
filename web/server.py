@@ -61,8 +61,9 @@ class SendMessage(BaseModel):
 
 
 class GateDecision(BaseModel):
-    decision: str                # approve / reject
+    decision: str                # approve / reject / confirm / skip
     comment: str | None = None   # reject 时的修改意见（可选）
+    selected: list[str] | None = None  # checklist_route 门禁：确认加载的业务路径
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -173,6 +174,31 @@ def graph_type_candidates(tid: str) -> dict[str, Any]:
         "candidates": suggest_graph_types(vals.get("requirement")),
         "graph_type": vals.get("graph_type"),
         "pending": "graph_type_select" in list(snap.next or []),
+    }
+
+
+@app.get("/api/sessions/{tid}/checklist-candidates")
+def checklist_candidates(tid: str) -> dict[str, Any]:
+    """清单路由候选树：与 checklist_route_gate 门禁同源（读 match 节点落盘的 state）。
+
+    会话恢复时前端重放确认卡用；pending=true 表示门禁仍在等待确认。
+    零 LLM 重算——候选树在 interrupt 前已由 checklist_route_match 写入 checkpoint。
+    """
+    if not _thread_exists(tid):
+        raise HTTPException(404, f"会话不存在: {tid}")
+    graph = build_graph_with_providers()
+    try:
+        snap = graph.get_state(_config(thread_id=tid))
+    except Exception as e:
+        raise HTTPException(404, f"会话不存在或读取失败: {e}")
+    vals = snap.values or {}
+    route = vals.get("checklist_route") or {}
+    return {
+        "root": route.get("root", ""),
+        "candidates": route.get("candidates") or [],
+        "decision": route.get("decision"),
+        "selected": route.get("selected") or [],
+        "pending": "checklist_route_gate" in list(snap.next or []),
     }
 
 
@@ -426,20 +452,19 @@ async def send_message(tid: str, body: SendMessage) -> StreamingResponse:
 
 @app.get("/api/sessions/{tid}/stream")
 async def stream_sse(
-    tid: str, op: str, text: str = "", decision: str = "", comment: str = ""
+    tid: str, op: str, text: str = "", decision: str = "", comment: str = "",
+    selected: str = "",
 ) -> StreamingResponse:
     """浏览器 EventSource 用：GET + query 参数。
 
-    op=message&text=<用户消息> ；op=gate&decision=approve|reject[&comment=<意见>] 。
+    op=message&text=<用户消息> ；
+    op=gate&decision=approve|reject[&comment=<意见>][&selected=<逗号分隔业务路径>] 。
     """
     if not _thread_exists(tid):
         raise HTTPException(404, f"会话不存在: {tid}")
     graph = build_graph_with_providers()
     if op == "gate":
-        input_msg: Any = (
-            Command(resume={"decision": decision, "comment": comment})
-            if comment else Command(resume=decision)
-        )
+        input_msg: Any = _gate_resume(decision, comment, selected)
     else:
         input_msg = {"messages": [HumanMessage(content=text)]}
     return StreamingResponse(
@@ -447,14 +472,30 @@ async def stream_sse(
     )
 
 
+def _gate_resume(decision: str, comment: str = "", selected: str = "") -> Command:
+    """门禁决策 → Command(resume=...)。
+
+    无附加信息时 resume 传裸字符串（兼容旧门禁）；带 comment/selected（清单
+    路由勾选）时传结构化 dict，由各门禁节点自行解析。
+    """
+    sel_list = [s.strip() for s in selected.split(",") if s.strip()] if selected else None
+    if comment or sel_list:
+        payload: dict[str, Any] = {"decision": decision}
+        if comment:
+            payload["comment"] = comment
+        if sel_list:
+            payload["selected"] = sel_list
+        return Command(resume=payload)
+    return Command(resume=decision)
+
+
 @app.post("/api/sessions/{tid}/gates")
 async def decide_gate(tid: str, body: GateDecision) -> StreamingResponse:
     if not _thread_exists(tid):
         raise HTTPException(404, f"会话不存在: {tid}")
     graph = build_graph_with_providers()
-    input_msg: Any = (
-        Command(resume={"decision": body.decision, "comment": body.comment or ""})
-        if body.comment else Command(resume=body.decision)
+    input_msg: Any = _gate_resume(
+        body.decision, body.comment or "", ",".join(body.selected or [])
     )
     return StreamingResponse(
         _sse_from_sync_stream(graph, input_msg, tid), media_type="text/event-stream"

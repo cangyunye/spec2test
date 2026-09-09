@@ -504,7 +504,12 @@ def _interactive_loop(tid: str, *, full: bool = False) -> None:
         except Exception:
             next_nodes = []
 
-        if "graph_type_select" in next_nodes or "review" in next_nodes or "graph_review" in next_nodes:
+        if (
+            "graph_type_select" in next_nodes
+            or "review" in next_nodes
+            or "graph_review" in next_nodes
+            or "checklist_route_gate" in next_nodes
+        ):
             # 人工门禁中断：graph_type_select=选图种类；graph_review=确认图↔需求对齐；review=终审验收
             from .schemas import has_project_code
 
@@ -549,6 +554,9 @@ def _interactive_loop(tid: str, *, full: bool = False) -> None:
                 prompt_label = "验收决定"
             console.print(gate_panel)
             _print_stage_report(snap)
+            if "checklist_route_gate" in next_nodes:
+                _run_checklist_route_gate(graph, tid, snap)
+                continue
             if "graph_type_select" in next_nodes:
                 # 图种类门禁：序号 / 种类 id / 中文名均可，空 = 默认 flowchart
                 try:
@@ -689,8 +697,49 @@ def _render_event(event: dict) -> None:
             )
 
 
-def _resume_from_interrupt(graph, tid: str, decision: str, *, gate: str = "review") -> None:
-    """从门禁中断恢复：传 approve/reject 给 graph。
+def _run_checklist_route_gate(graph, tid: str, snap: dict) -> None:
+    """清单路由确认门禁（CLI）：展示候选树，回车=加载 AI 预选，序号子集或 skip。"""
+    route = snap.get("checklist_route") or {}
+    candidates = route.get("candidates") or []
+    lines = ["[bold]已按需求匹配到业务清单，请确认：[/]"]
+    flat: dict[str, str] = {}
+    for i, biz in enumerate(candidates, 1):
+        star = "[green]★[/]" if biz.get("suggested") else " "
+        reason = f"  [dim]{biz.get('reason', '')}[/]" if biz.get("reason") else ""
+        lines.append(f"  {star} {i}. [bold]{biz['rel_dir']}[/] · {biz.get('name', '')}{reason}")
+        flat[str(i)] = biz["rel_dir"]
+        for j, sub in enumerate(biz.get("children") or [], 1):
+            star = "[green]★[/]" if sub.get("suggested") else " "
+            lines.append(f"      {star} {i}.{j} {sub['rel_dir']} · {sub.get('name', '')}")
+            flat[f"{i}.{j}"] = sub["rel_dir"]
+    lines.append("  [dim]回车=加载★预选项；输入序号组合（如 1,1.1）加载子集；skip=不注入清单[/]")
+    console.print(Panel("\n".join(lines), title="业务清单路由确认", border_style="cyan"))
+    try:
+        raw = console.input("[bold yellow]清单确认[/] (回车=预选 / 序号 / skip) > ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        console.print("\n[dim]已退出（下次可用 devflow resume 继续）[/]")
+        return
+    if raw in (":q", ":quit", ":exit"):
+        console.print(f"[dim]已退出（下次可用 devflow resume {tid} 继续）[/]")
+        return
+    if raw == "skip":
+        _resume_from_interrupt(graph, tid, {"decision": "skip"}, gate="checklist_route")
+        return
+    if not raw:
+        selected = [rel for rel in flat.values()]
+    else:
+        selected = [flat[tok] for tok in raw.replace("，", ",").split(",") if tok.strip() in flat]
+        if not selected:
+            console.print("[yellow]![/] 未识别到有效序号，本轮按 skip 处理")
+            _resume_from_interrupt(graph, tid, {"decision": "skip"}, gate="checklist_route")
+            return
+    _resume_from_interrupt(
+        graph, tid, {"decision": "confirm", "selected": selected}, gate="checklist_route"
+    )
+
+
+def _resume_from_interrupt(graph, tid: str, decision: str | dict, *, gate: str = "review") -> None:
+    """从门禁中断恢复：传 approve/reject（或清单路由的 {decision, selected} dict）给 graph。
 
     gate 区分是制图门（graph_review）还是终审（review），用于把恢复后的首个
     stage 事件翻译成模式感知的提示（代码模式 / 仅需求模式走不同分支）。
@@ -699,8 +748,9 @@ def _resume_from_interrupt(graph, tid: str, decision: str, *, gate: str = "revie
     """
     from langgraph.types import Command
 
+    label = decision if isinstance(decision, str) else str(decision.get("decision", "?"))
     try:
-        with console.status(f"[cyan]恢复流程（{decision}）…[/]"):
+        with console.status(f"[cyan]恢复流程（{label}）…[/]"):
             gate_seen = False
             for event in events_from_stream(
                 graph.stream(Command(resume=decision), _config(thread_id=tid), stream_mode="updates")
