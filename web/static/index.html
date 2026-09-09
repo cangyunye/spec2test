@@ -146,6 +146,28 @@
   <span class="pulse"></span><span id="gatePillText">门禁待决策</span>
 </button>
 
+<!-- ── 沉淀 Checklist 模态 ─────────────────────────── -->
+<div id="distillModal" class="gate-overlay hidden" role="dialog" aria-modal="true">
+  <div class="gate-panel distill-panel">
+    <header class="gate-head">
+      <span class="gate-tag mono">ASSET · 沉淀</span>
+      <div class="gate-head-text">
+        <h3>沉淀为业务 Checklist</h3>
+        <p id="distillSub" class="mono">勾选有效用例 + 标记业务类型 → AI 归纳入库（确认后才写入）</p>
+      </div>
+    </header>
+    <div class="gate-body" id="distillBody"></div>
+    <footer class="gate-foot">
+      <span id="distillHint" class="mono distill-hint"></span>
+      <span class="spacer"></span>
+      <button id="btnDistillCancel" class="btn ghost">取消</button>
+      <button id="btnDistillBack" class="btn ghost hidden">← 返回调整</button>
+      <button id="btnDistillGen" class="btn primary">✦ 生成预览</button>
+      <button id="btnDistillCommit" class="btn primary hidden">✓ 确认写入清单库</button>
+    </footer>
+  </div>
+</div>
+
 <div id="toasts" class="toasts"></div>
 
 <script src="/static/app.js"></script>

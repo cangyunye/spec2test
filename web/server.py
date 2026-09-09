@@ -26,6 +26,7 @@ from langgraph.types import Command
 from pydantic import BaseModel
 
 from devflow.cli import _config, _thread_exists, apply_assignments
+from devflow.checklist.library import validate_rel_dir
 from devflow.config import settings
 from devflow.doc_reader import read_doc
 from devflow.doctor import first_run_notice
@@ -386,6 +387,123 @@ def _build_export_md(vals: dict[str, Any]) -> str:
             lines += [f"- {s}" for s in checks]
             lines.append("")
     return "\n".join(lines)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Checklist 库：树浏览 + 用例沉淀（distill 预览 → commit 落盘）
+# ═══════════════════════════════════════════════════════════════════
+
+
+@app.get("/api/sessions/{tid}/checklist-tree")
+def checklist_tree_api(tid: str) -> dict[str, Any]:
+    """库全树（业务/子业务、描述、条目数）。按会话的 project_root 解析库根，
+    供沉淀弹窗选择业务类型；库未创建时返回空树（前端可新建业务）。"""
+    if not _thread_exists(tid):
+        raise HTTPException(404, f"会话不存在: {tid}")
+    graph = build_graph_with_providers()
+    vals = graph.get_state(_config(thread_id=tid)).values or {}
+    from devflow.checklist.library import checklist_tree, resolve_root
+
+    req = vals.get("requirement") or {}
+    root = resolve_root(str(req.get("project_root") or ""))
+    return {"root": str(root), "tree": checklist_tree(root)}
+
+
+class DistillRequest(BaseModel):
+    # 用户标记的业务类型：rel_dir 必填（已有业务或新建英文目录名）
+    business: dict[str, Any] | None = None
+    case_ids: list[str] = []       # 勾选的有效用例；空 = 全部
+
+
+class DistillCommit(BaseModel):
+    rel_dir: str
+    scenario_md: str
+    checklist_md: str
+
+
+def _session_test_cases(tid: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """从 checkpoint 读会话用例与 requirement（distill 数据源）。"""
+    graph = build_graph_with_providers()
+    vals = graph.get_state(_config(thread_id=tid)).values or {}
+    report = vals.get("test_report") or {}
+    cases = [c for c in (report.get("test_cases") or []) if isinstance(c, dict)]
+    return cases, vals.get("requirement") or {}
+
+
+@app.post("/api/sessions/{tid}/checklist/distill")
+async def distill_checklist(tid: str, body: DistillRequest) -> dict[str, Any]:
+    """勾选的有效用例 → LLM 归纳为 scenario.md/checklist.md 预览（不落盘）。
+
+    目标目录已有 checklist.md 时走 merge（旧清单原文一并交给 LLM 去重合并）。
+    """
+    if not _thread_exists(tid):
+        raise HTTPException(404, f"会话不存在: {tid}")
+    cases, req = _session_test_cases(tid)
+    if not cases:
+        raise HTTPException(400, "该会话没有可沉淀的测试用例")
+    if body.case_ids:
+        wanted = set(body.case_ids)
+        cases = [c for c in cases if c.get("case_id") in wanted]
+        if not cases:
+            raise HTTPException(400, "勾选的用例 ID 均不存在")
+    business = body.business or {}
+    rel_dir = validate_rel_dir(str(business.get("rel_dir") or ""))
+    if not rel_dir:
+        raise HTTPException(400, "业务类型目录名非法（限英文/数字/连字符，可含 / 子业务）")
+
+    from devflow.checklist.distill import distill_from_cases
+    from devflow.checklist.library import load_scenario, resolve_root
+
+    root = resolve_root(str(req.get("project_root") or ""))
+    existing_scenario = ""
+    existing_checklist = ""
+    target = root / rel_dir
+    if (target / "checklist.md").is_file():
+        existing_checklist = (target / "checklist.md").read_text(encoding="utf-8")
+    if (target / "scenario.md").is_file():
+        existing_scenario = (target / "scenario.md").read_text(encoding="utf-8")
+    mode = "merge" if existing_checklist else "create"
+
+    biz_input = {
+        "rel_dir": rel_dir,
+        "name": str(business.get("name") or ""),
+        "description": str(business.get("description") or ""),
+    }
+    try:
+        out = await distill_from_cases(cases, biz_input, existing_scenario, existing_checklist)
+    except Exception as e:
+        raise HTTPException(502, f"清单归纳失败：{e}")
+
+    from devflow.checklist.distill import render_checklist_md, render_scenario_md
+
+    scenario_md = render_scenario_md(out)
+    checklist_md = render_checklist_md(out, business=rel_dir, sources=[tid])
+    return {
+        "mode": mode,
+        "rel_dir": rel_dir,
+        "scenario_md": scenario_md,
+        "checklist_md": checklist_md,
+        "merge_notes": out.merge_notes,
+        "case_count": len(cases),
+    }
+
+
+@app.post("/api/sessions/{tid}/checklist/commit")
+def commit_checklist(tid: str, body: DistillCommit) -> dict[str, Any]:
+    """确认后的预览写入库（覆盖写；merge 已在 distill 预览环节完成）。"""
+    rel_dir = validate_rel_dir(body.rel_dir)
+    if not rel_dir:
+        raise HTTPException(400, f"非法的业务目录名: {body.rel_dir!r}")
+    if not body.scenario_md.strip() or not body.checklist_md.strip():
+        raise HTTPException(400, "scenario.md / checklist.md 内容为空")
+    graph = build_graph_with_providers()
+    vals = graph.get_state(_config(thread_id=tid)).values or {}
+    req = vals.get("requirement") or {}
+    from devflow.checklist.library import resolve_root, write_checklist
+
+    root = resolve_root(str(req.get("project_root") or ""))
+    target = write_checklist(root, rel_dir, body.scenario_md, body.checklist_md)
+    return {"written": [str(target / "scenario.md"), str(target / "checklist.md")], "root": str(root)}
 
 
 # ═══════════════════════════════════════════════════════════════════

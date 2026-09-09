@@ -645,6 +645,50 @@ table.t-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .cl-reason { flex-basis: 100%; font-size: 11px; color: var(--ink-3); }
 .cl-hint { margin: 0; font-size: 11.5px; color: var(--ink-3); line-height: 1.55; }
 
+/* ── 沉淀 Checklist 模态 ──────────────────────────── */
+.distill-panel { max-width: 860px; width: min(860px, 94vw); }
+.distill-hint { font-size: 11.5px; color: var(--err); }
+.dl-form { display: flex; flex-direction: column; gap: 16px; }
+.dl-sec { display: flex; flex-direction: column; gap: 8px; }
+.dl-sec h4 { margin: 0; font-size: 12.5px; color: var(--ink-2); }
+.dl-select {
+  background: var(--surface-2); color: var(--ink); border: 1px solid var(--border-2);
+  border-radius: 9px; padding: 8px 10px; font-size: 13px; max-width: 460px;
+}
+.dl-new { display: flex; flex-direction: column; gap: 6px; }
+.dl-input {
+  background: var(--surface-2); color: var(--ink); border: 1px solid var(--border-2);
+  border-radius: 9px; padding: 8px 10px; font-size: 13px;
+}
+.dl-root { font-size: 11px; color: var(--ink-3); }
+.dl-case-head { display: flex; align-items: center; justify-content: space-between; }
+.dl-cases {
+  display: flex; flex-direction: column; gap: 4px;
+  max-height: 30vh; overflow-y: auto; padding-right: 4px;
+}
+.dl-case {
+  display: flex; align-items: baseline; gap: 8px;
+  border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px;
+  cursor: pointer; font-size: 12.5px;
+}
+.dl-case:hover { background: var(--hl); }
+.dl-case input { accent-color: var(--ink); transform: translateY(1px); }
+.dl-case-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dl-pv-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 8px; }
+.dl-mode {
+  font-size: 11.5px; color: var(--ink-2); border: 1px solid var(--border-2);
+  border-radius: 6px; padding: 3px 8px;
+}
+.dl-notes { font-size: 12px; color: var(--ink-2); margin-bottom: 8px; }
+.dl-pv-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.dl-pv-box h4 { margin: 0 0 6px; font-size: 12px; color: var(--ink-2); }
+.dl-pv-pre {
+  margin: 0; font-size: 11px; line-height: 1.55; white-space: pre-wrap; word-break: break-word;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px;
+  padding: 10px; max-height: 44vh; overflow-y: auto;
+}
+@media (max-width: 860px) { .dl-pv-grid { grid-template-columns: 1fr; } }
+
 /* ── Toast ────────────────────────────────────────── */
 .toasts { position: fixed; top: 62px; right: 16px; z-index: 99; display: flex; flex-direction: column; gap: 8px; width: 330px; }
 .toast {
