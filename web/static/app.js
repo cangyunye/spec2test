@@ -1264,6 +1264,7 @@ function newSession() {
   $("gateModal").classList.add("hidden");
   $("gatePill").classList.add("hidden");
   resetFeed();
+  resetCfgForm();  // 新会话不继承上一单的运行配置（需要示例可点「✦ 示例配置」）
   showEmptyState();
   setStep(0, false);
   updateComposer();
@@ -1330,7 +1331,21 @@ function showEmptyState() {
 
 /* ── 运行配置弹层 + 配置 chips ───────────────────────── */
 
-const CFG_DEFAULTS = { fRoot: ".", fCtx: "桌面 GUI 计算器应用（tkinter）", fIoIn: "按钮点击与表达式", fIoOut: "结果或错误提示" };
+/* 默认 = 全空：预填示例值会把计算器字段合进任意需求（澄清合并「已有值优先」，
+   用户没提到的字段永远保留旧值 → 制图被带偏与输入无关）。示例请点「✦ 示例配置」。 */
+const CFG_DEFAULTS = { fRoot: ".", fCtx: "", fIoIn: "", fIoOut: "" };
+
+/* 把配置表单重置回默认（新会话 = 干净配置，避免上一单的配置悄悄带进下一单） */
+function resetCfgForm() {
+  $("fRoot").value = CFG_DEFAULTS.fRoot;
+  $("fCtx").value = CFG_DEFAULTS.fCtx;
+  $("fIoIn").value = CFG_DEFAULTS.fIoIn;
+  $("fIoOut").value = CFG_DEFAULTS.fIoOut;
+  initTags($("tagModules"), []);
+  initTags($("tagEdges"), []);
+  initTags($("tagAccept"), []);
+  renderCfgChips();
+}
 
 function cfgIsCustom() {
   if ($("fRoot").value.trim() && $("fRoot").value.trim() !== ".") return true;
@@ -1544,9 +1559,10 @@ function boot() {
   buildStepper();
   setStep(0, false);
 
-  initTags($("tagModules"), ["calculator/calc.py"]);
-  initTags($("tagEdges"), ["除零", "连续运算", "负数", "小数"]);
-  initTags($("tagAccept"), ["四则运算结果正确", "除零给出错误提示", "GUI 可启动"]);
+  // 配置默认全空（示例走「✦ 示例配置」按钮），避免示例值悄悄混进用户的任意需求
+  initTags($("tagModules"), []);
+  initTags($("tagEdges"), []);
+  initTags($("tagAccept"), []);
 
   // 顶栏
   $("btnTheme").onclick = toggleTheme;
@@ -1573,11 +1589,7 @@ function boot() {
   // 运行配置弹层
   $("btnCfg").onclick = (e) => { e.stopPropagation(); toggleCfgPop(); };
   $("btnCfgSample").onclick = () => { fillSample(); };
-  $("btnCfgClear").onclick = () => {
-    $("fRoot").value = "."; $("fCtx").value = ""; $("fIoIn").value = ""; $("fIoOut").value = "";
-    initTags($("tagModules"), []); initTags($("tagEdges"), []); initTags($("tagAccept"), []);
-    renderCfgChips();
-  };
+  $("btnCfgClear").onclick = () => { resetCfgForm(); };
   $("cfgPop").addEventListener("input", renderCfgChips);
 
   // 文档导入：按钮 + 拖到输入框

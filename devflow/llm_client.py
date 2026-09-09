@@ -287,6 +287,26 @@ def _use_mock_fallback() -> bool:
     return bool(settings.LLM_USE_MOCK_FALLBACK)
 
 
+def _log_provider_skip(p_name: Any, err: DevFlowError, *, ctx: str = "") -> None:
+    """provider 调用失败的可见化日志：走到 Mock 兜底时能从日志直接看出每个 provider 的原因。"""
+    logger.warning(
+        "[llm] provider「%s」%s失败（%s）: %s —— 切换下一个 provider",
+        p_name, f"{ctx} " if ctx else "", err.code, err.message[:300],
+    )
+
+
+def _log_mock_fallback(response_type: str, last_err: DevFlowError | None) -> None:
+    """Mock 兜底日志：附带最后一个真实 provider 的错误码与摘要，方便定位为什么走到 mock。"""
+    if last_err is not None:
+        logger.warning(
+            "[llm] 所有真实 provider 均失败，走 Mock 兜底（response_type=%s）。"
+            "最后错误 [%s] %s",
+            response_type, last_err.code, last_err.message[:300],
+        )
+    else:
+        logger.warning("[llm] 未配置任何真实 provider，直接走 Mock 兜底（response_type=%s）", response_type)
+
+
 def _breaker_name_for(spec: LlmProviderSpec) -> str:
     return f"llm_{spec['name']}"
 
@@ -473,6 +493,7 @@ async def invoke_json(
                 model_spec=p_spec["name"],
             )
         except LlmContextOverflowError as e:
+            _log_provider_skip(p_spec["name"], e, ctx="上下文超限")
             if shrink_left <= 0:
                 last_err = e
                 continue
@@ -492,21 +513,25 @@ async def invoke_json(
                     model_spec=p_spec["name"],
                 )
             except DevFlowError as e2:
+                _log_provider_skip(p_spec["name"], e2, ctx="压缩重试")
                 last_err = e2
                 continue
         except LlmTokenBudgetError as e:
+            _log_provider_skip(p_spec["name"], e, ctx="token 预算触顶")
             last_err = e
             break
         except LlmRefusedError as e:
+            _log_provider_skip(p_spec["name"], e, ctx="模型拒答")
             last_err = e
             continue
         except DevFlowError as e:
+            _log_provider_skip(p_spec["name"], e)
             last_err = e
             continue
 
     # 走到这里，所有 provider 都失败（或一个都没配置，如测试强制 Mock 模式）
     if _use_mock_fallback():
-        logger.warning("所有真实 LLM 失败，强制走 Mock 兜底。response_type=%s", response_type)
+        _log_mock_fallback(response_type, last_err)
         mock = _get_model("mock")
         return await _invoke_json_once(
             llm=mock, messages=messages,
@@ -562,26 +587,31 @@ async def invoke_text(
 
         try:
             return await do_run(messages)
-        except LlmContextOverflowError:
+        except LlmContextOverflowError as e:
+            _log_provider_skip(p_spec["name"], e, ctx="上下文超限")
             if shrink_left <= 0:
+                last_err = e
                 continue
             messages = _shrink_messages(messages)
             shrink_left -= 1
             try:
                 return await do_run(messages)
-            except DevFlowError as e:
-                last_err = e
+            except DevFlowError as e2:
+                _log_provider_skip(p_spec["name"], e2, ctx="压缩重试")
+                last_err = e2
                 continue
         except LlmRefusedError as e:
+            _log_provider_skip(p_spec["name"], e, ctx="模型拒答")
             last_err = e
             continue
         except DevFlowError as e:
+            _log_provider_skip(p_spec["name"], e)
             last_err = e
             continue
 
     # 全部失败（或未配置任何 provider）→ mock（可配置）
     if _use_mock_fallback():
-        logger.warning("llm.invoke_text 全部模型失败，走 Mock。")
+        _log_mock_fallback("text", last_err)
         return cast(str, (await _get_model("mock").ainvoke(messages)).content)
     assert last_err is not None, "未配置任何 LLM provider 且 LLM_USE_MOCK_FALLBACK 未开启"
     raise last_err
