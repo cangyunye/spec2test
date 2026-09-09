@@ -420,12 +420,24 @@ def _interactive_loop(tid: str, *, full: bool = False) -> None:
         except Exception:
             next_nodes = []
 
-        if "review" in next_nodes or "graph_review" in next_nodes:
-            # 人工门禁中断：graph_review=确认图↔需求对齐；review=终审验收
+        if "graph_type_select" in next_nodes or "review" in next_nodes or "graph_review" in next_nodes:
+            # 人工门禁中断：graph_type_select=选图种类；graph_review=确认图↔需求对齐；review=终审验收
             from .schemas import has_project_code
 
             no_code = not has_project_code(snap.get("requirement"))
-            if "graph_review" in next_nodes:
+            if "graph_type_select" in next_nodes:
+                from .graph_types import GRAPH_TYPES, suggest_graph_types
+
+                candidates = suggest_graph_types(snap.get("requirement"))
+                lines = ["[bold]请选择本次逻辑图的种类：[/]"]
+                for i, c in enumerate(candidates, 1):
+                    star = "[green]★[/]" if c["recommended"] else " "
+                    reason = f"  [dim]{c['reason']}[/]" if c.get("reason") else ""
+                    lines.append(f"  {star} {i}. [bold]{c['label']}[/] ({c['id']}) —— {c['desc']}{reason}")
+                lines.append("  [dim]直接回车 = 流程图（默认）[/]")
+                gate_panel = Panel("\n".join(lines), title="制图前 · 图种类选择", border_style="cyan")
+                prompt_label = "图种类"
+            elif "graph_review" in next_nodes:
                 approve_hint = (
                     "直接进入端到端测试用例设计（未提供项目代码）" if no_code
                     else "进入代码检索"
@@ -453,6 +465,24 @@ def _interactive_loop(tid: str, *, full: bool = False) -> None:
                 prompt_label = "验收决定"
             console.print(gate_panel)
             _print_stage_report(snap)
+            if "graph_type_select" in next_nodes:
+                # 图种类门禁：序号 / 种类 id / 中文名均可，空 = 默认 flowchart
+                try:
+                    raw = console.input(f"[bold yellow]{prompt_label}[/] (1-4 / id / 回车=默认) > ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    console.print("\n[dim]已退出（下次可用 devflow resume 继续）[/]")
+                    return
+                if raw and raw.lower() in (":q", ":quit", ":exit"):
+                    console.print(f"[dim]已退出（下次可用 devflow resume {tid} 继续）[/]")
+                    return
+                if not raw:
+                    decision = "flowchart"
+                elif raw.isdigit() and 1 <= int(raw) <= len(candidates):
+                    decision = candidates[int(raw) - 1]["id"]
+                else:
+                    decision = raw
+                _resume_from_interrupt(graph, tid, decision, gate="graph_type_select")
+                continue
             try:
                 decision = console.input(f"[bold yellow]{prompt_label}[/] (approve/reject) > ").strip().lower()
             except (EOFError, KeyboardInterrupt):
@@ -598,6 +628,8 @@ def _resume_from_interrupt(graph, tid: str, decision: str, *, gate: str = "revie
                     stage = event.get("stage")
                     if stage == "done":
                         console.print("[green]✓[/] 验收通过，流程完成！")
+                    elif stage == "graph" and gate == "graph_type_select":
+                        console.print(f"[green]✓[/] 图种类已选定（{decision}），开始制图")
                     elif stage == "code":
                         console.print("[yellow]![/] 验收被拒绝，回退到代码生成阶段")
                     elif stage == "test" and gate == "review":

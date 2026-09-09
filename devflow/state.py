@@ -51,11 +51,72 @@ class LogicEdge(TypedDict, total=False):
     is_modified: bool
 
 
+class SequenceParticipant(TypedDict, total=False):
+    alias: str                 # mermaid participant 别名（ASCII）
+    label: str
+    kind: Literal["actor", "service", "external"]
+    is_modified: bool
+
+
+class SequenceMessage(TypedDict, total=False):
+    msg_id: str
+    from_participant: str      # 对端 alias
+    to_participant: str
+    label: str
+    kind: Literal["sync", "async", "return"]
+    is_modified: bool
+
+
+class StateNode(TypedDict, total=False):
+    state_id: str
+    label: str
+    kind: Literal["initial", "final", "normal"]
+    is_modified: bool
+
+
+class StateTransition(TypedDict, total=False):
+    trans_id: str
+    from_state: str
+    to_state: str
+    event: Optional[str]       # 触发事件 / 条件
+    is_modified: bool
+
+
+class ErAttribute(TypedDict, total=False):
+    name: str
+    type: str
+    is_pk: bool
+
+
+class ErEntity(TypedDict, total=False):
+    e_id: str
+    table: str
+    attributes: list[ErAttribute]
+    is_modified: bool
+
+
+class ErRelation(TypedDict, total=False):
+    rel_id: str
+    from_entity: str
+    to_entity: str
+    cardinality: Literal["one_to_one", "one_to_many", "many_to_one", "many_to_many"]
+    label: str
+    is_modified: bool
+
+
 class LogicGraph(TypedDict, total=False):
     graph_id: str
-    nodes: list[LogicNode]
+    graph_type: str            # flowchart（默认）/ sequence / state / er
+    nodes: list[LogicNode]     # 全种类兜底投影（下游 code_gen/test_gen/review 只认 nodes/edges）
     edges: list[LogicEdge]
     mermaid_source: str
+    # ── 各种类的原生结构化字段（flowchart 用 nodes/edges 本体） ──
+    participants: list[SequenceParticipant]
+    messages: list[SequenceMessage]
+    states: list[StateNode]
+    transitions: list[StateTransition]
+    entities: list[ErEntity]
+    relations: list[ErRelation]
 
 
 class OpenCodeSessions(TypedDict, total=False):
@@ -96,6 +157,7 @@ class GlobalState(TypedDict, total=False):
 
     # ── 4. 流程控制字段 ────────────────────────────────
     current_stage: StageType
+    graph_type: Optional[str]                # 制图前门禁选定：flowchart/sequence/state/er
     clarify_mode: Literal["normal", "brainstorm", "grill"]   # 澄清模式：普通列表 / 头脑风暴 / 拷问
     clarify_mode_prompt: bool                # 首轮追问后弹「头脑风暴 / 拷问」选择卡（一次即收）
     missing_fields: list[str]                # 校验节点输出的缺失字段/错误

@@ -100,12 +100,111 @@ _MOCK_DEMO_TEST_DESIGN: dict[str, Any] = {
 }
 
 
+# Mock 兜底用的各图种类模板（response_type=logic_graph）：保证无 Key 演示模式下
+# sequence / state / er 三种制图也有合法结构化产物（flowchart 沿用下方内联模板）。
+_MOCK_DEMO_SEQUENCE: dict[str, Any] = {
+    "participants": [
+        {"alias": "USER", "label": "操作用户", "kind": "actor", "is_modified": False},
+        {"alias": "APP", "label": "Mock 演示服务", "kind": "service", "is_modified": True},
+        {"alias": "EXT", "label": "外部依赖", "kind": "external", "is_modified": False},
+    ],
+    "messages": [
+        {"msg_id": "m1", "from_participant": "USER", "to_participant": "APP",
+         "label": "发起请求", "kind": "sync", "is_modified": False},
+        {"msg_id": "m2", "from_participant": "APP", "to_participant": "EXT",
+         "label": "调用外部能力", "kind": "sync", "is_modified": True},
+        {"msg_id": "m3", "from_participant": "EXT", "to_participant": "APP",
+         "label": "返回结果", "kind": "return", "is_modified": False},
+        {"msg_id": "m4", "from_participant": "APP", "to_participant": "USER",
+         "label": "给出响应", "kind": "return", "is_modified": False},
+    ],
+    "mermaid_source": (
+        "sequenceDiagram\n"
+        "  actor USER as 操作用户\n"
+        "  participant APP as Mock 演示服务\n"
+        "  participant EXT as 外部依赖\n"
+        "  USER->>APP: 发起请求\n"
+        "  APP->>EXT: 调用外部能力\n"
+        "  EXT-->>APP: 返回结果\n"
+        "  APP-->>USER: 给出响应"
+    ),
+}
+
+_MOCK_DEMO_STATE: dict[str, Any] = {
+    "states": [
+        {"state_id": "s_start", "label": "初始", "kind": "initial", "is_modified": False},
+        {"state_id": "s_proc", "label": "处理中", "kind": "normal", "is_modified": True},
+        {"state_id": "s_done", "label": "完成", "kind": "final", "is_modified": False},
+    ],
+    "transitions": [
+        {"trans_id": "t1", "from_state": "s_start", "to_state": "s_proc",
+         "event": "提交", "is_modified": False},
+        {"trans_id": "t2", "from_state": "s_proc", "to_state": "s_done",
+         "event": "校验通过", "is_modified": True},
+    ],
+    "mermaid_source": (
+        "stateDiagram-v2\n"
+        "  [*] --> s_start\n"
+        "  s_start --> s_proc: 提交\n"
+        "  s_proc : 处理中\n"
+        "  s_proc --> s_done: 校验通过\n"
+        "  s_done --> [*]"
+    ),
+}
+
+_MOCK_DEMO_ER: dict[str, Any] = {
+    "entities": [
+        {"e_id": "n-user", "table": "USER", "is_modified": False, "attributes": [
+            {"name": "user_id", "type": "int", "is_pk": True},
+            {"name": "name", "type": "string", "is_pk": False},
+        ]},
+        {"e_id": "n-order", "table": "ORDER", "is_modified": True, "attributes": [
+            {"name": "order_id", "type": "int", "is_pk": True},
+        ]},
+    ],
+    "relations": [
+        {"rel_id": "r1", "from_entity": "n-user", "to_entity": "n-order",
+         "cardinality": "one_to_many", "label": "places", "is_modified": True},
+    ],
+    "mermaid_source": (
+        "erDiagram\n"
+        "  USER ||--o{ ORDER : places\n"
+        "  USER {\n"
+        "    int user_id PK\n"
+        "    string name\n"
+        "  }\n"
+        "  ORDER {\n"
+        "    int order_id PK\n"
+        "  }"
+    ),
+}
+
+# 制图提示词里的种类特征串 → mock 模板（检测顺序：先种类后通用，避免被通用分支截胡）
+_MOCK_GRAPH_BY_MARKER: list[tuple[str, dict[str, Any]]] = [
+    ("sequenceDiagram", _MOCK_DEMO_SEQUENCE),
+    ("stateDiagram-v2", _MOCK_DEMO_STATE),
+    ("erDiagram", _MOCK_DEMO_ER),
+]
+
+
+def _mock_graph_payload(prompt_text: str) -> dict[str, Any] | None:
+    """按提示词特征返回对应图种类的 mock 结构化数据；非制图请求返回 None。"""
+    for marker, payload in _MOCK_GRAPH_BY_MARKER:
+        if marker in prompt_text:
+            return json.loads(json.dumps(payload, ensure_ascii=False))
+    return None
+
+
 class _MockLLM:
     """SPEC 5.3 最后兜底：不依赖任何外部服务，始终返回模板 JSON / 文本。"""
 
     async def ainvoke(self, messages: list[BaseMessage], **_: Any) -> BaseMessage:
         # 依据 prompt 猜需求：要求 extract requirement 时给空模板，graph 给模板
         joined = "\n".join(str(getattr(m, "content", "")) for m in messages)
+        graph_payload = _mock_graph_payload(joined)
+        if graph_payload is not None:
+            return AIMessage(content=json.dumps(
+                {"graph_id": "mock-graph", **graph_payload}, ensure_ascii=False))
         if "测试架构师" in joined:
             return AIMessage(content=json.dumps(_MOCK_DEMO_TEST_DESIGN, ensure_ascii=False))
         if "requirement" in joined.lower() and "json" in joined.lower():
@@ -142,20 +241,11 @@ class _MockStructured:
                 return dict(_MOCK_DEMO_REQUIREMENT)
 
         class _GraphMocker:
+            def __init__(self, payload: dict[str, Any]) -> None:
+                self._payload = payload
+
             def model_dump(self, mode: str = "python") -> dict[str, Any]:
-                return {
-                    "nodes": [
-                        {"node_id": "n-1", "label": "Input", "node_type": "io",
-                         "code_ref": None, "is_modified": False},
-                        {"node_id": "n-2", "label": "Process", "node_type": "module",
-                         "code_ref": None, "is_modified": True},
-                    ],
-                    "edges": [
-                        {"edge_id": "e-1", "from_node": "n-1", "to_node": "n-2",
-                         "edge_type": "call", "condition": None, "is_modified": False},
-                    ],
-                    "mermaid_source": "graph TD\n  n-1(Input) --> n-2(Process)",
-                }
+                return json.loads(json.dumps(self._payload, ensure_ascii=False))
 
         class _TestDesignMocker:
             def model_dump(self, mode: str = "python") -> dict[str, Any]:
@@ -164,8 +254,24 @@ class _MockStructured:
         # 中英文关键词都匹配（test_design 提示词含"测试架构师"，须先于制图分支判断）
         if "测试架构师" in joined:
             return _TestDesignMocker()
+        # 按图种类分派（种类特征串检查须先于通用制图关键词）
+        typed = _mock_graph_payload(joined)
+        if typed is not None:
+            return _GraphMocker(typed)
         if any(kw in joined_lower for kw in ("logic", "graph", "逻辑图", "制图", "mermaid")):
-            return _GraphMocker()
+            return _GraphMocker({
+                "nodes": [
+                    {"node_id": "n-1", "label": "Input", "node_type": "io",
+                     "code_ref": None, "is_modified": False},
+                    {"node_id": "n-2", "label": "Process", "node_type": "module",
+                     "code_ref": None, "is_modified": True},
+                ],
+                "edges": [
+                    {"edge_id": "e-1", "from_node": "n-1", "to_node": "n-2",
+                     "edge_type": "call", "condition": None, "is_modified": False},
+                ],
+                "mermaid_source": "graph TD\n  n-1(Input) --> n-2(Process)",
+            })
         return _ReqMocker()
 
 

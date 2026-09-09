@@ -327,7 +327,9 @@ function gApply(canvas, zoomTag) {
 
 function renderGraphCard(graph) {
   S.graph = graph;
-  const { card, actions } = cardShell("LOGIC GRAPH · 逻辑图");
+  const gLabel = GRAPH_TYPE_LABELS[graph.graph_type] || "流程图";
+  const { card, actions } = cardShell(
+    `LOGIC GRAPH · 逻辑图${graph.graph_type && graph.graph_type !== "flowchart" ? " · " + gLabel : ""}`);
   actions.appendChild(miniBtn("−", () => { gState.s = Math.max(.3, gState.s - .15); gApply($("gCanvas"), $("gZoom")); }, "缩小"));
   actions.appendChild(miniBtn("＋", () => { gState.s = Math.min(3, gState.s + .15); gApply($("gCanvas"), $("gZoom")); }, "放大"));
   actions.appendChild(miniBtn("1:1", () => { gState = { s: 1, tx: 0, ty: 0 }; gApply($("gCanvas"), $("gZoom")); }, "重置视图"));
@@ -824,7 +826,9 @@ function onStreamEnd(e) {
   flushPendingLive();
   refreshSessions();
   if (S.gate) {
-    setStep(stepIdxForStage(S.gate === "graph_review" ? "graph_review" : "review"), false);
+    const gateStage = S.gate === "graph_review" ? "graph_review"
+      : S.gate === "graph_type_select" ? "graph" : "review";
+    setStep(stepIdxForStage(gateStage), false);
     updateComposer();
   } else if (S.stage === "done") {
     setStep(7, false);
@@ -840,11 +844,18 @@ function onStreamEnd(e) {
 /* ── 门禁 ────────────────────────────────────────────── */
 
 const GATE_META = {
+  graph_type_select: { n: 0, title: "制图前 · 选择逻辑图种类" },
   graph_review: { n: 1, title: "制图评审：逻辑图与需求对齐了吗？" },
   human_review: { n: 2, title: "人工验收：产物达到验收标准了吗？" },
 };
 
+const GRAPH_TYPE_ICONS = { flowchart: "⎯>", sequence: "⇄", state: "◉", er: "▤" };
+const GRAPH_TYPE_LABELS = { flowchart: "流程图", sequence: "时序图", state: "状态图", er: "ER 图" };
+
 function gateSubText(gate) {
+  if (gate === "graph_type_select") {
+    return "选择将决定制图视角与结构化产物形态 · 选定后本次需求内不再重复询问";
+  }
   if (gate === "graph_review") {
     return S.noCode
       ? "未提供项目代码 · APPROVE 将直接进入端到端测试用例设计"
@@ -860,25 +871,71 @@ function openGate(gate, payload) {
   S.gatePayload = payload || {};
   if (S.gatePayload.mode) S.noCode = S.gatePayload.mode === "no_code";
   const meta = GATE_META[gate] || { n: "?", title: "确认" };
-  $("gateTag").textContent = `GATE ${meta.n}/2`;
+  $("gateTag").textContent = meta.n ? `GATE ${meta.n}/2` : "GATE · 制图选项";
   $("gateTitle").textContent = meta.title;
   $("gateSub").textContent = gateSubText(gate);
   $("gateComment").value = "";
   $("gateCommentWrap").classList.add("hidden");
   $("btnGateSubmit").classList.add("hidden");
-  $("btnReject").classList.remove("hidden");
-  $("btnApprove").classList.remove("hidden");
-  $("btnGatePeek").classList.remove("hidden");
+  $("btnGatePeek").classList.add("hidden");
 
   const body = $("gateBody");
   body.innerHTML = "";
-  if (gate === "graph_review") body.appendChild(gateGraphBody(S.gatePayload));
-  else body.appendChild(gateReviewBody(S.gatePayload));
+  if (gate === "graph_type_select") {
+    $("btnReject").classList.add("hidden");
+    $("btnApprove").classList.add("hidden");
+    body.appendChild(gateTypeBody(S.gatePayload));
+  } else {
+    $("btnReject").classList.remove("hidden");
+    $("btnApprove").classList.remove("hidden");
+    $("btnGatePeek").classList.remove("hidden");
+    if (gate === "graph_review") body.appendChild(gateGraphBody(S.gatePayload));
+    else body.appendChild(gateReviewBody(S.gatePayload));
+  }
 
   $("gateModal").classList.remove("hidden");
   $("gatePill").classList.add("hidden");
-  setStep(stepIdxForStage(gate), false);
+  setStep(stepIdxForStage(gate === "graph_type_select" ? "graph" : gate), false);
   updateComposer();
+}
+
+/* 图种类选择卡：候选 + 推荐/推断标记，点卡片即选定并继续制图 */
+function gateTypeBody(p) {
+  const wrap = h("div", "gt-list");
+  const req = p.requirement_context || "";
+  if (req) {
+    const ctx = h("div", "gt-ctx", `需求背景：${req.slice(0, 80)}${req.length > 80 ? "…" : ""}`);
+    wrap.appendChild(ctx);
+  }
+  (p.candidates || []).forEach((c) => {
+    const b = h("button", "gt-card" + (c.recommended ? " recommended" : ""));
+    const head = h("div", "gt-head");
+    head.appendChild(h("span", "gt-icon mono", GRAPH_TYPE_ICONS[c.id] || "▪"));
+    head.appendChild(h("span", "gt-label", c.label || c.id));
+    if (c.recommended) {
+      head.appendChild(h("span", "gt-badge", c.id === "flowchart" ? "默认" : "推荐"));
+    }
+    b.appendChild(head);
+    b.appendChild(h("div", "gt-desc", c.desc || ""));
+    if (c.reason && c.id !== "flowchart") {
+      b.appendChild(h("div", "gt-reason mono", "↳ " + c.reason));
+    }
+    b.onclick = () => pickGraphType(c.id, c.label || c.id);
+    wrap.appendChild(b);
+  });
+  return wrap;
+}
+
+function pickGraphType(typeId, label) {
+  if (!S.gate || S.running) return;
+  $("gateModal").classList.add("hidden");
+  $("gatePill").classList.add("hidden");
+  S.gate = null;
+  addDivider(`已选图种类 · ${label}`, typeId, true);
+  setStep(1, true);
+  setRunning(true);
+  startStream({ op: "gate", decision: typeId, comment: "" });
+  toast("图种类已选定", `开始按「${label}」制图`);
 }
 
 function gateGraphBody(p) {
@@ -979,7 +1036,9 @@ function gateReviewBody(p) {
 
 function closeGateToPeek() {
   $("gateModal").classList.add("hidden");
-  $("gatePillText").textContent = S.gate === "graph_review" ? "制图评审待决策" : "人工验收待决策";
+  $("gatePillText").textContent =
+    S.gate === "graph_type_select" ? "图种类待选择" :
+    S.gate === "graph_review" ? "制图评审待决策" : "人工验收待决策";
   $("gatePill").classList.remove("hidden");
 }
 function reopenGate() {
@@ -1071,7 +1130,13 @@ async function openSession(tid) {
     if (S.stage === "done" && !(snap.next || []).length) setStep(7, false);
     // 挂起的门禁
     const next = snap.next || [];
-    if (next.includes("graph_review")) {
+    if (next.includes("graph_type_select")) {
+      // 图种类选择门禁：候选由服务端按同一套规则推断重算（interrupt 载荷不落 checkpoint）
+      try {
+        const cand = await api(`/api/sessions/${tid}/graph-type-candidates`);
+        if (cand.pending) openGate("graph_type_select", cand);
+      } catch { /* 恢复候选失败不阻塞会话打开 */ }
+    } else if (next.includes("graph_review")) {
       const g = vals.logic_graph || {};
       const req = vals.requirement || {};
       openGate("graph_review", {
@@ -1122,7 +1187,9 @@ function updateComposer() {
     send.disabled = true;
     input.disabled = true;
   } else if (S.gate) {
-    hint.textContent = S.gate === "graph_review"
+    hint.textContent = S.gate === "graph_type_select"
+      ? "图种类待选择 — 请在弹窗中挑选本次逻辑图的种类"
+      : S.gate === "graph_review"
       ? "制图评审待决策 — 请在评审窗中通过或驳回"
       : "人工验收待决策 — 请在验收窗中通过或驳回";
     send.disabled = true;

@@ -109,6 +109,7 @@ LOGIC_GRAPH_SCHEMA: dict[str, Any] = {
     "required": ["graph_id", "nodes", "edges", "mermaid_source"],
     "properties": {
         "graph_id": {"type": "string", "minLength": 1},
+        "graph_type": {"type": "string", "enum": ["flowchart", "sequence", "state", "er"]},
         "nodes": {
             "type": "array",
             "items": {
@@ -155,6 +156,171 @@ LOGIC_GRAPH_SCHEMA: dict[str, Any] = {
         },
         "mermaid_source": {"type": "string", "minLength": 5},
     },
+}
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 2b. 多种类逻辑图 Schema（sequence / state / er）
+#
+# 结构化字段按种类分叉；flowchart 沿用上方 LOGIC_GRAPH_SCHEMA。
+# nodes/edges 依旧是全种类兜底投影（下游只认这两个字段），
+# 因此在种类 Schema 里作为可选字段放行（落盘图 = 原生字段 + 投影）。
+# ═══════════════════════════════════════════════════════════════════
+# 投影 nodes/edges 与 LOGIC_GRAPH_SCHEMA 的 items 同构，直接引用其定义
+_NODES_FIELD: dict[str, Any] = {
+    **LOGIC_GRAPH_SCHEMA["properties"]["nodes"], "type": "array",
+}
+_EDGES_FIELD: dict[str, Any] = {
+    **LOGIC_GRAPH_SCHEMA["properties"]["edges"], "type": "array",
+}
+_BASE_GRAPH_FIELDS: dict[str, Any] = {
+    "graph_id": {"type": "string", "minLength": 1},
+    "graph_type": {"type": "string", "enum": ["flowchart", "sequence", "state", "er"]},
+    "mermaid_source": {"type": "string", "minLength": 5},
+}
+_PARTICIPANT_ITEM = {
+    "type": "object",
+    "required": ["alias", "label", "kind", "is_modified"],
+    "additionalProperties": False,
+    "properties": {
+        "alias": {"type": "string", "pattern": r"^[A-Za-z][A-Za-z0-9_]*$"},
+        "label": {"type": "string", "minLength": 1},
+        "kind": {"type": "string", "enum": ["actor", "service", "external"]},
+        "is_modified": {"type": "boolean"},
+    },
+}
+_MESSAGE_ITEM = {
+    "type": "object",
+    "required": ["msg_id", "from_participant", "to_participant", "label", "kind", "is_modified"],
+    "additionalProperties": False,
+    "properties": {
+        "msg_id": {"type": "string", "pattern": r"^m[A-Za-z0-9_]*$"},
+        "from_participant": {"type": "string"},
+        "to_participant": {"type": "string"},
+        "label": {"type": "string", "minLength": 1},
+        "kind": {"type": "string", "enum": ["sync", "async", "return"]},
+        "is_modified": {"type": "boolean"},
+    },
+}
+_STATE_ITEM = {
+    "type": "object",
+    "required": ["state_id", "label", "kind", "is_modified"],
+    "additionalProperties": False,
+    "properties": {
+        "state_id": {"type": "string", "pattern": r"^s[A-Za-z0-9_]*$"},
+        "label": {"type": "string", "minLength": 1},
+        "kind": {"type": "string", "enum": ["initial", "final", "normal"]},
+        "is_modified": {"type": "boolean"},
+    },
+}
+_TRANSITION_ITEM = {
+    "type": "object",
+    "required": ["trans_id", "from_state", "to_state", "is_modified"],
+    "additionalProperties": False,
+    "properties": {
+        "trans_id": {"type": "string", "pattern": r"^t[A-Za-z0-9_]*$"},
+        "from_state": {"type": "string"},
+        "to_state": {"type": "string"},
+        "event": {"type": ["string", "null"]},
+        "is_modified": {"type": "boolean"},
+    },
+}
+_ENTITY_ITEM = {
+    "type": "object",
+    "required": ["e_id", "table", "attributes", "is_modified"],
+    "additionalProperties": False,
+    "properties": {
+        "e_id": {"type": "string", "pattern": r"^n-[A-Za-z0-9_-]+$"},
+        "table": {"type": "string", "pattern": r"^[A-Za-z][A-Za-z0-9_]*$"},
+        "attributes": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+                "type": "object",
+                "required": ["name", "type"],
+                "additionalProperties": False,
+                "properties": {
+                    "name": {"type": "string", "pattern": r"^[A-Za-z][A-Za-z0-9_]*$"},
+                    "type": {"type": "string", "minLength": 1},
+                    "is_pk": {"type": "boolean"},
+                },
+            },
+        },
+        "is_modified": {"type": "boolean"},
+    },
+}
+_RELATION_ITEM = {
+    "type": "object",
+    "required": ["rel_id", "from_entity", "to_entity", "cardinality", "label", "is_modified"],
+    "additionalProperties": False,
+    "properties": {
+        "rel_id": {"type": "string", "pattern": r"^r[A-Za-z0-9_]*$"},
+        "from_entity": {"type": "string"},
+        "to_entity": {"type": "string"},
+        "cardinality": {
+            "type": "string",
+            "enum": ["one_to_one", "one_to_many", "many_to_one", "many_to_many"],
+        },
+        "label": {"type": "string", "minLength": 1},
+        "is_modified": {"type": "boolean"},
+    },
+}
+
+SEQUENCE_GRAPH_SCHEMA: dict[str, Any] = {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "SequenceGraph",
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["graph_id", "graph_type", "participants", "messages", "mermaid_source"],
+    "properties": {
+        **_BASE_GRAPH_FIELDS,
+        "participants": {"type": "array", "minItems": 2, "items": _PARTICIPANT_ITEM},
+        "messages": {"type": "array", "minItems": 2, "items": _MESSAGE_ITEM},
+        # 兜底投影（落盘后存在，生成时不要求）
+        "nodes": _NODES_FIELD,
+        "edges": _EDGES_FIELD,
+    },
+}
+
+STATE_GRAPH_SCHEMA: dict[str, Any] = {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "StateGraphData",
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["graph_id", "graph_type", "states", "transitions", "mermaid_source"],
+    "properties": {
+        **_BASE_GRAPH_FIELDS,
+        "states": {"type": "array", "minItems": 2, "items": _STATE_ITEM},
+        "transitions": {"type": "array", "minItems": 1, "items": _TRANSITION_ITEM},
+        "nodes": _NODES_FIELD,
+        "edges": _EDGES_FIELD,
+    },
+}
+
+ER_GRAPH_SCHEMA: dict[str, Any] = {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "ErGraph",
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["graph_id", "graph_type", "entities", "relations", "mermaid_source"],
+    "properties": {
+        **_BASE_GRAPH_FIELDS,
+        "entities": {"type": "array", "minItems": 2, "items": _ENTITY_ITEM},
+        "relations": {"type": "array", "minItems": 1, "items": _RELATION_ITEM},
+        "nodes": _NODES_FIELD,
+        "edges": _EDGES_FIELD,
+    },
+}
+
+# 种类 → (schema, 引用完整性检查配置)：[引用字段] → 被引用集合的字段
+_TYPED_GRAPH_SCHEMAS: dict[str, tuple[dict[str, Any], list[tuple[str, str, str]]]] = {
+    # (容器字段, 引用字段, 被引用 id 字段)
+    "sequence": (SEQUENCE_GRAPH_SCHEMA, [("messages", "from_participant", "alias"),
+                                         ("messages", "to_participant", "alias")]),
+    "state": (STATE_GRAPH_SCHEMA, [("transitions", "from_state", "state_id"),
+                                   ("transitions", "to_state", "state_id")]),
+    "er": (ER_GRAPH_SCHEMA, [("relations", "from_entity", "e_id"),
+                             ("relations", "to_entity", "e_id")]),
 }
 
 
@@ -210,8 +376,35 @@ def validate_requirement(data: dict[str, Any]) -> list[str]:
 
 
 def validate_logic_graph(data: dict[str, Any]) -> list[str]:
-    """校验逻辑图是否合规，并附加图拓扑一致性检查。"""
+    """校验逻辑图是否合规：按 graph_type 分派对应 Schema + 引用完整性检查。
+
+    flowchart（含旧数据无 graph_type 字段）→ LOGIC_GRAPH_SCHEMA + nodes/edges 拓扑；
+    sequence / state / er → 各自 Schema + 引用字段 ⊆ 实体 id 集合。
+    """
     errors: list[str] = []
+    graph_type = str(data.get("graph_type") or "flowchart")
+    if graph_type != "flowchart":
+        spec = _TYPED_GRAPH_SCHEMAS.get(graph_type)
+        if spec is None:
+            return [f"graph_type: 未知种类 {graph_type!r}"]
+        schema, ref_checks = spec
+        try:
+            jsonschema.validate(data, schema)
+        except jsonschema.ValidationError as e:
+            return [f"{'/'.join(str(p) for p in e.path)}: {e.message}"]
+        for container, ref_field, id_field in ref_checks:
+            entity_key = {"messages": "participants", "transitions": "states",
+                          "relations": "entities"}[container]
+            known = {str(i.get(id_field)) for i in data.get(entity_key, []) if isinstance(i, dict)}
+            for item in data.get(container, []):
+                ref = str(item.get(ref_field))
+                if ref not in known:
+                    errors.append(
+                        f"{container}[{item.get(next(k for k in item if k.endswith('_id')), '?')}]"
+                        f" 的 {ref_field}={ref} 不存在"
+                    )
+        return errors
+
     try:
         jsonschema.validate(data, LOGIC_GRAPH_SCHEMA)
     except jsonschema.ValidationError as e:

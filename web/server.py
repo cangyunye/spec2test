@@ -137,6 +137,29 @@ def session_state(tid: str) -> dict[str, Any]:
     }
 
 
+@app.get("/api/sessions/{tid}/graph-type-candidates")
+def graph_type_candidates(tid: str) -> dict[str, Any]:
+    """制图前图种类候选：与 graph_type_select 门禁同源的规则推断。
+
+    会话恢复（刷新/重开页面）时前端重放选择卡用；pending=true 表示门禁仍在等待选择。
+    """
+    if not _thread_exists(tid):
+        raise HTTPException(404, f"会话不存在: {tid}")
+    graph = build_graph_with_providers()
+    try:
+        snap = graph.get_state(_config(thread_id=tid))
+    except Exception as e:
+        raise HTTPException(404, f"会话不存在或读取失败: {e}")
+    vals = snap.values or {}
+    from devflow.graph_types import suggest_graph_types
+
+    return {
+        "candidates": suggest_graph_types(vals.get("requirement")),
+        "graph_type": vals.get("graph_type"),
+        "pending": "graph_type_select" in list(snap.next or []),
+    }
+
+
 def _serialize_state(values: Any) -> dict[str, Any]:
     """checkpoint values → JSON-safe dict（messages 转 {type, content}）。"""
     if not isinstance(values, dict):

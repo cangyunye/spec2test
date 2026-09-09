@@ -2,6 +2,7 @@ from .clarify import clarify_extract, clarify_validate, clarify_build_question
 from .compress import compress_messages
 from .graph_gen import graph_generate, graph_validate
 from .graph_review import graph_review_node, route_after_graph_review
+from .graph_type import graph_type_select
 from .provider_nodes import (
     make_code_gen_node,
     make_code_search_node,
@@ -27,6 +28,7 @@ __all__ = [
     "graph_generate",
     "graph_validate",
     "graph_review_node",
+    "graph_type_select",
     "route_after_graph_review",
     "make_code_search_node",
     "make_code_gen_node",

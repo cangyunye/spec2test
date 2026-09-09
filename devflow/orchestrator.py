@@ -17,6 +17,9 @@ build_  compress
 question │(可选)
     │    │
     │    ▼
+    │ graph_type_select ← 制图前 interrupt 门禁：选逻辑图种类
+    │    │   （flowchart / sequence / state / er，选定后重制图沿用不再询问）
+    │    ▼
     │ graph_generate ──▶ [DONE: logic_graph 生成结束]
     └──── (循环回到 clarify_extract，等待用户输入后由 stream 驱动继续)
 
@@ -65,6 +68,7 @@ from .nodes import (
     compress_messages,
     graph_generate,
     graph_review_node,
+    graph_type_select,
     make_apply_code_node,
     make_code_gen_node,
     make_code_search_node,
@@ -359,6 +363,7 @@ def build_graph():
     workflow.add_node("clarify_validate", clarify_validate)
     workflow.add_node("clarify_build_question", clarify_build_question)
     workflow.add_node("compress_messages", compress_messages)
+    workflow.add_node("graph_type_select", graph_type_select)
     workflow.add_node("graph_generate", graph_generate)
     workflow.add_node("dead_letter_drain", dead_letter_drain_node)
 
@@ -383,7 +388,7 @@ def build_graph():
         _route_after_validate,
         {
             "need_more_info": "clarify_build_question",
-            "info_complete": "graph_generate",  # 已过 START 压缩，直接制图
+            "info_complete": "graph_type_select",  # 先选图种类（interrupt 门禁），再制图
             "abort": "dead_letter_drain",
         },
     )
@@ -400,6 +405,9 @@ def build_graph():
 
     # abort 汇点：落死信 → END
     workflow.add_edge("dead_letter_drain", END)
+
+    # 图种类已选定 → 制图（graph_type 未选时该节点不会走到这里：interrupt 已挂起）
+    workflow.add_edge("graph_type_select", "graph_generate")
 
     # 制图结果 → 推进 / 重试 / abort
     workflow.add_conditional_edges(
@@ -453,6 +461,7 @@ def build_graph_with_providers(providers: Providers | None = None):
     workflow.add_node("clarify_validate", clarify_validate)
     workflow.add_node("clarify_build_question", clarify_build_question)
     workflow.add_node("compress_messages", compress_messages)
+    workflow.add_node("graph_type_select", graph_type_select)
     workflow.add_node("graph_generate", graph_generate)
     workflow.add_node("dead_letter_drain", dead_letter_drain_node)
 
@@ -486,7 +495,7 @@ def build_graph_with_providers(providers: Providers | None = None):
         _route_after_validate,
         {
             "need_more_info": "clarify_build_question",
-            "info_complete": "graph_generate",  # 已过 START 压缩，直接制图
+            "info_complete": "graph_type_select",  # 先选图种类（interrupt 门禁），再制图
             "abort": "dead_letter_drain",
         },
     )
@@ -500,6 +509,9 @@ def build_graph_with_providers(providers: Providers | None = None):
             "retry": "clarify_build_question",
         },
     )
+
+    # 图种类已选定 → 制图
+    workflow.add_edge("graph_type_select", "graph_generate")
 
     # 制图 → 制图门禁（人工确认图↔需求对齐）→ 推进到检索 / 重试制图 / abort
     workflow.add_conditional_edges(
@@ -616,6 +628,7 @@ def initial_state() -> dict[str, Any]:
         "requirement": empty_requirement(),
         "code_context": [],
         "logic_graph": None,
+        "graph_type": None,
         "code_changes": [],
         "test_report": None,
         "opencode_sessions": {"search": None, "code_gen": None, "test_gen": None},

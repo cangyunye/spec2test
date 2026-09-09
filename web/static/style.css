@@ -569,6 +569,29 @@ table.t-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .g-stat span { font-size: 11px; color: var(--ink-3); }
 .g-stat.bad b { color: var(--err); }
 
+/* 图种类选择卡（制图前门禁） */
+.gt-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
+.gt-ctx { grid-column: 1 / -1; font-size: 12px; color: var(--ink-3); margin-bottom: 2px; }
+.gt-card {
+  cursor: pointer; text-align: left;
+  border: 1px solid var(--border-2); border-radius: 12px; padding: 12px 14px;
+  background: transparent; color: var(--ink);
+  display: flex; flex-direction: column; gap: 6px;
+  transition: border-color .15s, background .15s, transform .12s;
+}
+.gt-card:hover { background: var(--hl); border-color: var(--ink-3); transform: translateY(-1px); }
+.gt-card.recommended { border-color: var(--ink-3); box-shadow: inset 0 0 0 1px var(--ink-3); }
+.gt-head { display: flex; align-items: center; gap: 8px; }
+.gt-icon { font-size: 13px; color: var(--ink-2); }
+.gt-label { font-weight: 600; font-size: 13.5px; }
+.gt-badge {
+  font: 600 10px/1 inherit; letter-spacing: .08em;
+  padding: 3px 7px; border-radius: 999px;
+  background: var(--inv-bg); color: var(--inv-ink);
+}
+.gt-desc { font-size: 11.5px; line-height: 1.55; color: var(--ink-2); }
+.gt-reason { font-size: 10.5px; color: var(--ink-4); }
+
 /* 门禁悬浮签 */
 .gate-pill {
   position: fixed; right: 22px; bottom: 92px; z-index: 80;

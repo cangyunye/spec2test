@@ -113,6 +113,8 @@ class TestE2EHappyPath:
         # 1. 启动 graph（带完整需求 + 用户消息）
         state = _full_initial_state()
         list(self.graph.stream(state, self.config, stream_mode="updates"))
+        # 1.5 先过制图前图种类门禁（graph_type_select interrupt）
+        list(self.graph.stream(Command(resume="flowchart"), self.config, stream_mode="updates"))
 
         # 2. 先停在制图门禁（graph_review）：确认图↔需求对齐
         snapshot = self.graph.get_state(self.config)
@@ -161,6 +163,7 @@ class TestE2ERejectPath:
         # 1. 跑到制图门禁并通过
         state = _full_initial_state()
         list(self.graph.stream(state, self.config, stream_mode="updates"))
+        list(self.graph.stream(Command(resume="flowchart"), self.config, stream_mode="updates"))
         snapshot = self.graph.get_state(self.config)
         assert "graph_review" in (snapshot.next or [])
         list(self.graph.stream(Command(resume="approve"), self.config, stream_mode="updates"))
@@ -230,8 +233,9 @@ class TestE2EExecutionLoop:
         self._input_state = state
 
     def test_apply_and_real_test_run(self):
-        # 1. 启动 → 停在制图门禁
+        # 1. 启动 → 过图种类门禁 → 停在制图门禁
         list(self.graph.stream(self._input_state, self.config, stream_mode="updates"))
+        list(self.graph.stream(Command(resume="flowchart"), self.config, stream_mode="updates"))
         snapshot = self.graph.get_state(self.config)
         assert "graph_review" in (snapshot.next or [])
 
@@ -290,6 +294,7 @@ class TestE2ETestFailLoop:
         state["requirement"] = {**state["requirement"], "project_root": str(proj)}
 
         list(graph.stream(state, config, stream_mode="updates"))
+        list(graph.stream(Command(resume="flowchart"), config, stream_mode="updates"))
         list(graph.stream(Command(resume="approve"), config, stream_mode="updates"))
 
         snapshot = graph.get_state(config)

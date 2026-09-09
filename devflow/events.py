@@ -25,6 +25,7 @@ NODE_LABELS: dict[str, str] = {
     "clarify_extract": "需求澄清",
     "clarify_validate": "需求校验",
     "clarify_build_question": "生成追问",
+    "graph_type_select": "选择图种类",
     "graph_generate": "逻辑制图",
     "graph_review": "制图评审",
     "code_search": "代码检索",

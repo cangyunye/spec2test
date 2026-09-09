@@ -100,14 +100,30 @@ class TestGraphReviewIntegration:
         state["requirement"] = _complete_requirement()
         list(self.graph.stream(state, self.config, stream_mode="updates"))
 
+    def _pass_type_gate(self, graph_type: str = "flowchart"):
+        """通过制图前图种类门禁（graph_type_select interrupt）。"""
+        list(self.graph.stream(Command(resume=graph_type), self.config, stream_mode="updates"))
+
+    def test_stops_at_type_gate_then_graph_review(self):
+        self._start()
+        # 0. 澄清完备后应先停在图种类选择门（graph_type_select）
+        snapshot = self.graph.get_state(self.config)
+        assert "graph_type_select" in (snapshot.next or []), \
+            f"期望先停在 graph_type_select 门，实际 next={snapshot.next}"
+        # 选定种类后写入 state，后续重制图沿用不再询问
+        self._pass_type_gate("sequence")
+        assert self.graph.get_state(self.config).values.get("graph_type") == "sequence"
+
     def test_stops_at_graph_review_then_approve_reaches_final_review(self):
         self._start()
+        self._pass_type_gate()
         # 1. 应停在 graph_review 门（不是终审 review）
         snapshot = self.graph.get_state(self.config)
         assert "graph_review" in (snapshot.next or []), f"期望停在 graph_review 门，实际 next={snapshot.next}"
         assert "review" not in (snapshot.next or [])
-        # 制图产物已就位
+        # 制图产物已就位，且种类与门禁选择一致
         assert snapshot.values.get("logic_graph") is not None
+        assert snapshot.values["logic_graph"].get("graph_type") == "flowchart"
 
         # 2. approve 制图门 → 应继续并停在终审 review
         list(self.graph.stream(Command(resume="approve"), self.config, stream_mode="updates"))
@@ -122,13 +138,15 @@ class TestGraphReviewIntegration:
 
     def test_reject_graph_review_goes_back_to_graph_generate(self):
         self._start()
+        self._pass_type_gate()
         snapshot = self.graph.get_state(self.config)
         assert "graph_review" in (snapshot.next or [])
 
-        # reject → 回到 graph_generate 重新制图 → 再次停在 graph_review 门
+        # reject → 回到 graph_generate 重新制图（沿用已选种类，不再过类型门）→ 再次停在 graph_review 门
         list(self.graph.stream(Command(resume="reject"), self.config, stream_mode="updates"))
         snapshot = self.graph.get_state(self.config)
         next_nodes = snapshot.next or []
         assert "graph_review" in next_nodes, f"reject 后应再次停在 graph_review 门，实际 next={next_nodes}"
         # 门内已重新生成逻辑图（graph_gen 成功时沿用阶段一 legacy 写 current_stage="done"，
         # 故此处不断言 stage，只断言停留在门禁）
+        assert snapshot.values.get("logic_graph", {}).get("graph_type") == "flowchart"
