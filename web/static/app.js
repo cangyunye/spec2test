@@ -159,6 +159,7 @@ function setStep(idx, running) {
 }
 function stepIdxForStage(stage) {
   if (stage === "graph_review") return 2;
+  if (stage === "human_review") return 6;  // 门禁 id（openGate/submitGate 直接传入），漏映射会被兜底回 0
   if (stage in STAGE_ORDER) return STAGE_ORDER[stage];
   return 0;
 }
