@@ -92,8 +92,9 @@ class TestLiveRequirementExtract:
     """真实模型对完整需求文本抽取 RequirementExtract 不空心（回归：网关
     function_calling 只回空参数 tool_call，导致抽取永远为空、反复追问）。
 
-    可指定外部需求文本（如 test_spec.txt）：
-      LLM_LIVE_TESTS=1 LLM_LIVE_SPEC_FILE=/path/to/test_spec.txt \
+    需求文本默认读 tests/fixtures/test_spec.txt（精确版样例）；
+    可用 LLM_LIVE_SPEC_FILE 指定任意文本覆盖（如模糊版 test_spec2.txt）：
+      LLM_LIVE_TESTS=1 LLM_LIVE_SPEC_FILE=tests/fixtures/test_spec2.txt \
         python -m pytest tests/test_live_llm.py -k extract -v
     """
 
@@ -107,6 +108,9 @@ class TestLiveRequirementExtract:
         from devflow.nodes.clarify import clarify_extract_async
 
         spec_file = os.getenv("LLM_LIVE_SPEC_FILE")
+        if not spec_file:
+            default_fixture = Path(__file__).parent / "fixtures" / "test_spec.txt"
+            spec_file = str(default_fixture) if default_fixture.exists() else None
         text = Path(spec_file).read_text(encoding="utf-8") if spec_file else _LIVE_SPEC_TEXT
         state = {
             "messages": [HumanMessage(content=text)],
