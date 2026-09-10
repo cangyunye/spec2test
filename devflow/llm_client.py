@@ -25,6 +25,7 @@ from pydantic import BaseModel
 
 from .config import LlmProviderSpec, settings
 from .errors import (
+    HTTP_AUTH,
     LlmContextOverflowError,
     LlmOutputFormatError,
     LlmRefusedError,
@@ -296,10 +297,48 @@ class _MockStructured:
 
 _model_cache: dict[str, Any] = {}
 
+# 供应商运行期状态（进程内，重启清零）：
+#   _disabled_providers —— 服务端已确认无效（鉴权 401/403）的 provider，调用时直接跳过
+#   _sticky_provider    —— 最近一次成功的 provider，下一轮排最前以命中其上下文缓存，
+#                          避免链上多个供应商来回跳
+_disabled_providers: set[str] = set()
+_sticky_provider: str | None = None
+
+
+def _is_auth_error(err: DevFlowError) -> bool:
+    """鉴权类错误（401/403）：确定性失效，重试与熔断都无意义，应停用。"""
+    return err.code == HTTP_AUTH
+
+
+def disable_provider(name: str, reason: str = "") -> bool:
+    """停用 provider（鉴权确认无效）；已停用返回 False。检测通过可 enable 解除。"""
+    global _sticky_provider
+    if name in _disabled_providers:
+        return False
+    _disabled_providers.add(name)
+    if _sticky_provider == name:
+        _sticky_provider = None
+    _emit_stream_event({"type": "provider_disabled", "provider": name, "reason": reason[:160]})
+    return True
+
+
+def enable_provider(name: str) -> bool:
+    """解除停用（面板检测通过时调用）；原本未停用返回 False。"""
+    if name not in _disabled_providers:
+        return False
+    _disabled_providers.discard(name)
+    return True
+
 
 def _candidates_providers() -> list[LlmProviderSpec]:
-    """fallback 链：按 settings.LLM_PROVIDERS 顺序返回结构化 provider specs。"""
-    return list(settings.LLM_PROVIDERS)
+    """本次调用的 fallback 链：过滤已停用 → 粘性成功者提前（命中其上下文缓存）。"""
+    chain = [p for p in settings.LLM_PROVIDERS if p.get("name") not in _disabled_providers]
+    if _sticky_provider:
+        for i, p in enumerate(chain):
+            if p.get("name") == _sticky_provider and i > 0:
+                chain.insert(0, chain.pop(i))
+                break
+    return chain
 
 
 def _use_mock_fallback() -> bool:
@@ -319,8 +358,23 @@ def _emit_stream_event(payload: dict[str, Any]) -> None:
         pass
 
 
+def _mark_provider_success(p_spec: LlmProviderSpec) -> None:
+    """记录粘性成功供应商（下一轮排最前，命中其上下文缓存）并广播使用事件。"""
+    global _sticky_provider
+    _sticky_provider = p_spec["name"]
+    _emit_stream_event({
+        "type": "provider_used",
+        "provider": p_spec["name"],
+        "model": p_spec["model"],
+    })
+
+
 def _log_provider_skip(p_name: Any, err: DevFlowError, *, ctx: str = "") -> None:
-    """provider 调用失败的可见化日志：走到 Mock 兜底时能从日志直接看出每个 provider 的原因。"""
+    """provider 调用失败的可见化日志：走到 Mock 兜底时能从日志直接看出每个 provider 的原因。
+
+    鉴权类失败（401/403）是确定性失效：重试与熔断都无意义，直接停用该 provider
+    （面板检测通过后自动解除），不再让每一轮调用都白白撞一次。
+    """
     logger.warning(
         "[llm] provider「%s」%s失败（%s）: %s —— 切换下一个 provider",
         p_name, f"{ctx} " if ctx else "", err.code, err.message[:300],
@@ -332,6 +386,8 @@ def _log_provider_skip(p_name: Any, err: DevFlowError, *, ctx: str = "") -> None
         "message": err.message[:160],
         "ctx": ctx,
     })
+    if _is_auth_error(err):
+        disable_provider(str(p_name), err.message)
 
 
 def _log_mock_fallback(response_type: str, last_err: DevFlowError | None) -> None:
@@ -697,11 +753,7 @@ async def invoke_json(
                 response_type=response_type,
                 model_spec=p_spec["name"],
             )
-            _emit_stream_event({
-                "type": "provider_used",
-                "provider": p_spec["name"],
-                "model": p_spec["model"],
-            })
+            _mark_provider_success(p_spec)
             return result
         except LlmContextOverflowError as e:
             _log_provider_skip(p_spec["name"], e, ctx="上下文超限")
@@ -796,11 +848,7 @@ async def invoke_text(
             content = resp.content if isinstance(resp, BaseMessage) else str(resp)
             chars = sum(len(str(getattr(msg, "content", ""))) for msg in m) + len(str(content))
             budget.consume(_estimate_tokens(chars))
-            _emit_stream_event({
-                "type": "provider_used",
-                "provider": p_spec["name"],
-                "model": p_spec["model"],
-            })
+            _mark_provider_success(p_spec)
             return str(content)
 
         policy = RetryPolicy(max_attempts=max_retries + 1, base_backoff=1.0, deadline_total=120.0)
@@ -955,8 +1003,11 @@ def _account(messages: list[BaseMessage], output: Any, budget: TokenBudget) -> N
 
 
 def reset_model_cache() -> None:
-    """测试隔离：清空 _model_cache 里所有懒加载单例（避免跨测试模型配置交叉污染）。"""
+    """测试隔离：清空模型实例缓存与 provider 运行期状态（避免跨测试交叉污染）。"""
+    global _sticky_provider
     _model_cache.clear()
+    _disabled_providers.clear()
+    _sticky_provider = None
 
 
 # ═══════════════════════════════════════════════════════════════════

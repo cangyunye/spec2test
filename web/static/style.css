@@ -625,6 +625,8 @@ table.t-table { width: 100%; border-collapse: collapse; font-size: 12px; }
   display: flex; flex-direction: column; gap: 6px;
 }
 .prov-row.active { border-color: var(--ink-3); background: var(--hl); }
+.prov-row.disabled { opacity: 0.62; }
+.prov-badge.bad { background: transparent; border: 1px solid var(--err); color: var(--err); }
 .prov-head { display: flex; align-items: center; gap: 7px; font-size: 12.5px; }
 .prov-model { color: var(--ink-3); }
 .prov-badge {

@@ -730,21 +730,24 @@ function renderExportBar() {
   feedAppend(card);
 }
 
-/* ── SSE ─────────────────────────────────────────────── */
+/* ── SSE（POST + fetch 流式读取；消息全文走请求体，规避 URL 长度 400） ── */
 
-let es = null, sawEnd = false;
+let streamAbort = null, sawEnd = false;
 
 function startStream(params) {
   stopStream();
   sawEnd = false;
-  const qs = new URLSearchParams(params).toString();
-  es = new EventSource(`/api/sessions/${S.tid}/stream?${qs}`);
-  es.onmessage = (ev) => {
-    let e; try { e = JSON.parse(ev.data); } catch { return; }
-    if (e.type === "stream_end") { stopStream(); onStreamEnd(e); return; }
+  const ctrl = new AbortController();
+  streamAbort = ctrl;
+
+  const deliver = (frame) => {
+    const line = frame.split("\n").find((l) => l.startsWith("data:"));
+    if (!line) return;
+    let e; try { e = JSON.parse(line.slice(5).trim()); } catch { return; }
+    if (e.type === "stream_end") { sawEnd = true; stopStream(); onStreamEnd(e); return; }
     onEvent(e);
   };
-  es.onerror = () => {
+  const abortNotice = () => {
     stopStream();
     if (!sawEnd) {
       setRunning(false);
@@ -752,8 +755,61 @@ function startStream(params) {
       updateComposer();
     }
   };
+
+  const isGate = params.op === "gate";
+  let fields = null;
+  if (params.fields) { try { fields = JSON.parse(params.fields); } catch { fields = null; } }
+  const url = isGate ? `/api/sessions/${S.tid}/gates` : `/api/sessions/${S.tid}/messages`;
+  const body = JSON.stringify(isGate
+    ? {
+        decision: params.decision,
+        comment: params.comment || null,
+        selected: params.selected ? params.selected.split(",").filter(Boolean) : null,
+        fields,
+      }
+    : { text: params.text || "" });
+
+  (async () => {
+    try {
+      const resp = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+        signal: ctrl.signal,
+      });
+      if (!resp.ok || !resp.body) {
+        let detail = "";
+        try { detail = (await resp.text()).slice(0, 140); } catch { /* 忽略 */ }
+        toast(`请求失败（HTTP ${resp.status}）`, detail || "服务返回错误", "err");
+        stopStream(); setRunning(false); updateComposer();
+        return;
+      }
+      const reader = resp.body.getReader();
+      const dec = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let idx;
+        while ((idx = buf.indexOf("\n\n")) >= 0) {
+          const frame = buf.slice(0, idx).trim();
+          buf = buf.slice(idx + 2);
+          if (frame) deliver(frame);
+        }
+      }
+      if (buf.trim()) deliver(buf.trim());
+      abortNotice();  // 服务端正常收尾前连接断开：与旧 onerror 行为一致
+    } catch (err) {
+      if (err && err.name === "AbortError") return;  // 主动 stopStream，不算异常
+      toast("连接中断", "与服务的连接断开，最后一步可能未完成；可重发上一条消息继续。", "err");
+      stopStream(); setRunning(false); updateComposer();
+    }
+  })();
 }
-function stopStream() { if (es) { es.close(); es = null; } }
+function stopStream() {
+  if (streamAbort) { streamAbort.abort(); streamAbort = null; }
+}
 
 function setRunning(on) {
   S.running = on;
@@ -812,9 +868,11 @@ function onEvent(e) {
       addAsk(e.missing || e.questions || []);
       break;
     case "provider":
-      // 供应商切换 / 使用可见化：失效兜底一目了然，不再只有服务端日志知道
+      // 供应商切换 / 使用 / 停用可见化：失效兜底一目了然，不再只有服务端日志知道
       if (e.status === "skip") {
         addSysLine(`↯ 供应商 ${e.provider} ${e.ctx || ""}失败（${e.code}）→ 自动切换下一个`, "warn");
+      } else if (e.status === "disabled") {
+        addSysLine(`⛔ 供应商 ${e.provider} 鉴权失败已停用（${String(e.reason || "").slice(0, 60)}）；检测通过后自动恢复`, "warn");
       } else {
         addSysLine(`✓ 本次调用由 ${e.provider} · ${e.model} 完成`, "ok");
       }
@@ -1915,16 +1973,18 @@ async function renderHealthPop() {
   const checkOut = h("div", "sec");
   if (!chain.length) pop.appendChild(h("div", "row", "未配置提供商（Mock 兜底）"));
   chain.forEach((p, i) => {
-    const rowEl = h("div", "prov-row" + (i === 0 ? " active" : ""));
+    const rowEl = h("div", "prov-row" + (i === 0 && !p.disabled ? " active" : "") + (p.disabled ? " disabled" : ""));
     const head = h("div", "prov-head");
     head.appendChild(h("span", "mono", `${i + 1}.`));
     head.appendChild(h("b", null, p.name));
     head.appendChild(h("span", "mono prov-model", p.model));
-    if (i === 0) head.appendChild(h("span", "prov-badge", "首选"));
+    if (p.disabled) head.appendChild(h("span", "prov-badge bad", "已停用·鉴权失败"));
+    else if (p.sticky) head.appendChild(h("span", "prov-badge", "使用中·命中缓存"));
+    else if (i === 0) head.appendChild(h("span", "prov-badge", "首选"));
     rowEl.appendChild(head);
 
     const ops = h("div", "prov-ops");
-    if (i > 0) {
+    if (!p.disabled && i > 0) {
       const use = h("button", "prov-btn", "设为首选");
       use.onclick = async () => {
         try {
@@ -1939,7 +1999,8 @@ async function renderHealthPop() {
       };
       ops.appendChild(use);
     }
-    const test = h("button", "prov-btn", "检测");
+    const testLabel = p.disabled ? "检测并启用" : "检测";
+    const test = h("button", "prov-btn", testLabel);
     test.onclick = async () => {
       test.disabled = true; test.textContent = "检测中…";
       try {
@@ -1952,6 +2013,7 @@ async function renderHealthPop() {
         test.textContent = rep.ok
           ? `✓ ${rep.elapsed_ms}ms`
           : `✗ ${rep.error_code || "ERR"}: ${String(rep.error_message || "").slice(0, 60)}`;
+        if (rep.ok || rep.error_code === "HTTP.AUTH") setTimeout(renderHealthPop, 600);
       } catch (err) {
         test.classList.add("bad");
         test.textContent = "✗ " + err.message;

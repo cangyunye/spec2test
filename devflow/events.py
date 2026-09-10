@@ -91,9 +91,15 @@ async def events_from_astream(stream: Any) -> Any:
 def _events_for_mode(mode: str, data: Any) -> Iterator[dict[str, Any]]:
     """多流模式下按 mode 分发。"""
     if mode == "custom":
-        # llm_client 在 LangGraph 运行时内发的可见化事件（provider 切换 / 使用）
-        if isinstance(data, dict) and data.get("type") in ("provider_skip", "provider_used"):
-            status = "skip" if data["type"] == "provider_skip" else "used"
+        # llm_client 在 LangGraph 运行时内发的可见化事件（provider 切换 / 使用 / 停用）
+        if isinstance(data, dict) and data.get("type") in (
+            "provider_skip", "provider_used", "provider_disabled",
+        ):
+            status = {
+                "provider_skip": "skip",
+                "provider_used": "used",
+                "provider_disabled": "disabled",
+            }[data["type"]]
             yield {"type": "provider", "status": status, **{
                 k: v for k, v in data.items() if k != "type"
             }}

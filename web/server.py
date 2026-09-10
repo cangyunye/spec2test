@@ -335,24 +335,42 @@ def health() -> dict[str, Any]:
 
 
 def _provider_chain() -> list[dict[str, Any]]:
-    """当前生效的 provider fallback 链（顺序即优先级，首位 = 首选）。"""
-    return [
+    """当前生效的 provider 链：已停用的排末尾并标记，其余按「粘性成功者优先」排序。"""
+    from devflow.llm_client import _disabled_providers, _sticky_provider, _candidates_providers
+
+    live = [
         {
             "name": p.get("name", ""),
             "model": p.get("model", ""),
             "models": list(p.get("models") or [p.get("model")]),
+            "disabled": False,
+            "sticky": p.get("name") == _sticky_provider,
+        }
+        for p in _candidates_providers()
+    ]
+    disabled = [
+        {
+            "name": p.get("name", ""),
+            "model": p.get("model", ""),
+            "models": list(p.get("models") or [p.get("model")]),
+            "disabled": True,
+            "sticky": False,
         }
         for p in settings.LLM_PROVIDERS
+        if p.get("name") in _disabled_providers
     ]
+    return live + disabled
 
 
 @app.get("/api/providers")
 def list_providers() -> dict[str, Any]:
-    """provider fallback 链（顺序即优先级）+ mock 兜底开关。
+    """provider 链（生效顺序：粘性成功者优先；已确认无效的排末尾并标记）+ mock 兜底开关。
 
     供首页供应商面板展示与选择；链顺序可在运行期通过 /api/providers/active 调整。
     """
-    return {"chain": _provider_chain(), "mock_fallback": settings.LLM_USE_MOCK_FALLBACK}
+    chain = _provider_chain()
+    sticky = next((c["name"] for c in chain if c.get("sticky")), None)
+    return {"chain": chain, "sticky": sticky, "mock_fallback": settings.LLM_USE_MOCK_FALLBACK}
 
 
 @app.post("/api/providers/active")
@@ -373,15 +391,25 @@ def set_active_provider(body: ActiveProviderBody) -> dict[str, Any]:
 
 @app.post("/api/providers/check")
 async def check_providers(body: CheckProviderBody | None = None) -> dict[str, Any]:
-    """对 provider 做一次最小连通性调用（name 缺省 = 检测全部），返回诊断报告。"""
-    from devflow.llm_client import check_llm_all, check_llm_provider
+    """对 provider 做一次最小连通性调用（name 缺省 = 检测全部），返回诊断报告。
+
+    检测通过自动解除停用；鉴权失败（401/403）自动停用——服务端确认无效后就不再使用。
+    """
+    from devflow.llm_client import check_llm_all, check_llm_provider, disable_provider, enable_provider
 
     if body and body.name:
         spec = next((p for p in settings.LLM_PROVIDERS if p.get("name") == body.name), None)
         if spec is None:
             raise HTTPException(404, f"未找到 provider 条目: {body.name!r}")
-        return {"reports": [await check_llm_provider(spec, timeout_sec=12)]}
-    return {"reports": await check_llm_all()}
+        reports = [await check_llm_provider(spec, timeout_sec=12)]
+    else:
+        reports = await check_llm_all()
+    for rep in reports:
+        if rep.get("ok"):
+            enable_provider(rep.get("name", ""))
+        elif rep.get("error_code") == "HTTP.AUTH":
+            disable_provider(rep.get("name", ""), str(rep.get("error_message") or ""))
+    return {"reports": reports, "chain": _provider_chain()}
 
 
 # ═══════════════════════════════════════════════════════════════════
