@@ -306,12 +306,32 @@ def _use_mock_fallback() -> bool:
     return bool(settings.LLM_USE_MOCK_FALLBACK)
 
 
+def _emit_stream_event(payload: dict[str, Any]) -> None:
+    """在 LangGraph 运行时内发自定义事件（Web 流消费，provider 切换/使用可见化）。
+
+    CLI / 单测等无 runtime 上下文时 get_stream_writer 会抛 RuntimeError，静默跳过。
+    """
+    try:
+        from langgraph.config import get_stream_writer
+
+        get_stream_writer()(payload)
+    except Exception:
+        pass
+
+
 def _log_provider_skip(p_name: Any, err: DevFlowError, *, ctx: str = "") -> None:
     """provider 调用失败的可见化日志：走到 Mock 兜底时能从日志直接看出每个 provider 的原因。"""
     logger.warning(
         "[llm] provider「%s」%s失败（%s）: %s —— 切换下一个 provider",
         p_name, f"{ctx} " if ctx else "", err.code, err.message[:300],
     )
+    _emit_stream_event({
+        "type": "provider_skip",
+        "provider": str(p_name),
+        "code": err.code,
+        "message": err.message[:160],
+        "ctx": ctx,
+    })
 
 
 def _log_mock_fallback(response_type: str, last_err: DevFlowError | None) -> None:
@@ -666,7 +686,7 @@ async def invoke_json(
             continue
         breaker = default_breaker(_breaker_name_for(p_spec))
         try:
-            return await _invoke_json_once(
+            result = await _invoke_json_once(
                 llm=llm,
                 messages=messages,
                 response_model=response_model,
@@ -677,6 +697,12 @@ async def invoke_json(
                 response_type=response_type,
                 model_spec=p_spec["name"],
             )
+            _emit_stream_event({
+                "type": "provider_used",
+                "provider": p_spec["name"],
+                "model": p_spec["model"],
+            })
+            return result
         except LlmContextOverflowError as e:
             _log_provider_skip(p_spec["name"], e, ctx="上下文超限")
             if shrink_left <= 0:
@@ -686,7 +712,7 @@ async def invoke_json(
             shrink_left -= 1
             last_err = e
             try:
-                return await _invoke_json_once(
+                result = await _invoke_json_once(
                     llm=llm,
                     messages=messages,
                     response_model=response_model,
@@ -697,6 +723,12 @@ async def invoke_json(
                     response_type=response_type,
                     model_spec=p_spec["name"],
                 )
+                _emit_stream_event({
+                    "type": "provider_used",
+                    "provider": p_spec["name"],
+                    "model": p_spec["model"],
+                })
+                return result
             except DevFlowError as e2:
                 _log_provider_skip(p_spec["name"], e2, ctx="压缩重试")
                 last_err = e2
@@ -764,6 +796,11 @@ async def invoke_text(
             content = resp.content if isinstance(resp, BaseMessage) else str(resp)
             chars = sum(len(str(getattr(msg, "content", ""))) for msg in m) + len(str(content))
             budget.consume(_estimate_tokens(chars))
+            _emit_stream_event({
+                "type": "provider_used",
+                "provider": p_spec["name"],
+                "model": p_spec["model"],
+            })
             return str(content)
 
         policy = RetryPolicy(max_attempts=max_retries + 1, base_backoff=1.0, deadline_total=120.0)

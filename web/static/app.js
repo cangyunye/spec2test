@@ -205,6 +205,13 @@ function addDivider(label, sub, info) {
   feedAppend(d);
   return d;
 }
+/* 系统细行：provider 切换 / 使用等可见化信息 */
+function addSysLine(text, tone) {
+  const d = h("div", "sys-line" + (tone ? ` ${tone}` : ""));
+  d.appendChild(h("span", "mono", text));
+  feedAppend(d);
+  return d;
+}
 function addAsk(items) {
   const card = h("div", "ask");
   card.appendChild(h("div", "who", "NEED INPUT · 需要补充"));
@@ -803,6 +810,14 @@ function onEvent(e) {
       break;
     case "question":
       addAsk(e.missing || e.questions || []);
+      break;
+    case "provider":
+      // 供应商切换 / 使用可见化：失效兜底一目了然，不再只有服务端日志知道
+      if (e.status === "skip") {
+        addSysLine(`↯ 供应商 ${e.provider} ${e.ctx || ""}失败（${e.code}）→ 自动切换下一个`, "warn");
+      } else {
+        addSysLine(`✓ 本次调用由 ${e.provider} · ${e.model} 完成`, "ok");
+      }
       break;
     case "mode_choice":
       addModeChoice();
@@ -1873,40 +1888,124 @@ async function loadHealth() {
 function toggleHealthPop() {
   const pop = $("healthPop");
   if (!pop.classList.contains("hidden")) { pop.classList.add("hidden"); return; }
-  if (!S.health) return;
+  pop.classList.remove("hidden");
+  renderHealthPop();
+}
+
+/* 供应商面板：兜底链顺序（可改首选）+ 连通性检测 + mock 兜底状态 */
+async function renderHealthPop() {
+  const pop = $("healthPop");
   pop.innerHTML = "";
-  const h4 = h("h4", null, "LLM 提供商");
-  pop.appendChild(h4);
+  pop.appendChild(h("div", "row", "加载中…"));
+
+  let chain = [], mockFb = false;
+  try {
+    const prov = await api("/api/providers");
+    chain = prov.chain || [];
+    mockFb = !!prov.mock_fallback;
+  } catch (err) {
+    pop.innerHTML = "";
+    pop.appendChild(h("div", "row", "读取失败: " + err.message));
+    return;
+  }
+
+  pop.innerHTML = "";
+  pop.appendChild(h("h4", null, "LLM 提供商 · 兜底链（自上而下优先）"));
+
+  const checkOut = h("div", "sec");
+  if (!chain.length) pop.appendChild(h("div", "row", "未配置提供商（Mock 兜底）"));
+  chain.forEach((p, i) => {
+    const rowEl = h("div", "prov-row" + (i === 0 ? " active" : ""));
+    const head = h("div", "prov-head");
+    head.appendChild(h("span", "mono", `${i + 1}.`));
+    head.appendChild(h("b", null, p.name));
+    head.appendChild(h("span", "mono prov-model", p.model));
+    if (i === 0) head.appendChild(h("span", "prov-badge", "首选"));
+    rowEl.appendChild(head);
+
+    const ops = h("div", "prov-ops");
+    if (i > 0) {
+      const use = h("button", "prov-btn", "设为首选");
+      use.onclick = async () => {
+        try {
+          await api("/api/providers/active", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name: p.name, model: p.model }),
+          });
+          toast("已切换首选供应商", `${p.name} · ${p.model} 将优先处理后续请求（全局生效）`);
+          renderHealthPop();
+          loadHealth();
+        } catch (err) { toast("切换失败", err.message, "err"); }
+      };
+      ops.appendChild(use);
+    }
+    const test = h("button", "prov-btn", "检测");
+    test.onclick = async () => {
+      test.disabled = true; test.textContent = "检测中…";
+      try {
+        const r = await api("/api/providers/check", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: p.name }),
+        });
+        const rep = (r.reports || [])[0] || {};
+        test.classList.add(rep.ok ? "ok" : "bad");
+        test.textContent = rep.ok
+          ? `✓ ${rep.elapsed_ms}ms`
+          : `✗ ${rep.error_code || "ERR"}: ${String(rep.error_message || "").slice(0, 60)}`;
+      } catch (err) {
+        test.classList.add("bad");
+        test.textContent = "✗ " + err.message;
+      }
+      test.disabled = false;
+    };
+    ops.appendChild(test);
+    rowEl.appendChild(ops);
+    pop.appendChild(rowEl);
+  });
+
+  const opRow = h("div", "prov-ops");
+  const checkAll = h("button", "prov-btn", "一键检测全部连通性");
+  checkAll.onclick = async () => {
+    checkAll.disabled = true; checkAll.textContent = "检测中…（逐个调用，约 10-60s）";
+    checkOut.innerHTML = "";
+    try {
+      const r = await api("/api/providers/check", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+      });
+      (r.reports || []).forEach((rep) => {
+        const line = h("div", "row");
+        line.appendChild(h("span", null, rep.ok ? "✓" : "✗"));
+        line.appendChild(h("span", "mono", rep.ok
+          ? `${rep.name} · ${rep.model} — ${rep.elapsed_ms}ms — ${String(rep.reply || "").slice(0, 20)}`
+          : `${rep.name} — [${rep.error_code}] ${String(rep.error_message || "").slice(0, 90)}`));
+        checkOut.appendChild(line);
+      });
+    } catch (err) {
+      checkOut.appendChild(h("div", "row", "检测失败: " + err.message));
+    }
+    checkAll.disabled = false; checkAll.textContent = "一键检测全部连通性";
+  };
+  opRow.appendChild(checkAll);
+  pop.appendChild(opRow);
+  pop.appendChild(checkOut);
+
   const row = (k, v) => {
     const r = h("div", "row");
     r.appendChild(h("span", null, k));
     r.appendChild(h("span", "mono", String(v)));
     return r;
   };
-  const groups = groupProviders(S.health.llm?.providers);
-  if (!groups.length) pop.appendChild(row("LLM", "未配置提供商"));
-  groups.forEach((g) => {
-    const keyTxt = g.key || "key 未配置";
-    pop.appendChild(row(`LLM · ${g.name}`,
-      g.models.length > 1 ? `${keyTxt} · ${g.models.length} 个模型` : `${g.models[0]} · ${keyTxt}`));
-    if (g.models.length > 1) {
-      const box = h("div", "models");
-      g.models.forEach((m) => box.appendChild(h("span", "m-chip", m)));
-      pop.appendChild(box);
-    }
-  });
-  const pipe = S.health.pipeline || {};
   const sec = h("div", "sec");
-  sec.appendChild(row("Mock 兜底", S.health.llm?.mock_fallback ? "开启" : "关闭"));
+  sec.appendChild(row("Mock 兜底", mockFb ? "开启" : "关闭"));
+  const pipe = S.health?.pipeline || {};
   sec.appendChild(row("代码检索", pipe.code_search || "mock"));
   sec.appendChild(row("代码生成", pipe.code_edit || "mock"));
   sec.appendChild(row("测试生成", pipe.test_gen || "mock"));
-  sec.appendChild(row("Checkpoint", S.health.checkpoint_db?.path || ""));
+  sec.appendChild(row("Checkpoint", S.health?.checkpoint_db?.path || ""));
   pop.appendChild(sec);
-  if (!($('healthDot').className || "").includes("ok")) {
+  if (mockFb && chain.length === 0) {
     pop.appendChild(h("div", "warn", "当前 LLM 输出为 Mock 演示数据；复制 .env.example 为 .env 并填入真实 Key 即可获得真实结果。"));
   }
-  pop.classList.remove("hidden");
 }
 
 /* ── 文档导入 ────────────────────────────────────────── */

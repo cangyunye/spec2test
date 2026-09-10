@@ -736,6 +736,18 @@ def _render_event(event: dict) -> None:
         )
     elif etype == "error":
         console.print(f"[red]×[/] 节点错误: {event.get('error')}")
+    elif etype == "provider":
+        if event.get("status") == "skip":
+            ctx = event.get("ctx") or ""
+            console.print(
+                f"[yellow]↯[/] 供应商 [bold]{event.get('provider')}[/] {ctx}失败"
+                f"（{event.get('code')}）→ 切换下一个"
+            )
+        else:
+            console.print(
+                f"[green]✓[/] 本阶段由 [bold]{event.get('provider')}[/] · "
+                f"{event.get('model')} 完成"
+            )
     elif etype == "artifact":
         kind = event.get("kind")
         payload = event.get("payload") or {}

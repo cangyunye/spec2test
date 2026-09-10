@@ -68,6 +68,15 @@ class GateDecision(BaseModel):
     fields: dict[str, Any] | None = None  # requirement_review 门禁：就地修改的字段（点路径 → 值）
 
 
+class ActiveProviderBody(BaseModel):
+    name: str                    # LLM_PROVIDERS_JSON 里的条目名（模型池展开后含 :model 后缀）
+    model: str | None = None     # 可选；条目本身已含具体模型时可不传
+
+
+class CheckProviderBody(BaseModel):
+    name: str | None = None      # 不传 = 检测全部
+
+
 # ═══════════════════════════════════════════════════════════════════
 # 会话
 # ═══════════════════════════════════════════════════════════════════
@@ -325,6 +334,56 @@ def health() -> dict[str, Any]:
     }
 
 
+def _provider_chain() -> list[dict[str, Any]]:
+    """当前生效的 provider fallback 链（顺序即优先级，首位 = 首选）。"""
+    return [
+        {
+            "name": p.get("name", ""),
+            "model": p.get("model", ""),
+            "models": list(p.get("models") or [p.get("model")]),
+        }
+        for p in settings.LLM_PROVIDERS
+    ]
+
+
+@app.get("/api/providers")
+def list_providers() -> dict[str, Any]:
+    """provider fallback 链（顺序即优先级）+ mock 兜底开关。
+
+    供首页供应商面板展示与选择；链顺序可在运行期通过 /api/providers/active 调整。
+    """
+    return {"chain": _provider_chain(), "mock_fallback": settings.LLM_USE_MOCK_FALLBACK}
+
+
+@app.post("/api/providers/active")
+def set_active_provider(body: ActiveProviderBody) -> dict[str, Any]:
+    """把指定 provider(+model) 条目挪到 fallback 链首位。
+
+    进程内全局生效（不改 .env，重启后回到 LLM_PROVIDERS_JSON / LLM_ACTIVE_MODEL 的顺序）。
+    """
+    for i, p in enumerate(settings.LLM_PROVIDERS):
+        if p.get("name") == body.name and (
+            body.model is None or p.get("model") == body.model
+        ):
+            settings.LLM_PROVIDERS.insert(0, settings.LLM_PROVIDERS.pop(i))
+            # 模型实例按 spec 内容缓存，与顺序无关，无需清缓存
+            return {"chain": _provider_chain(), "active": {"name": body.name, "model": body.model}}
+    raise HTTPException(404, f"未找到 provider 条目: {body.name!r} (model={body.model!r})")
+
+
+@app.post("/api/providers/check")
+async def check_providers(body: CheckProviderBody | None = None) -> dict[str, Any]:
+    """对 provider 做一次最小连通性调用（name 缺省 = 检测全部），返回诊断报告。"""
+    from devflow.llm_client import check_llm_all, check_llm_provider
+
+    if body and body.name:
+        spec = next((p for p in settings.LLM_PROVIDERS if p.get("name") == body.name), None)
+        if spec is None:
+            raise HTTPException(404, f"未找到 provider 条目: {body.name!r}")
+        return {"reports": [await check_llm_provider(spec, timeout_sec=12)]}
+    return {"reports": await check_llm_all()}
+
+
 # ═══════════════════════════════════════════════════════════════════
 # 导出（CLI export 的 Web 等价）
 # ═══════════════════════════════════════════════════════════════════
@@ -558,7 +617,7 @@ async def _sse_from_sync_stream(graph: Any, input_msg: dict[str, Any], tid: str)
                 for event in events_from_stream(
                     graph.stream(
                         input_msg, _config(thread_id=tid),
-                        stream_mode=["updates", "messages"],
+                        stream_mode=["updates", "messages", "custom"],
                     )
                 ):
                     q.put_nowait(event)

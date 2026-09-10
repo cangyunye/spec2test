@@ -17,7 +17,7 @@ from __future__ import annotations
 from typing import Any, Iterator
 
 # 多流模式下 (mode, data) 元组的 mode 白名单；节点名不会与之冲突
-_STREAM_MODES = {"updates", "messages", "values", "debug"}
+_STREAM_MODES = {"updates", "messages", "values", "debug", "custom"}
 
 # 节点名 → 中文友好名（事件与前端进度展示共用）
 NODE_LABELS: dict[str, str] = {
@@ -90,6 +90,14 @@ async def events_from_astream(stream: Any) -> Any:
 
 def _events_for_mode(mode: str, data: Any) -> Iterator[dict[str, Any]]:
     """多流模式下按 mode 分发。"""
+    if mode == "custom":
+        # llm_client 在 LangGraph 运行时内发的可见化事件（provider 切换 / 使用）
+        if isinstance(data, dict) and data.get("type") in ("provider_skip", "provider_used"):
+            status = "skip" if data["type"] == "provider_skip" else "used"
+            yield {"type": "provider", "status": status, **{
+                k: v for k, v in data.items() if k != "type"
+            }}
+        return
     if mode == "messages":
         chunk, meta = data if isinstance(data, tuple) and len(data) == 2 else (data, {})
         mtype = getattr(chunk, "type", "")
