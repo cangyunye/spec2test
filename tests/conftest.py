@@ -52,9 +52,17 @@ def _isolate_global_state(tmp_path, monkeypatch):
     reset_default_token_budget()
     reset_model_cache()
 
-    # SQLite checkpoint → 每个测试独立临时文件
+    # SQLite checkpoint → 每个测试独立临时文件。
+    # 注意：settings 在 import 时就读过环境变量，仅 setenv 不生效；必须同时改
+    # settings 对象本身，并清掉 orchestrator 的全局连接缓存（首用后即定型），
+    # 否则测试会写穿到 data/checkpoints.db，把测试线程混进真实会话列表。
     ckpt = tmp_path / "checkpoints.db"
     monkeypatch.setenv("CHECKPOINT_SQLITE_PATH", str(ckpt))
+    from devflow.config import settings as _settings
+    import devflow.orchestrator as _orch
+
+    monkeypatch.setattr(_settings, "CHECKPOINT_SQLITE_PATH", ckpt)
+    monkeypatch.setattr(_orch, "_conn", None)
 
     # 清理已有的 dead_letter（对之前的测试残留）
     dead = DATA_DIR / "dead_letter"
