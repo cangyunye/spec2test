@@ -59,6 +59,15 @@ _MOCK_DEMO_REQUIREMENT: dict[str, Any] = {
     "io_constraints": {"input": "按钮点击与表达式输入", "output": "运算结果或错误提示"},
     "edge_cases": ["除零", "连续运算", "负数", "小数"],
     "acceptance_criteria": ["四则运算结果正确", "除零给出错误提示", "GUI 可启动"],
+    # 演示需求整体是编造的：如实标注为「AI 推断」，让制图前的需求确认门禁照常触发
+    "inferred_fields": [
+        "project_context",
+        "target_modules",
+        "io_constraints.input",
+        "io_constraints.output",
+        "edge_cases",
+        "acceptance_criteria",
+    ],
 }
 
 # Mock 兜底用的测试设计模板（response_type=test_design）：按系统化设计策略
@@ -202,6 +211,9 @@ class _MockLLM:
     async def ainvoke(self, messages: list[BaseMessage], **_: Any) -> BaseMessage:
         # 依据 prompt 猜需求：要求 extract requirement 时给空模板，graph 给模板
         joined = "\n".join(str(getattr(m, "content", "")) for m in messages)
+        # 需求抽取按身份串精确识别（提示词里出现「制图」等词时不至于被制图分支抢答）
+        if "严谨的需求分析师" in joined:
+            return AIMessage(content=json.dumps(_MOCK_DEMO_REQUIREMENT, ensure_ascii=False))
         graph_payload = _mock_graph_payload(joined)
         if graph_payload is not None:
             return AIMessage(content=json.dumps(
@@ -254,6 +266,10 @@ class _MockStructured:
             def model_dump(self, mode: str = "python") -> dict[str, Any]:
                 return json.loads(json.dumps(_MOCK_DEMO_TEST_DESIGN, ensure_ascii=False))
 
+        # 先按「任务提示词的固定身份串」精确分派：需求抽取是默认档，但它和制图共享
+        # 环境词（如提示词里出现「制图」二字），按关键词猜会被抢答，必须显式识别。
+        if "严谨的需求分析师" in joined:
+            return _ReqMocker()
         # 中英文关键词都匹配（test_design 提示词含"测试架构师"，须先于制图分支判断）
         if "测试架构师" in joined:
             return _TestDesignMocker()
@@ -407,6 +423,32 @@ def _extract_json_object(text: str) -> dict[str, Any]:
     )
 
 
+def _is_hollow(payload: Any) -> bool:
+    """结构化结果是否为「空心对象」：所有字段（含嵌套）都没填出内容。
+
+    空串/纯空白、空容器、None 视为空；数字与布尔（含 0 / False）视为有值。
+    schema 全字段可选时（如 RequirementExtract），网关在 function_calling 下只回
+    tool_call(arguments={}) 时，langchain 会用默认值造出一个「合法但全空」的对象，
+    既不报错也不返回 None，只能靠这里识别出来走退化链（json_mode / prompt_json）。
+    """
+    def _empty(v: Any) -> bool:
+        if v is None:
+            return True
+        if isinstance(v, str):
+            return not v.strip()
+        if isinstance(v, (list, tuple, set)):
+            return all(_empty(x) for x in v)
+        if isinstance(v, dict):
+            return all(_empty(x) for x in v.values())
+        return False
+
+    if hasattr(payload, "model_dump"):
+        payload = payload.model_dump()
+    if not isinstance(payload, dict):
+        return False
+    return all(_empty(v) for v in payload.values())
+
+
 def _make_structured(llm: Any, response_model: Type[BaseModel], method: str | None = None):
     """结构化输出兼容层（D1）。
 
@@ -422,6 +464,10 @@ def _make_structured(llm: Any, response_model: Type[BaseModel], method: str | No
     D1b：模型输出不严格符合 json_schema 时（如 code_ref 输出成字符串），langchain
     会抛 OutputParserException。此处统一转成 LlmOutputFormatError（retryable=True），
     让上层 retry_with_backoff 有机会重试，而不是被 wrap 成 NODE.CONTEXT（不可重试）直接放弃。
+
+    D1d：模型/gateway 没把 tool 填出来时 langchain 不报错——没吐 tool_call 返回 None，
+    吐了空参数 tool_call 则用默认值造出「全空对象」。两种都按解析失败降级，
+    否则全字段可选的 schema（RequirementExtract）会把空壳当成功、json_mode 永不触发。
     """
     from langchain_core.exceptions import OutputParserException
     from pydantic import ValidationError
@@ -462,6 +508,14 @@ def _make_structured(llm: Any, response_model: Type[BaseModel], method: str | No
                         if out is None:
                             raise OutputParserException(
                                 f"模型未返回 tool_call（method={m}），未触发 function calling"
+                            )
+                        # 网关只回空参数 tool_call（arguments={}）时，langchain 会用默认值
+                        # 造出「合法但全空」的对象；它不算成功语义，须降级到 json_mode /
+                        # prompt_json 让模型真正填字段。声明了 allow_hollow_result 的
+                        # schema（如 RouteMatch：空 = 无匹配）不受此检查影响。
+                        if not getattr(response_model, "allow_hollow_result", False) and _is_hollow(out):
+                            raise OutputParserException(
+                                f"结构化输出为空壳（method={m}，所有字段均为空）"
                             )
                     return out
                 except OutputParserException as e:

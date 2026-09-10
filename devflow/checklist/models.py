@@ -1,7 +1,7 @@
 """Checklist 库数据模型：scenario.md 解析结果、路由候选树、LLM 路由/沉淀输出。"""
 from __future__ import annotations
 
-from typing import Optional
+from typing import ClassVar, Optional
 
 from pydantic import BaseModel, Field
 
@@ -54,6 +54,10 @@ class RouteMatchSub(BaseModel):
 
 class RouteMatch(BaseModel):
     """路由 LLM 的结构化输出；businesses 为空 = 无匹配（静默跳过）。"""
+
+    # 空结果本身就是合法语义（无匹配），不要让 llm_client 当成 function_calling
+    # 空壳去降级重试（见 llm_client._is_hollow）
+    allow_hollow_result: ClassVar[bool] = True
 
     businesses: list[RouteMatchBusiness] = Field(default_factory=list)
     sub_businesses: list[RouteMatchSub] = Field(default_factory=list)

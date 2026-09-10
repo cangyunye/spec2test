@@ -9,11 +9,11 @@
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from devflow.llm_client import _get_model, invoke_json
 
@@ -417,3 +417,95 @@ class TestNoToolCallNoneGuard:
         # 三档全试过后抛最后一档（prompt_json）的可重试格式错误，而非 TypeError
         with pytest.raises(LlmOutputFormatError):
             await _drive_structured(llm, _Req)
+
+
+# ── 回归：网关回空参数 tool_call → langchain 造出「合法但全空」对象 ──────
+class _HollowThenFilledLLM:
+    """模拟 Qwen3.8 网关：function_calling 下只回 tool_call(arguments={})，
+    langchain 用默认值造出全空对象（不报错）；json_mode 能正确抽取。"""
+
+    def __init__(self, *, hollow_methods: tuple[str, ...] = ("function_calling",)) -> None:
+        self._hollow_methods = hollow_methods
+        self.used_methods: list[str] = []
+
+    def with_structured_output(self, schema: Any, *, method: str = "function_calling"):
+        self.used_methods.append(method)
+        hollow = method in self._hollow_methods
+
+        class _Structured:
+            async def ainvoke(self, msgs: list[BaseMessage], **_: Any) -> Any:
+                if hollow:
+                    return schema()  # 全字段默认值 = 空壳（实测网关行为）
+
+                class _Out:
+                    def model_dump(self, mode: str = "python") -> dict[str, Any]:
+                        return {"req_type": "new_feature", "project_context": "桌面计算器"}
+
+                return _Out()
+
+        return _Structured()
+
+    async def ainvoke(self, messages: list[BaseMessage], **_: Any) -> BaseMessage:
+        return AIMessage(content='{"req_type": "bug_fix", "project_context": "来自 prompt_json"}')
+
+
+class _RouteMatchLike(BaseModel):
+    """全可选字段 + 空结果是合法语义（对齐 RouteMatch 的 allow_hollow_result）。"""
+
+    allow_hollow_result: ClassVar[bool] = True
+
+    businesses: list[str] = Field(default_factory=list)
+
+
+class TestHollowOutputGuard:
+    @pytest.mark.asyncio
+    async def test_hollow_fc_degrades_to_json_mode(self):
+        """回归（历史症状：需求抽取永远为空）：function_calling 回空壳 → 判失败降级
+        json_mode，而不是把空对象当成功直接返回。"""
+        llm = _HollowThenFilledLLM()
+        result = await _drive_structured(llm, _Req)
+        assert result == {"req_type": "new_feature", "project_context": "桌面计算器"}
+        assert llm.used_methods == ["function_calling", "json_mode"]
+
+    @pytest.mark.asyncio
+    async def test_hollow_all_structured_tiers_falls_through_to_prompt_json(self):
+        """结构化两档都空壳 → 继续降级 prompt_json（裸补全）拿到真实内容。"""
+        llm = _HollowThenFilledLLM(hollow_methods=("function_calling", "json_mode"))
+        result = await _drive_structured(llm, _Req)
+        assert result == {"req_type": "bug_fix", "project_context": "来自 prompt_json"}
+        assert llm.used_methods == ["function_calling", "json_mode"]
+
+    @pytest.mark.asyncio
+    async def test_hollow_accepted_when_schema_declares_it(self):
+        """allow_hollow_result 的 schema（空 = 无匹配）不降级：一次调用直接返回空结果。"""
+        llm = _HollowThenFilledLLM()
+        result = await _drive_structured(llm, _RouteMatchLike)
+        assert result == {"businesses": []}
+        assert llm.used_methods == ["function_calling"]
+
+
+class TestIsHollow:
+    """_is_hollow 语义：空/空白/空容器（含嵌套）算空；0 / False 等标量算有值。"""
+
+    def test_deeply_empty_is_hollow(self):
+        from devflow.llm_client import _is_hollow
+
+        assert _is_hollow({})
+        assert _is_hollow({"a": None, "b": "", "c": "  ", "d": [], "e": {}})
+        assert _is_hollow({"io_constraints": {"input": "", "output": " "}})  # 嵌套全空
+        assert _is_hollow({"items": [{"text": ""}]})
+
+    def test_any_non_empty_value_breaks_hollow(self):
+        from devflow.llm_client import _is_hollow
+
+        assert not _is_hollow({"project_context": "计算器"})
+        assert not _is_hollow({"confidence": 0.0})   # 数字 0 是有值
+        assert not _is_hollow({"matched": False})    # False 是有值
+        assert not _is_hollow({"edge_cases": ["除零"]})
+        assert not _is_hollow(["a"])                 # 非 dict 一律不算空壳
+
+    def test_pydantic_instance_supported(self):
+        from devflow.llm_client import _is_hollow
+
+        assert _is_hollow(_Req())
+        assert not _is_hollow(_Req(req_type="bug_fix"))
