@@ -592,6 +592,32 @@ table.t-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .gt-desc { font-size: 11.5px; line-height: 1.55; color: var(--ink-2); }
 .gt-reason { font-size: 10.5px; color: var(--ink-4); }
 
+/* 需求确认卡（制图前门禁）：逐字段可编辑，AI 推断字段高亮 */
+.rr-wrap { display: flex; flex-direction: column; gap: 12px; }
+.rr-list { display: flex; flex-direction: column; gap: 10px; }
+.rr-row {
+  border: 1px solid var(--border); border-radius: 11px; padding: 10px 12px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.rr-row.inferred { border-color: var(--ink-3); background: var(--hl); }
+.rr-head { display: flex; align-items: center; gap: 8px; }
+.rr-label { font-weight: 600; font-size: 12.5px; }
+.rr-badge {
+  font: 600 10px/1 inherit; letter-spacing: .06em;
+  padding: 3px 7px; border-radius: 999px;
+  background: var(--inv-bg); color: var(--inv-ink);
+}
+.rr-key { font-size: 10.5px; color: var(--ink-4); margin-left: auto; }
+.rr-input {
+  width: 100%; resize: vertical;
+  border: 1px solid var(--border-2); border-radius: 8px;
+  background: var(--surface-2); color: var(--ink);
+  padding: 7px 9px; font: 12.5px/1.5 inherit;
+}
+.rr-input:focus { outline: none; border-color: var(--ink-3); }
+.rr-bool { width: 15px; height: 15px; accent-color: var(--ink-2); }
+.rr-hint { margin: 0; font-size: 11px; line-height: 1.6; color: var(--ink-3); }
+
 /* 门禁悬浮签 */
 .gate-pill {
   position: fixed; right: 22px; bottom: 92px; z-index: 80;

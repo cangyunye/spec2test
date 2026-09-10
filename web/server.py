@@ -65,6 +65,7 @@ class GateDecision(BaseModel):
     decision: str                # approve / reject / confirm / skip
     comment: str | None = None   # reject 时的修改意见（可选）
     selected: list[str] | None = None  # checklist_route 门禁：确认加载的业务路径
+    fields: dict[str, Any] | None = None  # requirement_review 门禁：就地修改的字段（点路径 → 值）
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -175,6 +176,29 @@ def graph_type_candidates(tid: str) -> dict[str, Any]:
         "candidates": suggest_graph_types(vals.get("requirement")),
         "graph_type": vals.get("graph_type"),
         "pending": "graph_type_select" in list(snap.next or []),
+    }
+
+
+@app.get("/api/sessions/{tid}/requirement-review")
+def requirement_review_payload_endpoint(tid: str) -> dict[str, Any]:
+    """制图前需求确认门禁载荷：与 requirement_review 节点同源重算（读 state.requirement）。
+
+    interrupt 载荷不落 checkpoint，会话恢复时前端用它重放确认卡；
+    pending=true 表示门禁仍在等待确认。
+    """
+    if not _thread_exists(tid):
+        raise HTTPException(404, f"会话不存在: {tid}")
+    graph = build_graph_with_providers()
+    try:
+        snap = graph.get_state(_config(thread_id=tid))
+    except Exception as e:
+        raise HTTPException(404, f"会话不存在或读取失败: {e}")
+    vals = snap.values or {}
+    from devflow.nodes import requirement_review_payload
+
+    return {
+        **requirement_review_payload(vals),
+        "pending": "requirement_review" in list(snap.next or []),
     }
 
 
@@ -571,18 +595,19 @@ async def send_message(tid: str, body: SendMessage) -> StreamingResponse:
 @app.get("/api/sessions/{tid}/stream")
 async def stream_sse(
     tid: str, op: str, text: str = "", decision: str = "", comment: str = "",
-    selected: str = "",
+    selected: str = "", fields: str = "",
 ) -> StreamingResponse:
     """浏览器 EventSource 用：GET + query 参数。
 
     op=message&text=<用户消息> ；
-    op=gate&decision=approve|reject[&comment=<意见>][&selected=<逗号分隔业务路径>] 。
+    op=gate&decision=approve|reject[&comment=<意见>][&selected=<逗号分隔业务路径>]
+            [&fields=<需求确认门禁的就地修改 JSON>] 。
     """
     if not _thread_exists(tid):
         raise HTTPException(404, f"会话不存在: {tid}")
     graph = build_graph_with_providers()
     if op == "gate":
-        input_msg: Any = _gate_resume(decision, comment, selected)
+        input_msg: Any = _gate_resume(decision, comment, selected, _parse_fields(fields))
     else:
         input_msg = {"messages": [HumanMessage(content=text)]}
     return StreamingResponse(
@@ -590,19 +615,35 @@ async def stream_sse(
     )
 
 
-def _gate_resume(decision: str, comment: str = "", selected: str = "") -> Command:
+def _parse_fields(fields: str) -> dict[str, Any] | None:
+    """query 里的 fields（JSON 字符串）→ dict；空/非法一律忽略（不当成错误）。"""
+    raw = (fields or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _gate_resume(
+    decision: str, comment: str = "", selected: str = "", fields: dict[str, Any] | None = None
+) -> Command:
     """门禁决策 → Command(resume=...)。
 
     无附加信息时 resume 传裸字符串（兼容旧门禁）；带 comment/selected（清单
-    路由勾选）时传结构化 dict，由各门禁节点自行解析。
+    路由勾选）/fields（需求确认就地修改）时传结构化 dict，由各门禁节点自行解析。
     """
     sel_list = [s.strip() for s in selected.split(",") if s.strip()] if selected else None
-    if comment or sel_list:
+    if comment or sel_list or fields:
         payload: dict[str, Any] = {"decision": decision}
         if comment:
             payload["comment"] = comment
         if sel_list:
             payload["selected"] = sel_list
+        if fields:
+            payload["fields"] = fields
         return Command(resume=payload)
     return Command(resume=decision)
 
@@ -613,7 +654,7 @@ async def decide_gate(tid: str, body: GateDecision) -> StreamingResponse:
         raise HTTPException(404, f"会话不存在: {tid}")
     graph = build_graph_with_providers()
     input_msg: Any = _gate_resume(
-        body.decision, body.comment or "", ",".join(body.selected or [])
+        body.decision, body.comment or "", ",".join(body.selected or []), body.fields
     )
     return StreamingResponse(
         _sse_from_sync_stream(graph, input_msg, tid), media_type="text/event-stream"

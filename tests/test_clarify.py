@@ -668,3 +668,97 @@ class TestSessionTitle:
             user_prompt="需求信息：\n{}\n\n请输出会话名称（只输出名称本身）：",
         )
         assert name == "桌面计算器科学计算"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# B：抽取来源标注（requirement_sources）——制图前需求确认门禁据此只问脑补字段
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestExtractSources:
+    async def _extract(self, monkeypatch, payload: dict, **state_over) -> dict:
+        async def fake(**kwargs):
+            return payload
+
+        async def fake_title(**kwargs):
+            return "订单支付"
+
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_json", fake)
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_text", fake_title)
+        state = {
+            "messages": [HumanMessage(content="给登录加短信验证码二步验证")],
+            "requirement": empty_requirement(),
+            "session_title": "已有标题",  # 跳过起名，聚焦抽取
+        } | state_over
+        return await clarify_extract_async(state)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_declared_inferred_marked_and_not_leaked_into_requirement(self, monkeypatch):
+        out = await self._extract(monkeypatch, {
+            "project_context": "订单支付系统，新增部分退款",
+            "acceptance_criteria": ["退款金额不超过原订单"],
+            "inferred_fields": ["acceptance_criteria"],
+        })
+        assert out["requirement_sources"] == {
+            "project_context": "user",
+            "acceptance_criteria": "inferred",
+        }
+        # inferred_fields 是抽取元信息，不能混进 requirement 传给下游
+        assert "inferred_fields" not in out["requirement"]
+
+    @pytest.mark.asyncio
+    async def test_io_constraints_subfields_marked_individually(self, monkeypatch):
+        out = await self._extract(monkeypatch, {
+            "io_constraints": {"input": "提交订单请求", "output": "订单号与状态"},
+            "inferred_fields": ["io_constraints.output"],
+        })
+        assert out["requirement_sources"] == {
+            "io_constraints.input": "user",
+            "io_constraints.output": "inferred",
+        }
+
+    @pytest.mark.asyncio
+    async def test_io_constraints_umbrella_name_marks_both(self, monkeypatch):
+        out = await self._extract(monkeypatch, {
+            "io_constraints": {"input": "a", "output": "b"},
+            "inferred_fields": ["io_constraints"],
+        })
+        assert out["requirement_sources"] == {
+            "io_constraints.input": "inferred",
+            "io_constraints.output": "inferred",
+        }
+
+    @pytest.mark.asyncio
+    async def test_no_declaration_all_user(self, monkeypatch):
+        """模型没报推断 → 全部按用户原话标注（保守默认：不需要额外确认）。"""
+        out = await self._extract(monkeypatch, {
+            "project_context": "订单支付系统",
+            "edge_cases": ["库存不足"],
+        })
+        assert out["requirement_sources"] == {
+            "project_context": "user",
+            "edge_cases": "user",
+        }
+
+    @pytest.mark.asyncio
+    async def test_sources_merge_with_previous_rounds(self, monkeypatch):
+        """多轮抽取：上一轮已标注的来源保留，本轮只覆盖本轮抽到的字段。"""
+        out = await self._extract(
+            monkeypatch,
+            {"project_context": "订单支付系统", "inferred_fields": []},
+            requirement_sources={"edge_cases": "inferred"},
+        )
+        assert out["requirement_sources"] == {
+            "edge_cases": "inferred",
+            "project_context": "user",
+        }
+
+    @pytest.mark.asyncio
+    async def test_empty_extraction_keeps_sources_untouched(self, monkeypatch):
+        """本轮什么也没抽到 → 来源标注保持原样（不清空）。"""
+        out = await self._extract(
+            monkeypatch,
+            {},
+            requirement_sources={"project_context": "inferred"},
+        )
+        assert out["requirement_sources"] == {"project_context": "inferred"}

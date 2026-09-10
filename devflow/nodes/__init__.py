@@ -12,6 +12,11 @@ from .provider_nodes import (
     route_after_code_search,
     route_after_test_gen,
 )
+from .requirement_review import (
+    requirement_review_node,
+    review_payload as requirement_review_payload,
+    route_after_requirement_review,
+)
 from .review import review_node, route_after_review
 from .test_run import (
     make_apply_code_node,
@@ -29,7 +34,10 @@ __all__ = [
     "graph_validate",
     "graph_review_node",
     "graph_type_select",
+    "requirement_review_node",
+    "requirement_review_payload",
     "route_after_graph_review",
+    "route_after_requirement_review",
     "make_code_search_node",
     "make_code_gen_node",
     "make_graph_render_node",

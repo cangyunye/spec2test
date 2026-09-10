@@ -236,8 +236,9 @@ class TestE2ERequirementOnly:
         self.config = {"configurable": {"thread_id": self.tid}}
 
     def test_full_pipeline_without_code(self):
-        # 1. 启动 → 停在制图门禁
+        # 1. 启动 → 过需求确认门 + 图种类门 → 停在制图门禁
         list(self.graph.stream(_requirement_only_state(), self.config, stream_mode="updates"))
+        list(self.graph.stream(Command(resume="confirm"), self.config, stream_mode="updates"))
         list(self.graph.stream(Command(resume="flowchart"), self.config, stream_mode="updates"))
         snapshot = self.graph.get_state(self.config)
         assert "graph_review" in (snapshot.next or [])
@@ -268,6 +269,7 @@ class TestE2ERequirementOnly:
     def test_review_reject_goes_back_to_test_gen(self):
         # 1. 跑到制图门并通过（仅需求模式 → 直达终审）
         list(self.graph.stream(_requirement_only_state(), self.config, stream_mode="updates"))
+        list(self.graph.stream(Command(resume="confirm"), self.config, stream_mode="updates"))
         list(self.graph.stream(Command(resume="flowchart"), self.config, stream_mode="updates"))
         list(self.graph.stream(Command(resume="approve"), self.config, stream_mode="updates"))
         snapshot = self.graph.get_state(self.config)

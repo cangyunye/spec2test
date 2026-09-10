@@ -40,7 +40,7 @@ from ..schemas import (
     empty_requirement,
     validate_requirement,
 )
-from ..state import GlobalState
+from ..state import SOURCE_INFERRED, SOURCE_USER, GlobalState
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +136,15 @@ class RequirementExtract(BaseModel):
     io_constraints: _FieldIOConstraints | None = None
     edge_cases: list[str] | None = Field(default=None, description="边界/异常场景清单")
     acceptance_criteria: list[str] | None = Field(default=None, description="可独立验证的验收标准")
+    inferred_fields: list[str] | None = Field(
+        default=None,
+        description=(
+            "哪些字段是模型按提示词第 4 条从上下文【提炼/推断】出来的（非用户原话）。"
+            "填字段名，io_constraints 的子字段写 io_constraints.input / io_constraints.output；"
+            "用户原话里明确给出的字段不要列；没有推断就填 null。"
+            "这些字段会在制图前被要求用户确认。"
+        ),
+    )
 
 
 SYSTEM_PROMPT_EXTRACT = """你是一个严谨的需求分析师，任务是从用户的对话中抽取结构化信息。
@@ -152,6 +161,10 @@ SYSTEM_PROMPT_EXTRACT = """你是一个严谨的需求分析师，任务是从�
    所以不要为了凑字段而追问项目路径。
 7. 如果「上一轮 AI 追问」存在：本轮用户消息若是对该追问的简短确认（如「同意」「可以」「就按你说的」），
    应结合追问里的推荐答案提取出对应字段值；无法对应时仍填 null。
+8. inferred_fields：按第 4 条从上下文提炼/推断出来的字段要如实列出来（字段名；
+   io_constraints 的子字段写 io_constraints.input / io_constraints.output）。
+   用户原话里明确给出的字段不要列进来；没有任何推断就填 null。
+   这些字段会在制图前被要求用户确认，如实标注能减少返工。
 """
 
 
@@ -254,6 +267,26 @@ async def clarify_extract_async(state: GlobalState) -> dict[str, Any]:
             **mode_update,
         }
 
+    # 2.5 来源标注（B）：模型自报哪些字段是提炼/推断的 → 制图前的需求确认门禁据此
+    # 只对「脑补字段」要求确认。未知来源（老会话 / 模型没报）一律按需确认（保守）。
+    extracted = dict(extracted)
+    declared = {str(x).strip() for x in (extracted.pop("inferred_fields", None) or [])}
+    sources = dict(state.get("requirement_sources") or {})
+    for key, val in extracted.items():
+        if key == "io_constraints":
+            if isinstance(val, dict):
+                for sub in ("input", "output"):
+                    if _is_present(val.get(sub)):
+                        dotted = f"io_constraints.{sub}"
+                        sources[dotted] = (
+                            SOURCE_INFERRED
+                            if "io_constraints" in declared or dotted in declared
+                            else SOURCE_USER
+                        )
+            continue
+        if _is_present(val):
+            sources[key] = SOURCE_INFERRED if key in declared else SOURCE_USER
+
     # 3. 合并：已有值优先，只覆盖本轮提取中明确非空的字段
     merged = _merge_requirement(existing, extracted)
 
@@ -269,14 +302,19 @@ async def clarify_extract_async(state: GlobalState) -> dict[str, Any]:
     # 4. 会话命名：首次拿到主要功能时生成（LLM 起名，失败退 project_context 截断）
     title_update = await _ensure_session_title(state, merged)
 
-    return {
+    out_req: dict[str, Any] = {
         "requirement": merged,
+        "requirement_sources": sources,
         **title_update,
         "last_error": None,
         "last_error_code": None,
         "last_error_retryable": None,
         **mode_update,
     }
+    if merged != existing:
+        # 抽取到新信息 → 之前的需求确认失效，制图前要重新过一遍确认门禁
+        out_req["requirement_confirmed"] = False
+    return out_req
 
 
 def clarify_validate(state: GlobalState) -> dict[str, Any]:
@@ -326,12 +364,12 @@ def clarify_validate(state: GlobalState) -> dict[str, Any]:
         if old_missing:
             confirm = (
                 f"✅ 缺口已补齐（{len(old_missing)} 项 → 0 项）。"
-                "需求清单已完整，无需再发散，进入下一阶段。"
+                "需求清单已完整，接下来请你确认字段清单，确认后进入制图。"
             )
         elif retry["clarify_loop_cnt"] <= 1:
             confirm = (
-                "✅ 你的需求描述已足够清晰，关键信息齐备，无需再发散澄清，"
-                "直接进入逻辑制图；后续对需求有任何调整，可在制图评审时驳回补充。"
+                "✅ 你的需求描述已足够清晰，关键信息齐备，无需再发散澄清。"
+                "接下来请你逐项确认需求清单（可直接修改字段），确认后进入逻辑制图。"
             )
 
     out: dict[str, Any] = {
@@ -529,18 +567,20 @@ async def clarify_build_question_async(state: GlobalState) -> dict[str, Any]:
 # 内部工具函数
 # ═══════════════════════════════════════════════════════════════════
 
+def _is_present(v: Any) -> bool:
+    """字段是否算「有值」：None / 空串 / 空容器都不算。"""
+    if v is None:
+        return False
+    if isinstance(v, str) and v.strip() == "":
+        return False
+    if isinstance(v, (list, dict)) and len(v) == 0:
+        return False
+    return True
+
+
 def _merge_requirement(old: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
     """把 patch 中明确非空 / 非 None 的字段合并进 old。"""
     result = copy.deepcopy(old)
-
-    def _is_present(v: Any) -> bool:
-        if v is None:
-            return False
-        if isinstance(v, str) and v.strip() == "":
-            return False
-        if isinstance(v, (list, dict)) and len(v) == 0:
-            return False
-        return True
 
     for key, val in patch.items():
         if key == "io_constraints":

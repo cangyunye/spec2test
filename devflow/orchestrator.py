@@ -75,11 +75,13 @@ from .nodes import (
     make_graph_render_node,
     make_test_gen_node,
     make_test_run_node,
+    requirement_review_node,
     review_node,
     route_after_code_apply,
     route_after_code_gen,
     route_after_code_search,
     route_after_graph_review,
+    route_after_requirement_review,
     route_after_review,
     route_after_test_gen,
     route_after_test_run,
@@ -364,6 +366,7 @@ def build_graph():
     workflow.add_node("clarify_validate", clarify_validate)
     workflow.add_node("clarify_build_question", clarify_build_question)
     workflow.add_node("compress_messages", compress_messages)
+    workflow.add_node("requirement_review", requirement_review_node)
     workflow.add_node("graph_type_select", graph_type_select)
     workflow.add_node("graph_generate", graph_generate)
     workflow.add_node("dead_letter_drain", dead_letter_drain_node)
@@ -389,8 +392,18 @@ def build_graph():
         _route_after_validate,
         {
             "need_more_info": "clarify_build_question",
-            "info_complete": "graph_type_select",  # 先选图种类（interrupt 门禁），再制图
+            "info_complete": "requirement_review",  # 需求先经用户确认，再选图种类制图
             "abort": "dead_letter_drain",
+        },
+    )
+
+    # 需求确认 → 选图种类 / 驳回则本轮 END（用户补充需求后重新澄清）
+    workflow.add_conditional_edges(
+        "requirement_review",
+        route_after_requirement_review,
+        {
+            "confirmed": "graph_type_select",
+            "rejected": END,
         },
     )
 
@@ -464,6 +477,7 @@ def build_graph_with_providers(providers: Providers | None = None):
     workflow.add_node("clarify_validate", clarify_validate)
     workflow.add_node("clarify_build_question", clarify_build_question)
     workflow.add_node("compress_messages", compress_messages)
+    workflow.add_node("requirement_review", requirement_review_node)
     workflow.add_node("graph_type_select", graph_type_select)
     workflow.add_node("graph_generate", graph_generate)
     workflow.add_node("dead_letter_drain", dead_letter_drain_node)
@@ -500,8 +514,18 @@ def build_graph_with_providers(providers: Providers | None = None):
         _route_after_validate,
         {
             "need_more_info": "clarify_build_question",
-            "info_complete": "graph_type_select",  # 先选图种类（interrupt 门禁），再制图
+            "info_complete": "requirement_review",  # 需求先经用户确认，再选图种类制图
             "abort": "dead_letter_drain",
+        },
+    )
+
+    # 需求确认 → 选图种类 / 驳回则本轮 END（用户补充需求后重新澄清）
+    workflow.add_conditional_edges(
+        "requirement_review",
+        route_after_requirement_review,
+        {
+            "confirmed": "graph_type_select",
+            "rejected": END,
         },
     )
 
@@ -646,6 +670,8 @@ def initial_state() -> dict[str, Any]:
         "clarify_mode": "normal",
         "clarify_mode_prompt": False,
         "missing_fields": [],
+        "requirement_confirmed": False,
+        "requirement_sources": {},
         "review_feedback": None,
         "code_apply": None,
         "test_failure": None,

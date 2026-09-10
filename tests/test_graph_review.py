@@ -100,18 +100,27 @@ class TestGraphReviewIntegration:
         state["requirement"] = _complete_requirement()
         list(self.graph.stream(state, self.config, stream_mode="updates"))
 
+    def _pass_requirement_gate(self):
+        """通过制图前需求确认门禁（requirement_review interrupt）。"""
+        list(self.graph.stream(Command(resume="confirm"), self.config, stream_mode="updates"))
+
     def _pass_type_gate(self, graph_type: str = "flowchart"):
-        """通过制图前图种类门禁（graph_type_select interrupt）。"""
+        """通过需求确认门 + 图种类门禁（两个 interrupt）。"""
+        self._pass_requirement_gate()
         list(self.graph.stream(Command(resume=graph_type), self.config, stream_mode="updates"))
 
     def test_stops_at_type_gate_then_graph_review(self):
         self._start()
-        # 0. 澄清完备后应先停在图种类选择门（graph_type_select）
+        # 0. 澄清完备后先停在需求确认门（requirement_review），确认后才轮到图种类
+        snapshot = self.graph.get_state(self.config)
+        assert "requirement_review" in (snapshot.next or []), \
+            f"期望先停在 requirement_review 门，实际 next={snapshot.next}"
+        self._pass_requirement_gate()
         snapshot = self.graph.get_state(self.config)
         assert "graph_type_select" in (snapshot.next or []), \
-            f"期望先停在 graph_type_select 门，实际 next={snapshot.next}"
+            f"需求确认后应停在 graph_type_select 门，实际 next={snapshot.next}"
         # 选定种类后写入 state，后续重制图沿用不再询问
-        self._pass_type_gate("sequence")
+        list(self.graph.stream(Command(resume="sequence"), self.config, stream_mode="updates"))
         assert self.graph.get_state(self.config).values.get("graph_type") == "sequence"
 
     def test_stops_at_graph_review_then_approve_reaches_final_review(self):

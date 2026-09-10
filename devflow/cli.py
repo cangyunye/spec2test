@@ -505,16 +505,40 @@ def _interactive_loop(tid: str, *, full: bool = False) -> None:
             next_nodes = []
 
         if (
-            "graph_type_select" in next_nodes
+            "requirement_review" in next_nodes
+            or "graph_type_select" in next_nodes
             or "review" in next_nodes
             or "graph_review" in next_nodes
             or "checklist_route_gate" in next_nodes
         ):
-            # 人工门禁中断：graph_type_select=选图种类；graph_review=确认图↔需求对齐；review=终审验收
+            # 人工门禁中断：requirement_review=制图前确认需求；graph_type_select=选图种类；
+            # graph_review=确认图↔需求对齐；review=终审验收
             from .schemas import has_project_code
 
             no_code = not has_project_code(snap.get("requirement"))
-            if "graph_type_select" in next_nodes:
+            if "requirement_review" in next_nodes:
+                from .nodes.requirement_review import requirement_fields
+
+                lines = ["[bold]请逐项核对需求清单（标「AI 推断」的重点看）：[/]"]
+                for f in requirement_fields(
+                    snap.get("requirement") or {}, snap.get("requirement_sources") or {}
+                ):
+                    mark = " [yellow](AI 推断)[/]" if f["inferred"] else ""
+                    val = f["value"]
+                    if isinstance(val, list):
+                        val = "；".join(str(x) for x in val) if val else "（空）"
+                    elif val is None or str(val).strip() == "":
+                        val = "（空）"
+                    lines.append(f"  [cyan]{f['label']}[/]{mark}: {val}")
+                lines.append("")
+                lines.append(
+                    "[dim]回车 = 确认并按当前清单制图；reject = 驳回（本轮结束，补充需求后重来）；\n"
+                    "或输入 field=value 就地修改后再确认，多条用 ; 分隔"
+                    "（例：project_context=商城下单支付；io_constraints.input=提交订单请求）[/]"
+                )
+                gate_panel = Panel("\n".join(lines), title="需求确认（制图前门禁）", border_style="cyan")
+                prompt_label = "需求确认"
+            elif "graph_type_select" in next_nodes:
                 from .graph_types import GRAPH_TYPES, suggest_graph_types
 
                 candidates = suggest_graph_types(snap.get("requirement"))
@@ -556,6 +580,41 @@ def _interactive_loop(tid: str, *, full: bool = False) -> None:
             _print_stage_report(snap)
             if "checklist_route_gate" in next_nodes:
                 _run_checklist_route_gate(graph, tid, snap)
+                continue
+            if "requirement_review" in next_nodes:
+                # 需求确认门禁：回车=确认；reject=驳回；field=value 就地修改后确认
+                try:
+                    raw = console.input(
+                        f"[bold yellow]{prompt_label}[/] (回车=确认 / reject / field=value) > "
+                    ).strip()
+                except (EOFError, KeyboardInterrupt):
+                    console.print("\n[dim]已退出（下次可用 devflow resume 继续）[/]")
+                    return
+                if raw and raw.lower() in (":q", ":quit", ":exit"):
+                    console.print(f"[dim]已退出（下次可用 devflow resume {tid} 继续）[/]")
+                    return
+                if raw.lower() in ("reject", "驳回", "拒绝"):
+                    _resume_from_interrupt(
+                        graph, tid, {"decision": "reject"}, gate="requirement_review"
+                    )
+                    continue
+                patch: dict[str, Any] = {}
+                bad = False
+                for kv in raw.split(";"):
+                    kv = kv.strip()
+                    if not kv:
+                        continue
+                    try:
+                        key, val = _parse_assignment(kv)
+                    except ValueError as e:
+                        console.print(f"[red]×[/] {e}")
+                        bad = True
+                        break
+                    patch[key] = val
+                if bad:
+                    continue
+                decision: Any = {"decision": "confirm", "fields": patch} if patch else "confirm"
+                _resume_from_interrupt(graph, tid, decision, gate="requirement_review")
                 continue
             if "graph_type_select" in next_nodes:
                 # 图种类门禁：序号 / 种类 id / 中文名均可，空 = 默认 flowchart
@@ -762,6 +821,10 @@ def _resume_from_interrupt(graph, tid: str, decision: str | dict, *, gate: str =
                     stage = event.get("stage")
                     if stage == "done":
                         console.print("[green]✓[/] 验收通过，流程完成！")
+                    elif stage == "graph" and gate == "requirement_review":
+                        console.print("[green]✓[/] 需求已确认，接下来选择图种类")
+                    elif stage == "clarify" and gate == "requirement_review":
+                        console.print("[yellow]![/] 需求未确认，本轮结束；请补充需求后继续")
                     elif stage == "graph" and gate == "graph_type_select":
                         console.print(f"[green]✓[/] 图种类已选定（{decision}），开始制图")
                     elif stage == "code":

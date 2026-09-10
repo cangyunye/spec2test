@@ -1,6 +1,6 @@
 # DevFlow · 需求到测试全链路 AI 工具
 
-输入一段需求，DevFlow 通过 LLM 完成需求澄清、可机读逻辑图生成、代码检索 / 生成、测试场景设计；在制图评审与人工验收两个门禁由人把关，最终交付可导出的测试场景与产物汇总。
+输入一段需求，DevFlow 通过 LLM 完成需求澄清、可机读逻辑图生成、代码检索 / 生成、测试场景设计；在需求确认、制图评审与人工验收三处门禁由人把关——**模型从描述里推断（脑补）出的需求字段，必须经用户确认才能进入制图**，最终交付可导出的测试场景与产物汇总。
 
 > 设计文档（架构 / 阶段可行性 / 协议）：见 [SPEC.md](SPEC.md) · 上手教程：见 [QUICKSTART.md](QUICKSTART.md)
 
@@ -11,7 +11,7 @@
 - **双模式分支**：提供项目代码走完整链路（检索 / 生成 / 真实测试执行）；**不提供代码则走「仅需求模式」**——评审逻辑图后直接基于需求 + 逻辑图生成端到端测试用例
 - **系统化用例设计方法论**：融入 doc-based / functional testcase-generator 方法——正向 / 反向 / 边界值 / 等价类 / 状态流转 / 场景法六类设计策略，P0-P2 优先级，输出前质量自检；用例带标识与所属模块，导出为「概述 → 分模块用例 → 自检」的总-分结构文档
 - **业务 Checklist 库（.checklist）**：测试设计前按需求路由本地业务清单库——skill 式渐进披露，只读各 `scenario.md` 的路由标签匹配，确认后才加载对应 `checklist.md` 注入用例设计并逐条核对覆盖；生成后可把评审有效的用例「沉淀」归纳为新清单登记入库，库越用越厚，形成「生成 → 沉淀 → 更准的生成」闭环
-- **双门禁人工把关**：逻辑图评审、最终验收两处中断等待决策；**驳回必须带修改意见**，意见回传给制图 / 代码生成节点做针对性修正
+- **三门禁人工把关**：① **需求确认**（制图前）：把需求字段摊开给用户核对，每个字段标注来源（用户原话 / AI 推断），只有存在 AI 推断字段时才打断——可就地修改字段值后确认，或驳回继续补充需求；② **逻辑图评审**；③ **最终验收**。后两处**驳回必须带修改意见**，意见回传给制图 / 代码生成节点做针对性修正
 - **Web Shell（推荐）**：黑白双主题界面，聊天式单入口、LLM 逐字流式输出、节点级耗时进度、逻辑图缩放 / 平移 / 节点检查器、测试场景表筛选与 CSV / Markdown 导出
 - **CLI 孪生客户端**：同一套图与事件协议，`devflow setup / new / resume / list / export / checklist / check-providers / check-llm`
 - **永不卡死的演示模式**：未配置 API Key 时自动 Mock 兜底，全流程可跑通（输出为演示数据）
@@ -78,10 +78,12 @@ SiliconFlow 等 OpenAI 兼容服务的 Key（不配置则 Mock 演示模式）�
 ├────────────────────────────────────────────────────────────┤
 │  LangGraph 编排 devflow/orchestrator.py                     │
 │  compress → clarify_extract → clarify_validate ─┬→ 追问     │
-│      └→ graph_generate → graph_review(门禁1) ──┘            │
+│      └→ requirement_review(门禁1·需求确认) ──────┘            │
+│         → graph_type_select → graph_generate                │
+│         → graph_review(门禁2·制图评审)                       │
 │         → code_search → graph_render → code_gen             │
 │         → checklist_route(清单路由确认) → test_gen           │
-│         → review(门禁2) → END                               │
+│         → review(门禁3·人工验收) → END                       │
 ├────────────────────────────────────────────────────────────┤
 │  Providers：LLM(OpenAI 兼容/Mock) · CodeGraph · OpenCode    │
 │  Checkpoint：SQLite（data/checkpoints.db，断点恢复/会话管理） │
@@ -92,7 +94,7 @@ SiliconFlow 等 OpenAI 兼容服务的 Key（不配置则 Mock 演示模式）�
 
 ```
 devflow/            核心包：编排 / 节点 / 事件 / LLM 客户端 / Provider / Schema
-  nodes/            LangGraph 节点（澄清、制图、双门禁、检索、生成、清单路由、测试）
+  nodes/            LangGraph 节点（澄清、需求确认、制图、三门禁、检索、生成、清单路由、测试）
   providers/        可插拔后端（mock / opencode / codegraph / archify）
   checklist/        业务清单库（.checklist）：扫描路由 / 沉淀归纳 / 脚手架
 web/                Web Shell：FastAPI 服务 + 静态前端（原生 JS，无框架）

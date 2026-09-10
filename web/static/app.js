@@ -158,6 +158,7 @@ function setStep(idx, running) {
   });
 }
 function stepIdxForStage(stage) {
+  if (stage === "requirement_review") return 1;   // 制图前门禁：停在「逻辑制图」步
   if (stage === "graph_review") return 2;
   if (stage === "human_review") return 6;  // 门禁 id（openGate/submitGate 直接传入），漏映射会被兜底回 0
   if (stage in STAGE_ORDER) return STAGE_ORDER[stage];
@@ -839,6 +840,7 @@ function onStreamEnd(e) {
   if (S.gate) {
     const gateStage = S.gate === "graph_review" ? "graph_review"
       : S.gate === "graph_type_select" ? "graph"
+      : S.gate === "requirement_review" ? "requirement_review"
       : S.gate === "checklist_route" ? "test" : "review";
     setStep(stepIdxForStage(gateStage), false);
     updateComposer();
@@ -856,6 +858,7 @@ function onStreamEnd(e) {
 /* ── 门禁 ────────────────────────────────────────────── */
 
 const GATE_META = {
+  requirement_review: { n: 0, tag: "GATE · 需求确认", title: "需求确认：这些字段准确吗？" },
   graph_type_select: { n: 0, title: "制图前 · 选择逻辑图种类" },
   graph_review: { n: 1, title: "制图评审：逻辑图与需求对齐了吗？" },
   human_review: { n: 2, title: "人工验收：产物达到验收标准了吗？" },
@@ -866,6 +869,9 @@ const GRAPH_TYPE_ICONS = { flowchart: "⎯>", sequence: "⇄", state: "◉", er:
 const GRAPH_TYPE_LABELS = { flowchart: "流程图", sequence: "时序图", state: "状态图", er: "ER 图" };
 
 function gateSubText(gate) {
+  if (gate === "requirement_review") {
+    return "AI 从描述中提炼的字段已标出 · 可直接修改后确认 · 确认后才会进入制图；驳回则先补充需求";
+  }
   if (gate === "graph_type_select") {
     return "选择将决定制图视角与结构化产物形态 · 选定后本次需求内不再重复询问";
   }
@@ -897,7 +903,15 @@ function openGate(gate, payload) {
 
   const body = $("gateBody");
   body.innerHTML = "";
-  if (gate === "graph_type_select") {
+  if (gate === "requirement_review") {
+    // 需求确认门禁：字段可编辑，「确认需求」进制图 /「驳回」退回补充需求
+    $("btnApprove").textContent = "确认需求";
+    $("btnReject").textContent = "驳回，先补充需求";
+    $("btnReject").classList.remove("hidden");
+    $("btnApprove").classList.remove("hidden");
+    S.rrEdits = {};
+    body.appendChild(gateRequirementBody(S.gatePayload));
+  } else if (gate === "graph_type_select") {
     $("btnReject").classList.add("hidden");
     $("btnApprove").classList.add("hidden");
     body.appendChild(gateTypeBody(S.gatePayload));
@@ -932,6 +946,68 @@ function collectSuggested(candidates, out = []) {
     collectSuggested(c.children || [], out);
   });
   return out;
+}
+
+/* 需求确认卡（制图前门禁）：逐字段可编辑，AI 推断字段高亮；只回传被改动的字段 */
+function gateRequirementBody(p) {
+  const wrap = h("div", "rr-wrap");
+  const list = h("div", "rr-list");
+  (p.fields || []).forEach((f) => {
+    const row = h("div", "rr-row" + (f.inferred ? " inferred" : ""));
+    const head = h("div", "rr-head");
+    head.appendChild(h("span", "rr-label", f.label || f.key));
+    if (f.inferred) head.appendChild(h("span", "rr-badge", "AI 推断"));
+    head.appendChild(h("span", "rr-key mono", f.key));
+    row.appendChild(head);
+    row.appendChild(rrControl(f));
+    list.appendChild(row);
+  });
+  wrap.appendChild(list);
+  wrap.appendChild(h("p", "rr-hint",
+    "标「AI 推断」的是模型从描述里提炼的内容，请重点核对；"
+    + "修改任一字段后点「确认需求」，只有改动的字段会回传并覆盖。"));
+  return wrap;
+}
+
+/* 字段控件：text 多行 / str 单行 / list 每行一项 / bool 勾选 */
+function rrControl(f) {
+  const kind = f.kind || "str";
+  const norm = () => {
+    if (kind === "bool") return f.value === true;
+    if (kind === "list") return Array.isArray(f.value) ? f.value : [];
+    return f.value == null ? "" : String(f.value);
+  };
+  const push = (v) => {
+    if (JSON.stringify(v) === JSON.stringify(norm())) delete S.rrEdits[f.key];
+    else S.rrEdits[f.key] = v;
+  };
+  if (kind === "bool") {
+    const cb = h("input", "rr-bool");
+    cb.type = "checkbox";
+    cb.checked = norm();
+    cb.onchange = () => push(cb.checked);
+    return cb;
+  }
+  if (kind === "list") {
+    const ta = h("textarea", "rr-input");
+    ta.rows = Math.min(6, Math.max(2, norm().length || 2));
+    ta.value = norm().join("\n");
+    ta.placeholder = "每行一项";
+    ta.oninput = () => push(ta.value.split("\n").map((s) => s.trim()).filter(Boolean));
+    return ta;
+  }
+  if (kind === "text") {
+    const ta = h("textarea", "rr-input");
+    ta.rows = 3;
+    ta.value = norm();
+    ta.oninput = () => push(ta.value);
+    return ta;
+  }
+  const inp = h("input", "rr-input");
+  inp.type = "text";
+  inp.value = norm();
+  inp.oninput = () => push(inp.value);
+  return inp;
 }
 
 /* 清单路由确认树：业务/子业务两级勾选，勾业务联动全选子业务 */
@@ -1116,6 +1192,7 @@ function gateReviewBody(p) {
 function closeGateToPeek() {
   $("gateModal").classList.add("hidden");
   $("gatePillText").textContent =
+    S.gate === "requirement_review" ? "需求确认待决策" :
     S.gate === "graph_type_select" ? "图种类待选择" :
     S.gate === "checklist_route" ? "清单路由待确认" :
     S.gate === "graph_review" ? "制图评审待决策" : "人工验收待决策";
@@ -1129,9 +1206,14 @@ function submitGate(decision, comment) {
   if (!S.gate) return;
   const gate = S.gate;
   const isRoute = gate === "checklist_route";
+  const isReqReview = gate === "requirement_review";
   // 清单路由门禁：approve/reject 映射为 confirm/skip，携带勾选的业务路径
   const routeDecision = isRoute ? (decision === "approve" ? "confirm" : "skip") : null;
   const selected = isRoute ? [...(S.clSelected || [])].join(",") : "";
+  // 需求确认门禁：approve/reject 映射为 confirm/reject，携带就地修改的字段
+  const reqEdits = isReqReview ? (S.rrEdits || {}) : {};
+  const editCount = Object.keys(reqEdits).length;
+  const fields = editCount ? JSON.stringify(reqEdits) : "";
   $("gateModal").classList.add("hidden");
   $("gatePill").classList.add("hidden");
   S.gate = null;
@@ -1141,6 +1223,15 @@ function submitGate(decision, comment) {
       routeDecision === "confirm" ? `清单已确认 · 注入 ${n} 项` : "已跳过清单注入",
       null, true,
     );
+  } else if (isReqReview) {
+    if (decision === "approve") {
+      addDivider(
+        editCount ? `需求已确认 · 修改 ${editCount} 个字段` : "需求已确认 · 进入制图",
+        editCount ? reqEdits : null, true,
+      );
+    } else {
+      addDivider("需求未确认 · 退回补充", comment ? `「${comment.slice(0, 40)}」` : null, true);
+    }
   } else {
     addDivider(decision === "approve" ? "评审通过 · 继续推进" : "已驳回 · 意见回传",
       comment ? `「${comment.slice(0, 40)}${comment.length > 40 ? "…" : ""}」` : null, true);
@@ -1149,12 +1240,18 @@ function submitGate(decision, comment) {
   setRunning(true);
   startStream(isRoute
     ? { op: "gate", decision: routeDecision, comment: "", selected }
-    : { op: "gate", decision, comment: comment || "" });
+    : isReqReview
+      ? { op: "gate", decision: decision === "approve" ? "confirm" : "reject", comment: comment || "", fields }
+      : { op: "gate", decision, comment: comment || "" });
   toast(
     isRoute ? (routeDecision === "confirm" ? "清单已加载" : "已跳过清单")
-      : decision === "approve" ? "已通过" : "意见已回传",
+      : isReqReview ? (decision === "approve"
+        ? (editCount ? `已确认并按修改后的清单制图（${editCount} 项）` : "需求已确认，开始制图")
+        : "需求已退回，请补充后继续")
+        : decision === "approve" ? "已通过" : "意见已回传",
     isRoute ? (routeDecision === "confirm" ? "业务检查清单将作为用例设计依据" : "按常规流程设计用例")
-      : decision === "approve" ? "流程继续推进" : "正在按意见重新执行",
+      : isReqReview ? (decision === "approve" ? "确认内容将作为制图与用例设计依据" : "补充需求后会重新澄清并再次请你确认")
+        : decision === "approve" ? "流程继续推进" : "正在按意见重新执行",
   );
 }
 
@@ -1420,7 +1517,13 @@ async function openSession(tid) {
     if (S.stage === "done" && !(snap.next || []).length) setStep(7, false);
     // 挂起的门禁
     const next = snap.next || [];
-    if (next.includes("graph_type_select")) {
+    if (next.includes("requirement_review")) {
+      // 需求确认门禁：载荷由服务端按 state.requirement 重算（interrupt 载荷不落 checkpoint）
+      try {
+        const r = await api(`/api/sessions/${tid}/requirement-review`);
+        if (r.pending) openGate("requirement_review", r);
+      } catch { /* 载荷重算失败不阻塞会话打开 */ }
+    } else if (next.includes("graph_type_select")) {
       // 图种类选择门禁：候选由服务端按同一套规则推断重算（interrupt 载荷不落 checkpoint）
       try {
         const cand = await api(`/api/sessions/${tid}/graph-type-candidates`);
@@ -1483,7 +1586,9 @@ function updateComposer() {
     send.disabled = true;
     input.disabled = true;
   } else if (S.gate) {
-    hint.textContent = S.gate === "graph_type_select"
+    hint.textContent = S.gate === "requirement_review"
+      ? "需求确认待决策 — 请在确认窗中核对字段并确认或驳回"
+      : S.gate === "graph_type_select"
       ? "图种类待选择 — 请在弹窗中挑选本次逻辑图的种类"
       : S.gate === "checklist_route"
       ? "业务清单路由待确认 — 请在弹窗中勾选要注入的检查清单"

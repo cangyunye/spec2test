@@ -8,6 +8,10 @@ from typing import Annotated, Any, Literal, Optional, TypedDict
 
 from langgraph.graph.message import add_messages
 
+# requirement_sources 取值：字段值来自用户原话 / 模型提炼推断
+SOURCE_USER = "user"
+SOURCE_INFERRED = "inferred"
+
 
 # ═══════════════════════════════════════════════════════════════════
 # TypedDict 子结构 —— 字段与 schemas.py 保持一致
@@ -165,6 +169,8 @@ class GlobalState(TypedDict, total=False):
     clarify_mode: Literal["normal", "brainstorm", "grill"]   # 澄清模式：普通列表 / 头脑风暴 / 拷问
     clarify_mode_prompt: bool                # 首轮追问后弹「头脑风暴 / 拷问」选择卡（一次即收）
     missing_fields: list[str]                # 校验节点输出的缺失字段/错误
+    requirement_confirmed: bool              # 制图前需求确认门禁是否已通过（抽取到新信息时重置）
+    requirement_sources: dict[str, str]      # 需求字段来源：field → "user"（用户原话）/ "inferred"（AI 推断）
     review_feedback: Optional[str]           # 门禁 reject 时用户填写的修改意见
     test_failure: Optional[str]              # test_run 失败摘要，code_gen 修复时拼进 instruction
     last_error: Optional[str]
