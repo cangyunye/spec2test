@@ -8,9 +8,12 @@ from typing import Annotated, Any, Literal, Optional, TypedDict
 
 from langgraph.graph.message import add_messages
 
-# requirement_sources 取值：字段值来自用户原话 / 模型提炼推断
+# requirement_sources 取值：字段值来自用户原话 / 模型提炼推断 / mock 兜底编造
 SOURCE_USER = "user"
 SOURCE_INFERRED = "inferred"
+# LLM 全挂时 mock 兜底填入的演示数据：不是真实抽取结果，后续真实抽取必须能覆盖它，
+# 且到需求确认门禁时强制人工确认（requirement_review 视同 inferred）
+SOURCE_MOCK = "mock"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -172,9 +175,13 @@ class GlobalState(TypedDict, total=False):
     clarify_round_user_chars: int            # 本轮用户输入长度（观测 + 静默失败识别）
     clarify_round_no_progress: bool          # 本轮有输入（≥30字）却零抽取：抽取静默失败
     requirement_confirmed: bool              # 制图前需求确认门禁是否已通过（抽取到新信息时重置）
-    requirement_sources: dict[str, str]      # 需求字段来源：field → "user"（用户原话）/ "inferred"（AI 推断）
+    requirement_sources: dict[str, str]      # 需求字段来源：field → "user"（用户原话）/ "inferred"（AI 推断）/ "mock"（兜底编造）
     review_feedback: Optional[str]           # 门禁 reject 时用户填写的修改意见
     test_failure: Optional[str]              # test_run 失败摘要，code_gen 修复时拼进 instruction
     last_error: Optional[str]
+    # 注意：这三个键必须声明在 TypedDict 里——LangGraph 只写入 schema 内的键，
+    # 未声明键会被节点返回值里静默丢弃（曾导致图级重试路由与失败可见化前缀失效）
+    last_error_code: Optional[str]
+    last_error_retryable: Optional[bool]
     retry_count: dict[str, int]              # e.g. {"clarify_validate": 1}
     dead_letters: list                       # SPEC 5.7 死信队列（dead_letter_drain 落盘前暂存）

@@ -45,7 +45,7 @@ from ..schemas import (
     empty_requirement,
     validate_requirement,
 )
-from ..state import SOURCE_INFERRED, SOURCE_USER, GlobalState
+from ..state import SOURCE_INFERRED, SOURCE_MOCK, SOURCE_USER, GlobalState
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +110,57 @@ def _mode_announce(mode: str) -> str:
     return "已退出对话式澄清，回到普通模式。后续会一次性列出待补充清单。"
 
 
+# ═══════════════════════════════════════════════════════════════════
+# 承接上文：LLM 故障恢复后，用户用「继续」要求接着处理上一条没写入的消息
+# ═══════════════════════════════════════════════════════════════════
+
+# 承接指令识别：刻意收窄——只匹配极短、不含实质需求内容的指令，
+# 避免把用户正常回复（如「继续说一下边界场景」）误判成承接。
+_CONTINUATION_RE = re.compile(
+    r"^(?:继续|继续吧|接着|接着说|接着来|重试|再试|再试一次|go\s*on|continue|retry)"
+    r"[！!。.，,～~？?\s]*$",
+    re.IGNORECASE,
+)
+
+
+def _is_continuation(text: str) -> bool:
+    return bool(_CONTINUATION_RE.match((text or "").strip()))
+
+
+def _collect_pending_user_context(
+    messages: list, max_messages: int = 3, max_chars: int = 4000
+) -> list[str]:
+    """收集最后一条用户消息之前的近期用户消息原文（承接上文用）。
+
+    场景：上一轮因 LLM 不可用抽取失败，恢复后用户只发「继续」——那条详细描述
+    还在 checkpoint 的 messages 里，把它重放进抽取 prompt 才能承接上文。
+    跳过本身是承接指令的消息（连续多次「继续」只取有内容的那条）。
+    """
+    collected: list[str] = []
+    for m in reversed(messages):
+        if getattr(m, "type", None) != "human":
+            continue
+        text = str(getattr(m, "content", "") or "").strip()
+        if not text or _is_continuation(text):
+            continue
+        collected.append(text[:max_chars])
+        if len(collected) >= max_messages:
+            break
+    collected.reverse()
+    return collected
+
+
+def _format_earlier_context(earlier: list[str]) -> str:
+    """把待承接的用户原文渲染进抽取 prompt；空列表返回空串（不出现孤儿标题）。"""
+    if not earlier:
+        return ""
+    return (
+        "# 更早的未写入对话（此前因 LLM 故障没能写入需求清单）\n"
+        + "\n".join(f"[用户] {t}" for t in earlier)
+        + "\n"
+    )
+
+
 # ── Pydantic 响应模型：让 LLM 严格按需求 Schema 抽取 ────────
 class _FieldIOConstraints(BaseModel):
     input: str = Field(description="输入约束，用户提供的输入是什么、格式如何")
@@ -170,6 +221,9 @@ SYSTEM_PROMPT_EXTRACT = """你是一个严谨的需求分析师，任务是从�
    io_constraints 的子字段写 io_constraints.input / io_constraints.output）。
    用户原话里明确给出的字段不要列进来；没有任何推断就填 null。
    这些字段会在制图前被要求用户确认，如实标注能减少返工。
+9. 如果存在「更早的未写入对话」且【本轮用户新输入】只是「继续/重试」等承接指令（没有新信息），
+   说明之前有一条因 LLM 故障没被写入的需求描述——改从「更早的未写入对话」中抽取；
+   本轮输入有真实内容时，以本轮输入为准，更早内容仅作理解参考。
 """
 
 
@@ -181,10 +235,13 @@ USER_PROMPT_TEMPLATE = """
 # 上一轮 AI 追问（可能为空；用户本轮若只是简短确认，从这里对应字段与推荐答案）
 {latest_ai_message}
 
+{earlier_context}
 # 本轮用户新输入
 {latest_user_message}
 
 请只从【本轮用户新输入】中抽取明确提到的信息；如果已有需求中某个字段用户本轮没提，就填 null 让它保留旧值。
+若【本轮用户新输入】只是「继续/重试」类承接指令且没有新信息，则改从上方「更早的未写入对话」中抽取
+（那些内容此前因 LLM 故障没能写入需求清单）。
 """
 
 
@@ -237,21 +294,40 @@ async def clarify_extract_async(state: GlobalState) -> dict[str, Any]:
         else:
             return {"requirement": existing, "clarify_round_user_chars": 0, **ok_ret, **mode_update}
 
+    # 1.6 承接上文：本轮输入只是「继续/重试」类指令 → 把之前没写进需求的用户原文
+    # 一并放进 prompt（典型场景：LLM 故障期间回答没写入，恢复后用户发「继续」）。
+    earlier_context: list[str] = []
+    if _is_continuation(latest_user_text):
+        earlier_context = _collect_pending_user_context(messages)
+        if not earlier_context:
+            # 没有可承接的上文：「继续」本身不含需求信息，不浪费这次 LLM 调用；
+            # 键与正常返回路径对齐（短输入不算「零抽取静默失败」）
+            return {
+                "requirement": existing,
+                "clarify_round_user_chars": len(latest_user_text.strip()),
+                "clarify_round_no_progress": False,
+                **ok_ret,
+                **mode_update,
+            }
+
     # 2. LLM 结构化抽取
     # 走 json_schema 档（裸补全 + 本地解析）而非 response_model 的 function_calling 档：
     # 部分 OpenAI 兼容网关的 tool_call 参数会被截断——实测同一网关 function_calling 只填
     # req_type + target_modules 两个字段、其余全 null，残缺需求被当成功、下游反复追问；
     # json_mode 则 9 个字段全填齐。字段类型安全由下方 model_validate 兜底（不合规 → 可重试）。
+    mock_flag: dict[str, Any] = {}
     try:
         extracted = await invoke_json(
             system_prompt=SYSTEM_PROMPT_EXTRACT,
             user_prompt=USER_PROMPT_TEMPLATE.format(
                 existing_requirement=_format_requirement_for_llm(existing),
                 latest_ai_message=latest_ai_text or "（无）",
+                earlier_context=_format_earlier_context(earlier_context),
                 latest_user_message=latest_user_text,
             ),
             json_schema=RequirementExtract.model_json_schema(),
             response_type="requirement_extract",
+            meta=mock_flag,
         )
         # json_schema 档只保证「是 JSON object」，字段级类型安全在这里补校验；
         # 不合规抛可重试的 OUTPUT_FORMAT，由既有的 except DevFlowError 路径提示重试。
@@ -288,8 +364,11 @@ async def clarify_extract_async(state: GlobalState) -> dict[str, Any]:
 
     # 2.5 来源标注（B）：模型自报哪些字段是提炼/推断的 → 制图前的需求确认门禁据此
     # 只对「脑补字段」要求确认。未知来源（老会话 / 模型没报）一律按需确认（保守）。
+    # mock 兜底（真实 provider 全挂）返回的是编造的演示需求：来源统一标 SOURCE_MOCK，
+    # 不冒充用户原话/AI 推断——下轮真实抽取会据此覆盖这些字段。
     extracted = dict(extracted)
     declared = {str(x).strip() for x in (extracted.pop("inferred_fields", None) or [])}
+    used_mock = bool(mock_flag.get("mock"))
     sources = dict(state.get("requirement_sources") or {})
     for key, val in extracted.items():
         if key == "io_constraints":
@@ -297,16 +376,28 @@ async def clarify_extract_async(state: GlobalState) -> dict[str, Any]:
                 for sub in ("input", "output"):
                     if _is_present(val.get(sub)):
                         dotted = f"io_constraints.{sub}"
-                        sources[dotted] = (
-                            SOURCE_INFERRED
-                            if "io_constraints" in declared or dotted in declared
-                            else SOURCE_USER
-                        )
+                        if used_mock:
+                            sources[dotted] = SOURCE_MOCK
+                        else:
+                            sources[dotted] = (
+                                SOURCE_INFERRED
+                                if "io_constraints" in declared or dotted in declared
+                                else SOURCE_USER
+                            )
             continue
         if _is_present(val):
-            sources[key] = SOURCE_INFERRED if key in declared else SOURCE_USER
+            if used_mock:
+                sources[key] = SOURCE_MOCK
+            else:
+                sources[key] = SOURCE_INFERRED if key in declared else SOURCE_USER
 
-    # 3. 合并：已有值优先，只覆盖本轮提取中明确非空的字段
+    # 3. 合并：已有值优先，只覆盖本轮提取中明确非空的字段。
+    # 真实抽取先剔除旧值里来源为 mock 的字段（编造数据让位给真实内容；
+    # 未被本轮覆盖的 mock 字段也会被清掉 → validate 会重新追问）。
+    if not used_mock:
+        existing, removed_mock_keys = _strip_mock_sourced(existing, sources)
+        for k in removed_mock_keys:
+            sources.pop(k, None)
     merged = _merge_requirement(existing, extracted)
 
     # 无进展观测：抽取「成功」但什么都没抽到，而用户输入相当具体——多半是模型
@@ -318,8 +409,12 @@ async def clarify_extract_async(state: GlobalState) -> dict[str, Any]:
             len(latest_user_text.strip()),
         )
 
-    # 4. 会话命名：首次拿到主要功能时生成（LLM 起名，失败退 project_context 截断）
-    title_update = await _ensure_session_title(state, merged)
+    # 4. 会话命名：首次拿到主要功能时生成（LLM 起名，失败退 project_context 截断）。
+    # mock 兜底的「需求」是编造的演示数据，不能拿它给真实会话起名。
+    if used_mock:
+        title_update: dict[str, Any] = {}
+    else:
+        title_update = await _ensure_session_title(state, merged)
 
     out_req: dict[str, Any] = {
         "requirement": merged,
@@ -609,6 +704,34 @@ def _is_present(v: Any) -> bool:
     if isinstance(v, (list, dict)) and len(v) == 0:
         return False
     return True
+
+
+def _strip_mock_sourced(
+    req: dict[str, Any], sources: dict[str, str]
+) -> tuple[dict[str, Any], list[str]]:
+    """把来源为 mock 兜底的字段从 requirement 里剔除（点路径支持 io_constraints.*）。
+
+    mock 编造的数据不能在真实抽取后继续冒充有效值：剔除后 merge 只写真实抽到的
+    字段，其余 mock 字段回归缺失 → validate 重新追问。返回 (剔除后的 requirement,
+    被剔除的点路径列表)，调用方应同步清掉这些字段的来源标记。
+    """
+    out = copy.deepcopy(req)
+    removed: list[str] = []
+    for dotted, src in (sources or {}).items():
+        if src != SOURCE_MOCK or not dotted:
+            continue
+        parts = dotted.split(".")
+        cur: Any = out
+        for p in parts[:-1]:
+            nxt = cur.get(p) if isinstance(cur, dict) else None
+            if not isinstance(nxt, dict):
+                cur = None
+                break
+            cur = nxt
+        if isinstance(cur, dict):
+            cur.pop(parts[-1], None)
+            removed.append(dotted)
+    return out, removed
 
 
 def _merge_requirement(old: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:

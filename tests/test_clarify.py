@@ -859,3 +859,196 @@ class TestBuildQuestionNoProgressWarn:
 
         out = await clarify_build_question_async(state)  # type: ignore[arg-type]
         assert "没能从中抽取到新的需求字段" not in out["messages"][0].content
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 承接上文：LLM 故障恢复后「继续/重试」重放此前未写入的用户原文
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestContinuationContext:
+    @pytest.mark.asyncio
+    async def test_continuation_replays_earlier_user_message(self, monkeypatch):
+        """上一轮抽取失败、用户发「继续」→ 之前的详细需求原文被重放进抽取 prompt。"""
+        captured: dict = {}
+
+        async def fake_extract(**kwargs):
+            captured.update(kwargs)
+            return {"project_context": "外卖订单导出 Excel 报表"}
+
+        async def fake_text(**kwargs):
+            return "订单导出Excel"
+
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_json", fake_extract)
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_text", fake_text)
+        detail = (
+            "给外卖商家做一个订单导出功能，把每天的订单导出成 Excel，"
+            "需要包含金额、订单状态和退款标记，老板要在手机上看"
+        )
+        state = {
+            "messages": [
+                HumanMessage(content=detail),
+                AIMessage(content="⚠️ 上一轮回答的需求抽取失败…需要您补充验收标准"),
+                HumanMessage(content="继续"),
+            ],
+        }
+        out = await clarify_extract_async(state)  # type: ignore[arg-type]
+        prompt = captured["user_prompt"]
+        assert "更早的未写入对话" in prompt
+        assert detail in prompt  # 原文被重放，模型才承接得了「继续」
+        assert out["requirement"]["project_context"] == "外卖订单导出 Excel 报表"
+        assert out["requirement_sources"]["project_context"] == "user"
+
+    @pytest.mark.asyncio
+    async def test_continuation_without_context_skips_llm(self, monkeypatch):
+        """没有可承接的上文时，「继续」不含需求信息 → 不浪费 LLM 调用。"""
+        called = False
+
+        async def fake_extract(**kwargs):
+            nonlocal called
+            called = True
+            return {}
+
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_json", fake_extract)
+        state = {"messages": [HumanMessage(content="继续")]}
+        out = await clarify_extract_async(state)  # type: ignore[arg-type]
+        assert called is False
+        assert out["clarify_round_user_chars"] == 2  # 「继续」本身算 2 字输入
+        assert out["clarify_round_no_progress"] is False  # 短指令不算静默失败
+        assert out["last_error"] is None
+
+    @pytest.mark.asyncio
+    async def test_normal_message_has_no_earlier_block(self, monkeypatch):
+        """回归：普通消息（非承接指令）不带上文块，prompt 结构与原行为一致。"""
+        captured: dict = {}
+
+        async def fake_extract(**kwargs):
+            captured.update(kwargs)
+            return {"project_context": "科学计算器"}
+
+        async def fake_text(**kwargs):
+            return "科学计算器"
+
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_json", fake_extract)
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_text", fake_text)
+        state = {"messages": [HumanMessage(content="做一个科学计算器，支持三角函数")]}
+        await clarify_extract_async(state)  # type: ignore[arg-type]
+        # 模板尾部的承接说明里含「更早的未写入对话」字样；这里断言的是
+        # 实际上文块标题（_format_earlier_context 产物）没有出现
+        assert "# 更早的未写入对话" not in captured["user_prompt"]
+        assert "[用户]" not in captured["user_prompt"]
+
+    def test_continuation_detection_is_narrow(self):
+        """承接指令识别收窄：纯指令才算，带实质内容的消息不算。"""
+        from devflow.nodes.clarify import _is_continuation
+
+        for t in ("继续", "继续。", "继续吧！", "重试", "再试一次", "接着说", "continue", "Go on!"):
+            assert _is_continuation(t), t
+        for t in ("继续说一下边界场景", "继续补充：验收标准是全部导出", "重试方案不可行", ""):
+            assert not _is_continuation(t), t
+
+
+# ═══════════════════════════════════════════════════════════════════
+# mock 兜底标记：编造需求标 SOURCE_MOCK、不抢会话命名、可被真实抽取覆盖
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestMockExtractionMarking:
+    @staticmethod
+    def _mock_payload() -> dict:
+        return {
+            "req_type": "component_iteration",
+            "project_root": ".",
+            "project_context": "Mock 演示项目：桌面 GUI 计算器应用（tkinter）",
+            "target_modules": ["calculator/calc.py"],
+            "existing_code_accessible": True,
+            "io_constraints": {"input": "按钮点击", "output": "运算结果"},
+            "edge_cases": ["除零"],
+            "acceptance_criteria": ["四则运算结果正确"],
+        }
+
+    @pytest.mark.asyncio
+    async def test_mock_extract_marks_sources_and_skips_title(self, monkeypatch):
+        """mock 兜底（meta["mock"]=True）→ 字段全标 mock 来源；编造上下文不起会话名。"""
+        async def fake_extract(**kwargs):
+            meta = kwargs.get("meta")
+            if meta is not None:
+                meta["mock"] = True
+            return dict(self._mock_payload())
+
+        async def boom_text(**kwargs):
+            raise AssertionError("mock 轮不应调用会话命名 LLM")
+
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_json", fake_extract)
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_text", boom_text)
+        state = {"messages": [HumanMessage(content="做个计算器")]}
+        out = await clarify_extract_async(state)  # type: ignore[arg-type]
+        assert out["requirement"]["project_context"].startswith("Mock 演示项目")
+        assert out["requirement_sources"]["project_context"] == "mock"
+        assert out["requirement_sources"]["io_constraints.input"] == "mock"
+        assert "session_title" not in out
+
+    @pytest.mark.asyncio
+    async def test_real_extraction_overwrites_mock_fields(self, monkeypatch):
+        """LLM 恢复后真实抽取：覆盖 mock 字段；未被真实覆盖的 mock 字段被剔除。"""
+        async def fake_extract(**kwargs):
+            return {"project_context": "真实需求：外卖订单导出"}
+
+        async def fake_text(**kwargs):
+            return "订单导出Excel"
+
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_json", fake_extract)
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_text", fake_text)
+        state = {
+            # 真实场景：需求原文在「继续」之前——正是它被重放后才拿到真实抽取结果
+            "messages": [
+                HumanMessage(content="做一个外卖订单导出工具，导出成 Excel"),
+                HumanMessage(content="继续"),
+            ],
+            "requirement": {
+                **empty_requirement(),
+                "project_context": "Mock 演示项目：桌面 GUI 计算器",
+                "acceptance_criteria": ["四则运算结果正确"],
+            },
+            "requirement_sources": {
+                "project_context": "mock",
+                "acceptance_criteria": "mock",
+            },
+        }
+        out = await clarify_extract_async(state)  # type: ignore[arg-type]
+        req = out["requirement"]
+        assert req["project_context"] == "真实需求：外卖订单导出"  # 真实值覆盖 mock 值
+        assert req["acceptance_criteria"] == []  # 未被覆盖的 mock 字段剔除，回归缺失
+        assert out["requirement_sources"]["project_context"] == "user"
+        assert "acceptance_criteria" not in out["requirement_sources"]  # 源标记同步清除
+
+    @pytest.mark.asyncio
+    async def test_real_extract_without_mock_history_unchanged(self, monkeypatch):
+        """回归：没有 mock 历史（来源 user/inferred）时，合并行为与原逻辑一致。"""
+        async def fake_extract(**kwargs):
+            return {"project_context": "新背景"}
+
+        async def fake_text(**kwargs):
+            return "命名"
+
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_json", fake_extract)
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_text", fake_text)
+        state = {
+            "messages": [HumanMessage(content="背景改成新背景")],
+            "requirement": {**empty_requirement(), "project_context": "旧背景"},
+            "requirement_sources": {"project_context": "user"},
+        }
+        out = await clarify_extract_async(state)  # type: ignore[arg-type]
+        assert out["requirement"]["project_context"] == "新背景"  # 抽取非空值照常覆盖
+        assert out["requirement_sources"]["project_context"] == "user"  # 来源不被 mock 逻辑干扰
+
+
+class TestStateErrorContract:
+    def test_error_keys_declared_in_global_state(self):
+        """last_error_code/retryable 必须声明为 GlobalState 通道——LangGraph 会静默
+        丢弃未声明键，漏声明曾导致失败可见化前缀与图级重试路由在真实链路失效。"""
+        from devflow.state import SOURCE_MOCK, GlobalState
+
+        assert "last_error_code" in GlobalState.__annotations__
+        assert "last_error_retryable" in GlobalState.__annotations__
+        assert SOURCE_MOCK == "mock"

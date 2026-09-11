@@ -102,6 +102,45 @@ class TestCheckLlmAll:
         assert len(calls) == 3
 
 
+class TestSaveReport:
+    """终端表格放不下超长错误原文，完整报告必须原样落盘。"""
+
+    def _sample_reports(self) -> list[dict[str, Any]]:
+        ok = {
+            "name": "deepseek", "model": "deepseek-flash",
+            "base_url": "https://api.deepseek.com/v1",
+            "ok": True, "elapsed_ms": 800, "reply": "ok",
+            "error_code": None, "error_message": None,
+        }
+        err = {
+            "name": "opencode-go", "model": "glm-5.3",
+            "base_url": "https://opencode.ai/zen/go/v1",
+            "ok": False, "elapsed_ms": 490, "reply": None,
+            "error_code": "HTTP.REQ_INVALID", "error_message": "超长错误原文" * 60,
+        }
+        return [ok, err]
+
+    def test_report_file_contains_full_error_message(self, tmp_path):
+        from devflow.cli import _save_check_llm_report
+
+        reports = self._sample_reports()
+        path = _save_check_llm_report(reports, out_dir=tmp_path)
+        assert path.exists() and path.suffix == ".md"
+        text = path.read_text(encoding="utf-8")
+        assert "# LLM Provider 连通性自检报告" in text
+        assert "1/2 个 provider 可用" in text
+        # 错误原文一字不落写进报告（表格里只能截断到 60 字符）
+        assert "超长错误原文" * 60 in text
+
+    def test_report_always_written_even_all_ok(self, tmp_path):
+        from devflow.cli import _save_check_llm_report
+
+        ok_only = [{**self._sample_reports()[0], "name": "only"}]
+        path = _save_check_llm_report(ok_only, out_dir=tmp_path)
+        text = path.read_text(encoding="utf-8")
+        assert "1/1 个 provider 可用" in text
+
+
 class _FakeSettings:
     def __init__(self, providers: list[dict[str, Any]]) -> None:
         self.LLM_PROVIDERS = providers

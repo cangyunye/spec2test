@@ -17,12 +17,18 @@ from typing import Any
 import pytest
 from langchain_openai import ChatOpenAI
 
-from devflow.config import LlmProviderSpec, _parse_llm_providers_from_env
+from devflow.config import (
+    LlmProviderSpec,
+    MIN_CONTEXT_WINDOW_TOKENS,
+    _parse_llm_providers_from_env,
+    resolve_context_window,
+)
 from devflow.llm_client import (
     _MockLLM,
     _breaker_name_for,
     _candidates_providers,
     _get_model,
+    _shrink_messages,
     _use_mock_fallback,
 )
 
@@ -217,6 +223,137 @@ class TestMultiModelPool:
 
 
 # ═══════════════════════════════════════════════════════════════════
+# 1c. headers 附加请求头：解析透传到展开后的每个模型条目
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestProviderHeaders:
+    def test_headers_propagate_to_all_pool_entries(self, monkeypatch):
+        """headers 作用于该供应商展开出的全部模型（激活模型 + 模型池 fallback）。"""
+        cfg = [{
+            "name": "opencode-go",
+            "base_url": "https://opencode.ai/zen/go/v1",
+            "api_key": "sk-og",
+            "model": "deepseek-v4-flash",
+            "models": ["deepseek-v4-flash", "glm-5.3"],
+            "headers": {"x-opencode-session": "devflow-cli", "User-Agent": "devflow/1.0"},
+        }]
+        monkeypatch.setenv("LLM_PROVIDERS_JSON", json.dumps(cfg))
+        monkeypatch.delenv("LLM_ACTIVE_MODEL", raising=False)
+        providers = _parse_llm_providers_from_env()
+        assert len(providers) == 2
+        for p in providers:
+            assert p["headers"] == {"x-opencode-session": "devflow-cli",
+                                    "User-Agent": "devflow/1.0"}
+
+    def test_headers_non_dict_or_empty_ignored(self, monkeypatch):
+        """headers 不是 dict（脏数据）或为空时静默忽略，不进 provider spec。"""
+        cfg = [
+            {"name": "a", "base_url": "https://a.com/v1", "model": "m1", "headers": "x: y"},
+            {"name": "b", "base_url": "https://b.com/v1", "model": "m2", "headers": {}},
+        ]
+        monkeypatch.setenv("LLM_PROVIDERS_JSON", json.dumps(cfg))
+        providers = _parse_llm_providers_from_env()
+        assert len(providers) == 2
+        assert all("headers" not in p for p in providers)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 1d. context_window：int 全供应商生效 / dict 按模型名；官方规格表兜底
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestProviderContextWindow:
+    def test_int_propagates_to_all_pool_entries(self, monkeypatch):
+        """context_window 为 int → 该供应商展开出的每个模型条目都带上。"""
+        cfg = [{
+            "name": "og",
+            "base_url": "https://opencode.ai/zen/go/v1",
+            "api_key": "sk-og",
+            "model": "deepseek-v4-flash",
+            "models": ["deepseek-v4-flash", "glm-5.3"],
+            "context_window": 400_000,
+        }]
+        monkeypatch.setenv("LLM_PROVIDERS_JSON", json.dumps(cfg))
+        monkeypatch.delenv("LLM_ACTIVE_MODEL", raising=False)
+        providers = _parse_llm_providers_from_env()
+        assert [p.get("context_window") for p in providers] == [400_000, 400_000]
+
+    def test_dict_per_model_override(self, monkeypatch):
+        """context_window 为 dict → 按模型名单独指定，池里其他模型不带该键。"""
+        cfg = [{
+            "name": "og",
+            "base_url": "https://opencode.ai/zen/go/v1",
+            "api_key": "sk-og",
+            "model": "deepseek-v4-flash",
+            "models": ["deepseek-v4-flash", "glm-5.3"],
+            "context_window": {"deepseek-v4-flash": 200_000},
+        }]
+        monkeypatch.setenv("LLM_PROVIDERS_JSON", json.dumps(cfg))
+        monkeypatch.delenv("LLM_ACTIVE_MODEL", raising=False)
+        providers = _parse_llm_providers_from_env()
+        by_model = {p["model"]: p for p in providers}
+        assert by_model["deepseek-v4-flash"].get("context_window") == 200_000
+        assert "context_window" not in by_model["glm-5.3"]
+
+    def test_dirty_values_ignored(self, monkeypatch):
+        """bool/负数/字符串等脏值静默忽略，不进 provider spec。"""
+        cfg = [
+            {"name": "a", "base_url": "https://a.com/v1", "model": "m1",
+             "context_window": True},
+            {"name": "b", "base_url": "https://b.com/v1", "model": "m2",
+             "context_window": -5},
+            {"name": "c", "base_url": "https://c.com/v1", "model": "m3",
+             "context_window": {"m3": "很多"}},
+        ]
+        monkeypatch.setenv("LLM_PROVIDERS_JSON", json.dumps(cfg))
+        providers = _parse_llm_providers_from_env()
+        assert all("context_window" not in p for p in providers)
+
+
+class TestResolveContextWindow:
+    def test_official_specs_longest_prefix_wins(self):
+        """已知模型按官方规格：kimi-k3 1M 优先于 kimi 256K；glm-5.3 1M 优先于 glm-5 200K。"""
+        assert resolve_context_window("kimi-k3") == 1_000_000
+        assert resolve_context_window("kimi-k2.7-code") == 256_000
+        assert resolve_context_window("glm-5.3") == 1_000_000
+        assert resolve_context_window("glm-5") == 200_000
+        assert resolve_context_window("deepseek-v4-pro") == 200_000
+        assert resolve_context_window("deepseek-flash") == 128_000
+        assert resolve_context_window("qwen3.8-max") == 1_000_000
+
+    def test_explicit_overrides_official_table(self):
+        """provider 显式 context_window 优先于官方规格表。"""
+        assert resolve_context_window("glm-5.3", 500_000) == 500_000
+
+    def test_unknown_model_floored_at_128k(self, monkeypatch):
+        """未收录的自定义模型：至少 128k（全局 env 配小了也被托底）。"""
+        monkeypatch.setenv("LLM_CONTEXT_WINDOW_TOKENS", "64000")
+        assert resolve_context_window("my-private-llm") == MIN_CONTEXT_WINDOW_TOKENS
+
+    def test_unknown_model_uses_env_when_higher(self, monkeypatch):
+        """未收录模型：全局 env 配置更高（如 512k）时按 env。"""
+        monkeypatch.setenv("LLM_CONTEXT_WINDOW_TOKENS", "512000")
+        assert resolve_context_window("my-private-llm") == 512_000
+
+
+class TestShrinkWithContextWindow:
+    def test_bigger_window_keeps_more_context(self):
+        """同一份超长消息：128k 窗口触发截断占位符，1M 窗口完整保留砍半后的内容。"""
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        msgs = [SystemMessage(content="sys")]
+        msgs += [HumanMessage(content="x" * 400_000) for _ in range(4)]
+        small = _shrink_messages(msgs, 128_000)
+        large = _shrink_messages(msgs, 1_000_000)
+        small_chars = sum(len(str(m.content)) for m in small)
+        large_chars = sum(len(str(m.content)) for m in large)
+        assert large_chars > small_chars
+        assert any("TRUNCATED" in str(m.content) for m in small)
+        assert not any("TRUNCATED" in str(m.content) for m in large)
+
+
+# ═══════════════════════════════════════════════════════════════════
 # 2. _get_model 单例 + ChatOpenAI 实例字段匹配
 # ═══════════════════════════════════════════════════════════════════
 
@@ -289,6 +426,29 @@ class TestGetModel:
         llm = _get_model(spec)
         assert not llm.extra_body
         assert llm.model_kwargs == {}
+
+    def test_spec_headers_become_default_headers(self):
+        """网关自定义请求头（如 OpenCode Go 要求的 x-opencode-session）透传 default_headers。"""
+        spec: LlmProviderSpec = {
+            "name": "og-h",
+            "base_url": "https://opencode.ai/zen/go/v1",
+            "api_key": "sk-og",
+            "model": "glm-5.3",
+            "headers": {"x-opencode-session": "devflow-cli", "User-Agent": "devflow/1.0"},
+        }
+        llm = _get_model(spec)
+        assert llm.default_headers["x-opencode-session"] == "devflow-cli"
+        assert llm.default_headers["User-Agent"] == "devflow/1.0"
+
+    def test_spec_without_headers_no_default_headers(self):
+        spec: LlmProviderSpec = {
+            "name": "no-h",
+            "base_url": "https://a.com/v1",
+            "api_key": "k",
+            "model": "m1",
+        }
+        llm = _get_model(spec)
+        assert not llm.default_headers
 
     def test_different_providers_different_instances(self):
         s1: LlmProviderSpec = {

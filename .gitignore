@@ -21,3 +21,6 @@ data/
 # Python 构建/打包产物
 *.egg-info/
 build/
+
+# ZCode 本地工具状态
+.zcode/

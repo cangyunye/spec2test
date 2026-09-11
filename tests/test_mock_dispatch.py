@@ -26,6 +26,7 @@ def _extract_messages(user_text: str) -> list:
         HumanMessage(content=USER_PROMPT_TEMPLATE.format(
             existing_requirement=empty_requirement(),
             latest_ai_message="（无）",
+            earlier_context="",  # 非承接轮次：无「更早的未写入对话」块
             latest_user_message=user_text,
         )),
     ]

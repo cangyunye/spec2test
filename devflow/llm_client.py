@@ -23,7 +23,7 @@ from langchain_core.output_parsers import JsonOutputParser
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel
 
-from .config import LlmProviderSpec, settings
+from .config import LlmProviderSpec, resolve_context_window, settings
 from .errors import (
     HTTP_AUTH,
     LlmContextOverflowError,
@@ -433,6 +433,9 @@ def _get_model(spec: str | LlmProviderSpec):
         if spec["model"].startswith("deepseek-v4"):
             # extra_body 是 langchain-openai 的一等参数，塞 model_kwargs 会触发弃用告警
             kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+        # 网关自定义请求头（如 OpenCode Go 要求 x-opencode-session 会话头）
+        if spec.get("headers"):
+            kwargs["default_headers"] = dict(spec["headers"])
         _model_cache[key] = ChatOpenAI(
             model=spec["model"],
             base_url=spec["base_url"],
@@ -667,15 +670,16 @@ def _estimate_tokens(chars: int) -> int:
     return max(1, int(chars / 3.5))
 
 
-def _messages_too_big(messages: list[BaseMessage]) -> bool:
+def _messages_too_big(messages: list[BaseMessage], context_window: int) -> bool:
     chars = sum(len(str(getattr(m, "content", ""))) for m in messages)
-    limit = int(settings.LLM_CONTEXT_WINDOW_TOKENS * 3.5 * 0.9)
+    limit = int(context_window * 3.5 * 0.9)
     return chars > limit
 
 
-def _shrink_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
+def _shrink_messages(messages: list[BaseMessage], context_window: int) -> list[BaseMessage]:
     """SPEC 5.1 / 5.6 降级压缩：系统 prompt 不动，最早的 50% history 砍掉；
-    如果仍超限，把每条 HumanMessage 取前 80%。
+    如果仍超限，把每条 HumanMessage 取前 80%。窗口按当前调用的模型解析
+    （官方规格 / provider 显式 context_window / 128k 下限）。
     """
     if len(messages) <= 2:
         return messages
@@ -684,7 +688,7 @@ def _shrink_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
     # 砍最早一半
     keep = mid[max(0, len(mid) // 2):]
     rebuilt: list[BaseMessage] = [system, *keep, messages[-1]]
-    if not _messages_too_big(rebuilt):
+    if not _messages_too_big(rebuilt, context_window):
         return rebuilt
     # 还超限：对每条非 system 消息内容截断
     out2: list[BaseMessage] = [rebuilt[0]]
@@ -710,11 +714,14 @@ async def invoke_json(
     max_retries: int = 2,
     shrink_attempts: int = 3,
     response_type: str = "general",
+    meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """异步版 JSON 结构化调用，套 SPEC 5 的完整治理。
 
     参数:
         response_type: 传给 dead_letter 的标识，区分 requirement_extract / logic_graph / build_question
+        meta: 可选出参 dict。走 mock 兜底时写入 meta["mock"]=True，调用方据此识别
+              「成功」结果其实是编造数据（真实 provider 全挂才会走到 mock）。
     """
     budget = _token_budget()
     if budget.is_hard_limited():
@@ -741,6 +748,9 @@ async def invoke_json(
             last_err = wrap_exception(e, context=f"llm_load[{p_spec.get('name')}]")
             continue
         breaker = default_breaker(_breaker_name_for(p_spec))
+        # 上下文窗口按当前模型解析（官方规格表 / provider 显式 context_window / 128k 下限）
+        context_window = resolve_context_window(
+            str(p_spec.get("model") or ""), p_spec.get("context_window"))
         try:
             result = await _invoke_json_once(
                 llm=llm,
@@ -760,7 +770,7 @@ async def invoke_json(
             if shrink_left <= 0:
                 last_err = e
                 continue
-            messages = _shrink_messages(messages)
+            messages = _shrink_messages(messages, context_window)
             shrink_left -= 1
             last_err = e
             try:
@@ -801,6 +811,8 @@ async def invoke_json(
     # 走到这里，所有 provider 都失败（或一个都没配置，如测试强制 Mock 模式）
     if _use_mock_fallback():
         _log_mock_fallback(response_type, last_err)
+        if meta is not None:
+            meta["mock"] = True
         mock = _get_model("mock")
         return await _invoke_json_once(
             llm=mock, messages=messages,
@@ -819,8 +831,12 @@ async def invoke_text(
     *,
     chat_history: list[BaseMessage] | None = None,
     max_retries: int = 2,
+    meta: dict[str, Any] | None = None,
 ) -> str:
-    """普通文本调用（压缩节点摘要用），async，走同一套治理。"""
+    """普通文本调用（压缩节点摘要用），async，走同一套治理。
+
+    meta 含义同 invoke_json：mock 兜底时写入 meta["mock"]=True。
+    """
     budget = _token_budget()
     if budget.is_hard_limited():
         raise LlmTokenBudgetError(
@@ -841,6 +857,9 @@ async def invoke_text(
             last_err = wrap_exception(e, context=f"llm_load[{p_spec.get('name')}]")
             continue
         breaker = default_breaker(_breaker_name_for(p_spec))
+        # 上下文窗口按当前模型解析（官方规格表 / provider 显式 context_window / 128k 下限）
+        context_window = resolve_context_window(
+            str(p_spec.get("model") or ""), p_spec.get("context_window"))
 
         async def _run(m: list[BaseMessage]) -> str:
             async with breaker.guard():
@@ -870,7 +889,7 @@ async def invoke_text(
             if shrink_left <= 0:
                 last_err = e
                 continue
-            messages = _shrink_messages(messages)
+            messages = _shrink_messages(messages, context_window)
             shrink_left -= 1
             try:
                 return await do_run(messages)
@@ -890,6 +909,8 @@ async def invoke_text(
     # 全部失败（或未配置任何 provider）→ mock（可配置）
     if _use_mock_fallback():
         _log_mock_fallback("text", last_err)
+        if meta is not None:
+            meta["mock"] = True
         return cast(str, (await _get_model("mock").ainvoke(messages)).content)
     assert last_err is not None, "未配置任何 LLM provider 且 LLM_USE_MOCK_FALLBACK 未开启"
     raise last_err

@@ -219,9 +219,55 @@ def _export_artifacts(state: dict[str, Any], out_dir: Path) -> list[Path]:
 # CLI commands
 # ═══════════════════════════════════════════════════════════════════
 
+def _save_check_llm_report(
+    reports: list[dict[str, Any]], out_dir: Path | None = None
+) -> Path:
+    """check-llm 完整诊断报告落盘：错误原文动辄数百字，终端表格放不下只能截断，
+    完整信息（含每个 provider 的 base_url 与未截断错误）写 Markdown 供排查。
+    """
+    import time
+
+    out_dir = out_dir or Path("data/diagnostics")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    path = out_dir / f"check-llm-{ts}.md"
+    for i in range(1, 100):  # 同秒重跑防覆盖
+        if not path.exists():
+            break
+        path = out_dir / f"check-llm-{ts}-{i}.md"
+
+    ok_n = sum(1 for r in reports if r["ok"])
+    lines = [
+        "# LLM Provider 连通性自检报告",
+        "",
+        f"- 时间：{time.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"- 结果：{ok_n}/{len(reports)} 个 provider 可用",
+        "",
+    ]
+    for r in reports:
+        status = "✓ 连通" if r["ok"] else f"✗ 失败（{r['error_code']}）"
+        lines += [
+            f"## {r['name']} — {r['model']}",
+            "",
+            f"- base_url: `{r['base_url']}`",
+            f"- 状态: {status}",
+            f"- 耗时: {r['elapsed_ms']} ms",
+        ]
+        if r.get("reply"):
+            lines.append(f"- 回复: {r['reply']}")
+        if r.get("error_message"):
+            lines += ["", "```", r["error_message"], "```"]
+        lines.append("")
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
 @app.command("check-llm")
 def cmd_check_llm() -> None:
-    """连通性自检：对配置的每个 LLM provider 发一条最小请求（约 50 token）。"""
+    """连通性自检：对配置的每个 LLM provider 发一条最小请求（约 50 token）。
+
+    表格只展示摘要，完整诊断报告（未截断错误原文）落盘 data/diagnostics/。
+    """
     import asyncio
 
     from .llm_client import check_llm_all
@@ -240,10 +286,13 @@ def cmd_check_llm() -> None:
         detail = (r["reply"] or r["error_message"] or "").strip().replace("\n", " ")
         table.add_row(r["name"], r["model"], status, str(r["elapsed_ms"]), detail[:60])
     console.print(table)
+
+    report_path = _save_check_llm_report(reports)
     failed = [r for r in reports if not r["ok"]]
     if failed:
         console.print(f"[yellow]![/] {len(failed)}/{len(reports)} 个 provider 不可用，"
                       f"可检查 LLM_PROVIDERS_JSON / LLM_API_KEY 配置")
+    console.print(f"完整诊断报告已保存: [cyan]{report_path}[/]")
 
 
 @app.command("check-providers")

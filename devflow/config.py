@@ -22,6 +22,8 @@ LlmProviderSpec = dict[str, Any]
 - api_key:     str    API Key，不传则回退全局 LLM_API_KEY
 - model:       str    激活模型名，如 deepseek-v4-flash / glm-5.3 / qwen3.8-max
 - temperature: float  采样温度，默认 0.1
+- headers:     dict   可选，附加请求头（透传 ChatOpenAI default_headers）。
+                      OpenCode Go 网关要求 x-opencode-session 会话头
 
 多模型池：LLM_PROVIDERS_JSON 条目可带可选 "models": [模型名列表]（同 base_url 的
 多个模型）。解析时展开为顺序 fallback 链：激活模型沿用原 name 排最前，其余模型
@@ -29,6 +31,72 @@ LlmProviderSpec = dict[str, Any]
 LLM_ACTIVE_MODEL 环境变量可切换激活模型（不改 JSON）：裸模型名匹配任意 provider
 的池，"provider名/模型名" 只匹配对应 provider。
 """
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 已知模型官方上下文窗口（tokens）：按模型名前缀匹配，最长前缀优先。
+# 数字来自官方文档（2026-09 查证）：
+#   DeepSeek V4 官宣 1M，但官方 API 实测仍按 200K 限制（cherry-studio#14789）→ 保守取 200K；
+#   deepseek-chat / deepseek-flash（V4.1 Flash）官方 API 档 128K
+#   GLM-5.2 / GLM-5.3 = 1M；GLM-5 / GLM-4.6 = 200K        （docs.z.ai/guides/llm/glm-5.3）
+#   Qwen3.8-Max ≈ 1M（983,616）；qwen3.8-flash 原生 262,144 （qwen.ai 官方博客）
+#   Kimi K3 = 1M；K2.x 系列 = 256K                         （platform.kimi.ai）
+_MODEL_CONTEXT_WINDOWS: tuple[tuple[str, int], ...] = (
+    ("deepseek-v4", 200_000),
+    ("deepseek", 128_000),
+    ("kimi-k3", 1_000_000),
+    ("kimi", 256_000),
+    ("glm-5.3", 1_000_000),
+    ("glm-5.2", 1_000_000),
+    ("glm-5", 200_000),
+    ("glm-4", 200_000),
+    ("qwen3.8-max", 1_000_000),
+    ("qwen3.8", 262_144),
+    ("qwen3", 262_144),
+    ("qwen", 131_072),
+)
+
+# 自定义 / 未收录模型的上下文窗口下限：现代模型均在 128k 以上
+MIN_CONTEXT_WINDOW_TOKENS = 128_000
+
+
+def resolve_context_window(model: str, explicit: int | None = None) -> int:
+    """解析某模型的上下文窗口（tokens）。
+
+    优先级：provider 条目显式 context_window > 官方规格表（最长前缀命中）
+    > 全局 LLM_CONTEXT_WINDOW_TOKENS（但不低于 128k 下限——自定义模型至少 128k）。
+    """
+    if isinstance(explicit, int) and not isinstance(explicit, bool) and explicit > 0:
+        return explicit
+    name = (model or "").strip().lower()
+    best_prefix, best_window = "", 0
+    for prefix, window in _MODEL_CONTEXT_WINDOWS:
+        if name.startswith(prefix) and len(prefix) > len(best_prefix):
+            best_prefix, best_window = prefix, window
+    if best_window:
+        return best_window
+    try:
+        fallback = int(os.getenv("LLM_CONTEXT_WINDOW_TOKENS", "128000"))
+    except ValueError:
+        fallback = MIN_CONTEXT_WINDOW_TOKENS
+    return max(fallback, MIN_CONTEXT_WINDOW_TOKENS)
+
+
+def _context_window_for(model: str, cw: Any) -> int | None:
+    """provider 条目的 context_window 字段 → 该模型的显式值。
+
+    int 作用于该供应商全部模型；dict 按模型名单独指定（如
+    {"deepseek-v4-pro": 200000}）；bool/负数/0 等脏值一律忽略。
+    """
+    if isinstance(cw, bool):
+        return None
+    if isinstance(cw, int) and cw > 0:
+        return cw
+    if isinstance(cw, dict):
+        v = cw.get(model)
+        if isinstance(v, int) and not isinstance(v, bool) and v > 0:
+            return int(v)
+    return None
 
 
 def _resolve_active_model(pool: list[str], provider_name: str) -> str:
@@ -50,6 +118,8 @@ def _parse_llm_providers_from_env() -> list[LlmProviderSpec]:
       1) LLM_PROVIDERS_JSON: 完整列表，如
            [{"name":"primary","base_url":"https://api.deepseek.com/v1","model":"deepseek-v4-flash"},...]
          条目可选 "models": [模型池]，展开为同供应商多模型 fallback 链
+         条目可选 "context_window"：int 作用于该供应商全部模型；dict 按模型名单独指定。
+         未配置时按模型名查官方规格表（_MODEL_CONTEXT_WINDOWS），未收录模型不低于 128k。
       2) 旧版环境变量组合（JSON 未配时自动生成单元素列表）：
            LLM_BASE_URL + LLM_API_KEY + LLM_MODEL + LLM_FALLBACKS(追加 + mock)
     """
@@ -83,15 +153,25 @@ def _parse_llm_providers_from_env() -> list[LlmProviderSpec]:
                         or os.getenv("LLM_API_KEY", "sk-dummy-key"),
                         "temperature": float(item.get("temperature", 0.1)),
                     }
+                    # 可选请求头（如 OpenCode Go 要求 x-opencode-session），统一作用于该供应商展开的全部模型
+                    headers = item.get("headers")
+                    if isinstance(headers, dict) and headers:
+                        base["headers"] = {
+                            str(k): str(v) for k, v in headers.items() if str(v).strip()
+                        }
                     name = item.get("name") or f"llm-{len(result)}"
                     active = _resolve_active_model(pool, name)
                     ordered = [active, *(m for m in pool if m != active)]
                     for i, m in enumerate(ordered):
-                        result.append({
+                        spec: LlmProviderSpec = {
                             "name": name if i == 0 else f"{name}:{m}",
                             **base,
                             "model": m,
-                        })
+                        }
+                        cw_val = _context_window_for(m, item.get("context_window"))
+                        if cw_val is not None:
+                            spec["context_window"] = cw_val
+                        result.append(spec)
                 if result:
                     return result
         except json.JSONDecodeError:
@@ -102,7 +182,7 @@ def _parse_llm_providers_from_env() -> list[LlmProviderSpec]:
         "name": "primary",
         "base_url": os.getenv("LLM_BASE_URL", "https://api.deepseek.com/v1"),
         "api_key": os.getenv("LLM_API_KEY", "sk-dummy-key"),
-        "model": os.getenv("LLM_MODEL", "deepseek-v4-flash"),
+        "model": os.getenv("LLM_MODEL", "deepseek-flash"),
         "temperature": float(os.getenv("LLM_TEMPERATURE", "0.1")),
     }
     providers = [primary]
@@ -145,7 +225,9 @@ class Settings:
 
         # SPEC 5.5 每日 token 预算，0 = 不限
         self.LLM_TOKEN_BUDGET_DAILY: int = int(os.getenv("LLM_TOKEN_BUDGET_DAILY", "0"))
-        # LLM context window 上限（粗略字节估算，按 1 token ≈ 4 chars）
+        # 全局 context window 兜底（tokens，粗略按 1 token ≈ 3.5 chars 估算）：
+        # 未知/自定义模型的下限（不低于 128k）；已知模型按 config._MODEL_CONTEXT_WINDOWS
+        # 官方规格、或 provider 条目显式 context_window 优先（见 resolve_context_window）
         self.LLM_CONTEXT_WINDOW_TOKENS: int = int(
             os.getenv("LLM_CONTEXT_WINDOW_TOKENS", "128000")
         )

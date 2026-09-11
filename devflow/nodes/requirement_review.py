@@ -24,7 +24,7 @@ from langchain_core.messages import AIMessage
 from langgraph.types import interrupt
 
 from ..schemas import empty_requirement, has_project_code
-from ..state import SOURCE_INFERRED, SOURCE_USER, GlobalState
+from ..state import SOURCE_INFERRED, SOURCE_MOCK, SOURCE_USER, GlobalState
 
 # 需求字段展示规格：(点路径, 中文标签, 值类型)
 # 值类型给前端选控件：text 多行 / str 单行 / list 每行一项 / bool 勾选
@@ -67,14 +67,19 @@ def requirement_fields(
             "kind": kind,
             "value": _get(req, key),
             "source": src.get(key) or "",
-            "inferred": src.get(key) == SOURCE_INFERRED,
+            # mock 兜底编造的字段视同推断：重点标注、强制确认
+            "inferred": src.get(key) in (SOURCE_INFERRED, SOURCE_MOCK),
         }
         for key, label, kind in REQUIREMENT_FIELD_SPEC
     ]
 
 
 def inferred_fields(sources: dict[str, str] | None) -> list[str]:
-    return [k for k, v in (sources or {}).items() if v == SOURCE_INFERRED]
+    """需要人工确认的字段：AI 推断的 + mock 兜底编造的（都不是用户原话依据）。"""
+    return [
+        k for k, v in (sources or {}).items()
+        if v in (SOURCE_INFERRED, SOURCE_MOCK)
+    ]
 
 
 def _needs_review(state: GlobalState) -> bool:
