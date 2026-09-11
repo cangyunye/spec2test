@@ -12,6 +12,9 @@ const S = {
   graph: null, report: null, health: null, noCode: false, testCardEl: null,
   autoScroll: true, live: new Map(), theme: document.documentElement.dataset.theme || "dark",
   mermaidReady: false,
+  lastSeq: 0,        // 事件游标：断线重连/换会话回来按此补齐丢失进度
+  history: [],       // 回退锚点（GET /history，新→旧）
+  pendingEdit: null, // 「编辑重发」流程中：回退完成后放回输入框的原文
 };
 
 /* 是否提供项目代码：true=代码模式（检索/生成）；false=仅需求模式（直接出端到端用例） */
@@ -135,6 +138,15 @@ function buildStepper() {
   nav.innerHTML = "";
   STEPS.forEach(([id, label], i) => {
     const step = h("div", "step"); step.dataset.s = id;
+    if (STAGE_REVERT_NODE[id]) {
+      step.title = "点击回退到此步骤并重跑下游";
+      step.onclick = () => {
+        if (S.running) { toast("流程推进中", "等当前步骤暂停后再回退", "err"); return; }
+        const anchor = anchorForNode(STAGE_REVERT_NODE[id]);
+        if (!anchor) { toast("该步骤还没有可回退的存档", "流程执行到这一步后即可回退", "err"); return; }
+        openRevertModal(anchor);
+      };
+    }
     const dot = h("span", "step-dot mono"); dot.textContent = String(i + 1).padStart(2, "0");
     step.appendChild(dot);
     step.appendChild(h("span", "step-label", label));
@@ -188,8 +200,11 @@ $("feed")?.addEventListener("scroll", () => {
 function addUserMsg(text) {
   const m = h("div", "msg me");
   m.appendChild(h("span", "who", "YOU"));
-  const b = h("div", "bubble", text);
-  m.appendChild(b);
+  m.appendChild(h("div", "bubble", text));
+  const edit = h("button", "msg-edit", "✎ 编辑重发");
+  edit.title = "回退到本条消息发出前，修改后重新执行";
+  edit.onclick = (e) => { e.stopPropagation(); editAndResend(m, text); };
+  m.appendChild(edit);
   feedAppend(m);
 }
 function addAiMsg(text, label) {
@@ -233,7 +248,7 @@ function addModeChoice() {
       btns.querySelectorAll(".mc-btn").forEach((x) => { x.disabled = true; });
       addUserMsg(text);
       setRunning(true);
-      startStream({ op: "message", text });
+      startRun({ op: "message", text });
     };
     return b;
   };
@@ -344,6 +359,8 @@ function renderGraphCard(graph) {
   actions.appendChild(miniBtn("1:1", () => { gState = { s: 1, tx: 0, ty: 0 }; gApply($("gCanvas"), $("gZoom")); }, "重置视图"));
   actions.appendChild(miniBtn("⧉ 复制源码", () => copyText(graph.mermaid_source, "Mermaid 源码已复制")));
   actions.appendChild(miniBtn("↓ .mmd", () => download(`logic-${graph.graph_id || S.tid}.mmd`, graph.mermaid_source)));
+  actions.appendChild(miniBtn("⟲ 重制图", () => openRevertForNode("graph_type_select"),
+    "回退到选定图种类的时点（可顺带修改需求），重新生成逻辑图"));
 
   const vp = h("div", "graph-vp");
   const canvas = h("div", "graph-canvas"); canvas.id = "gCanvas";
@@ -461,7 +478,9 @@ function renderContextCard(items) {
 
 /* 代码变更卡片 */
 function renderChangesCard(changes) {
-  const { card } = cardShell(`CODE CHANGES · 代码变更 · ${changes.length}`);
+  const { card, actions } = cardShell(`CODE CHANGES · 代码变更 · ${changes.length}`);
+  actions.appendChild(miniBtn("⟲ 重新生成", () => openRevertForNode("graph_render"),
+    "回退到图表渲染完成的时点，重新生成代码"));
   const body = h("div", "card-body");
   changes.forEach((ch) => {
     const box = h("div", "diff-file");
@@ -526,6 +545,8 @@ function renderTestCard(report) {
   S.report = report;
   const cases = (report.test_cases || []).map(normCase);
   const { card, actions } = cardShell(`TEST DESIGN · 测试场景 · ${cases.length}`);
+  actions.appendChild(miniBtn("⟲ 重新设计", () => openRevertForNode("checklist_route_gate"),
+    "回退到清单确认后的时点，重新设计测试用例"));
 
   // 测试概述（总-分结构的总文档；方法论来自 doc-based/functional testcase-generator skills）
   if (report.overview || (report.self_check || []).length) {
@@ -730,32 +751,20 @@ function renderExportBar() {
   feedAppend(card);
 }
 
-/* ── SSE（POST + fetch 流式读取；消息全文走请求体，规避 URL 长度 400） ── */
+/* ── 运行提交 + 事件订阅 ───────────────────────────────
+   POST 提交立即返回；进度统一走 GET /events 订阅：
+   服务端按游标(seq)回放缓冲 + 实时 tail，断线自动重连补齐，浏览器关闭后
+   回来打开会话也能接上正在推进的流程（run 在服务端继续，与客户端无关）。 */
 
-let streamAbort = null, sawEnd = false;
+let evtAbort = null, sawEnd = false, evtBackoff = 350, evtGotAny = false;
 
-function startStream(params) {
-  stopStream();
-  sawEnd = false;
-  const ctrl = new AbortController();
-  streamAbort = ctrl;
+function stopEvents() {
+  if (evtAbort) { evtAbort.abort(); evtAbort = null; }
+}
 
-  const deliver = (frame) => {
-    const line = frame.split("\n").find((l) => l.startsWith("data:"));
-    if (!line) return;
-    let e; try { e = JSON.parse(line.slice(5).trim()); } catch { return; }
-    if (e.type === "stream_end") { sawEnd = true; stopStream(); onStreamEnd(e); return; }
-    onEvent(e);
-  };
-  const abortNotice = () => {
-    stopStream();
-    if (!sawEnd) {
-      setRunning(false);
-      toast("连接中断", "与服务的连接断开，最后一步可能未完成；可重发上一条消息继续。", "err");
-      updateComposer();
-    }
-  };
-
+/* 提交一次推进（用户消息 / 门禁决策）。成功后立即挂事件流。 */
+async function startRun(params) {
+  if (!S.tid) return false;
   const isGate = params.op === "gate";
   let fields = null;
   if (params.fields) { try { fields = JSON.parse(params.fields); } catch { fields = null; } }
@@ -768,47 +777,88 @@ function startStream(params) {
         fields,
       }
     : { text: params.text || "" });
+  try {
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+    });
+    if (resp.status === 409) {
+      // 服务端该会话已有 run 在跑（如另一端提交/重启续跑）：直接接上实时进度
+      toast("该会话正在推进中", "已接上正在进行的实时进度");
+      setRunning(true);
+      attachEvents();
+      return false;
+    }
+    if (!resp.ok) {
+      let detail = "";
+      try { detail = (await resp.text()).slice(0, 140); } catch { /* 忽略 */ }
+      toast(`提交失败（HTTP ${resp.status}）`, detail || "服务返回错误", "err");
+      setRunning(false); updateComposer();
+      return false;
+    }
+  } catch (err) {
+    toast("连接中断", "与服务器的连接失败，请检查服务是否在运行", "err");
+    setRunning(false); updateComposer();
+    return false;
+  }
+  attachEvents();
+  return true;
+}
+
+/* 订阅当前会话事件流；连接断开自动按游标重连续看，直到收到 stream_end。 */
+function attachEvents() {
+  stopEvents();
+  sawEnd = false;
+  const ctrl = new AbortController();
+  evtAbort = ctrl;
+
+  const deliverFrame = (frame) => {
+    const line = frame.split("\n").find((l) => l.startsWith("data:"));
+    if (!line) return;  // ": ping" 保活注释行
+    let e; try { e = JSON.parse(line.slice(5).trim()); } catch { return; }
+    if (e.type === "stream_meta") { S.serverRunning = !!e.running; return; }
+    if (typeof e.seq === "number") S.lastSeq = Math.max(S.lastSeq, e.seq);
+    evtGotAny = true;
+    if (e.type === "stream_end") { sawEnd = true; stopEvents(); onStreamEnd(e); return; }
+    onEvent(e);
+  };
 
   (async () => {
-    try {
-      const resp = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body,
-        signal: ctrl.signal,
-      });
-      if (!resp.ok || !resp.body) {
-        let detail = "";
-        try { detail = (await resp.text()).slice(0, 140); } catch { /* 忽略 */ }
-        toast(`请求失败（HTTP ${resp.status}）`, detail || "服务返回错误", "err");
-        stopStream(); setRunning(false); updateComposer();
+    while (!ctrl.signal.aborted) {
+      evtGotAny = false;
+      try {
+        const resp = await fetch(`/api/sessions/${S.tid}/events?after=${S.lastSeq}`, { signal: ctrl.signal });
+        if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
+        evtBackoff = 350;
+        const reader = resp.body.getReader();
+        const dec = new TextDecoder();
+        let buf = "";
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true });
+          let idx;
+          while ((idx = buf.indexOf("\n\n")) >= 0) {
+            const frame = buf.slice(0, idx);
+            buf = buf.slice(idx + 2);
+            if (frame.trim()) deliverFrame(frame);
+          }
+        }
+      } catch (err) {
+        if (err && err.name === "AbortError") return;  // 主动 detach（换会话/收尾）
+      }
+      if (sawEnd || ctrl.signal.aborted) return;
+      if (!evtGotAny && S.serverRunning === false) {
+        // 服务端无进行中的 run，回放也已完整：不再空转重连
+        setRunning(false); updateComposer();
         return;
       }
-      const reader = resp.body.getReader();
-      const dec = new TextDecoder();
-      let buf = "";
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, { stream: true });
-        let idx;
-        while ((idx = buf.indexOf("\n\n")) >= 0) {
-          const frame = buf.slice(0, idx).trim();
-          buf = buf.slice(idx + 2);
-          if (frame) deliver(frame);
-        }
-      }
-      if (buf.trim()) deliver(buf.trim());
-      abortNotice();  // 服务端正常收尾前连接断开：与旧 onerror 行为一致
-    } catch (err) {
-      if (err && err.name === "AbortError") return;  // 主动 stopStream，不算异常
-      toast("连接中断", "与服务的连接断开，最后一步可能未完成；可重发上一条消息继续。", "err");
-      stopStream(); setRunning(false); updateComposer();
+      // 断线：指数退避重连，服务端按游标补发丢失事件
+      await new Promise((r) => setTimeout(r, evtBackoff));
+      evtBackoff = Math.min(8000, evtBackoff * 2);
     }
   })();
-}
-function stopStream() {
-  if (streamAbort) { streamAbort.abort(); streamAbort = null; }
 }
 
 function setRunning(on) {
@@ -847,7 +897,9 @@ function onEvent(e) {
       S.lastNodeAt = now;
       liveFinalize(e.node);
       if (e.node !== "compress_messages") {
-        addDivider(`${e.label} ✓`, dur);
+        const d = addDivider(`${e.label} ✓`, dur);
+        d.dataset.node = e.node;
+        attachRevertBtn(d);
       }
       break;
     }
@@ -910,6 +962,7 @@ function onStreamEnd(e) {
   liveClearAll();
   flushPendingLive();
   refreshSessions();
+  loadHistory();  // 刷新回退锚点（本轮新落盘的步骤变为可回退点）
   if (S.gate) {
     const gateStage = S.gate === "graph_review" ? "graph_review"
       : S.gate === "graph_type_select" ? "graph"
@@ -1162,7 +1215,7 @@ function pickGraphType(typeId, label) {
   addDivider(`已选图种类 · ${label}`, typeId, true);
   setStep(1, true);
   setRunning(true);
-  startStream({ op: "gate", decision: typeId, comment: "" });
+  startRun({ op: "gate", decision: typeId, comment: "" });
   toast("图种类已选定", `开始按「${label}」制图`);
 }
 
@@ -1311,7 +1364,7 @@ function submitGate(decision, comment) {
   }
   if (decision === "approve") setStep(stepIdxForStage(gate) + 1, true);
   setRunning(true);
-  startStream(isRoute
+  startRun(isRoute
     ? { op: "gate", decision: routeDecision, comment: "", selected }
     : isReqReview
       ? { op: "gate", decision: decision === "approve" ? "confirm" : "reject", comment: comment || "", fields }
@@ -1533,11 +1586,12 @@ async function refreshSessions() {
       return;
     }
     data.forEach((s) => {
-      const li = h("li", "sess" + (s.thread_id === S.tid ? " active" : ""));
+      const li = h("li", "sess" + (s.thread_id === S.tid ? " active" : "") + (s.running ? " running" : ""));
       li.appendChild(h("div", "sess-title", s.title || "（未命名需求）"));
       const meta = h("div", "sess-meta");
       meta.appendChild(h("span", "sess-stage" + (s.thread_id === S.tid ? " on" : ""), stageName(s.stage) || s.stage));
       if (s.has_graph) meta.appendChild(h("span", "sess-graph", "◆ 已有逻辑图"));
+      if (s.running) meta.appendChild(h("span", "sess-run", "● 运行中"));
       li.appendChild(meta);
       const del = h("button", "sess-del", "✕");
       del.title = "删除会话";
@@ -1564,13 +1618,17 @@ async function refreshSessions() {
 }
 
 async function openSession(tid) {
-  if (S.running) { toast("请等待当前流程结束", "会话切换将在流程暂停后可用", "err"); return; }
+  // 换会话随时允许：旧会话若有 run 在推进，服务端会继续跑完，回来时按游标续看
+  stopEvents();
   try {
     const snap = await api(`/api/sessions/${tid}`);
     resetFeed();
     S.tid = tid;
+    localStorage.setItem("df-last-tid", tid);
     updateCfgBtn();
     S.gate = null; S.graph = null; S.report = null;
+    S.history = [];
+    S.lastSeq = Number(snap.last_seq || 0);
     const vals = snap.values || {};
     // 回放对话
     (vals.messages || []).forEach((m) => {
@@ -1578,11 +1636,13 @@ async function openSession(tid) {
       if (!c) return;
       if (m.type === "human") addUserMsg(c); else addAiMsg(c);
     });
-    // 回放产物
+    // 回放产物（先拉步骤轨迹，产物卡上的回退按钮要用锚点数据）
+    await loadHistory();
     if (vals.code_context?.length) renderContextCard(vals.code_context);
     if (vals.logic_graph) renderGraphCard(vals.logic_graph);
     if (vals.code_changes?.length) renderChangesCard(vals.code_changes);
     if (vals.test_report) renderTestCard(vals.test_report);
+    renderStepTrail();
     // 阶段（先定模式再画步骤条，仅需求模式跳过检索/生成两步）
     S.noCode = reqNoCode(vals.requirement);
     S.stage = snap.stage || "clarify";
@@ -1640,12 +1700,191 @@ async function openSession(tid) {
       });
     }
     addDivider(`已恢复会话 ${tid}`, stageName(S.stage), true);
+    // 断线/误关浏览器恢复：服务端仍在推进 → 立即接上实时进度（历史由快照回放）
+    if (snap.running) {
+      setRunning(true);
+      attachEvents();
+      addSysLine("● 流程正在服务端推进，已接上实时进度", "ok");
+    } else {
+      setRunning(false);
+    }
     refreshSessions();
     closeSidebar();
     updateComposer();
   } catch (err) {
     toast("打开会话失败", err.message, "err");
+    if (S.tid === tid) {
+      S.tid = null;
+      localStorage.removeItem("df-last-tid");
+      showEmptyState();
+      updateComposer();
+    }
   }
+}
+
+/* ── 步骤回退（time-travel）─────────────────────────── */
+
+/* 顶部步骤条 → 代表性回退锚点（回退到该节点刚完成，重跑其下游） */
+const STAGE_REVERT_NODE = {
+  clarify: "clarify_extract", graph: "graph_type_select", graph_review: "graph_generate",
+  search: "code_search", code: "graph_render", test: "checklist_route_gate", review: "test_run",
+};
+
+async function loadHistory() {
+  if (!S.tid) { S.history = []; return; }
+  try {
+    const r = await api(`/api/sessions/${S.tid}/history`);
+    S.history = r.steps || [];
+  } catch { S.history = []; }
+}
+
+function anchorForNode(node) {
+  return S.history.find((s) => s.node === node) || null;  // 列表新→旧，取最近一次
+}
+
+/* 步骤分隔线上的「⟲ 从此重来」按钮 */
+function attachRevertBtn(d) {
+  const btn = h("button", "revert-dot", "⟲ 从此重来");
+  btn.title = "回退到该步骤刚完成的时点，重跑之后的流程";
+  btn.onclick = (e) => {
+    e.stopPropagation();
+    openRevertForNode(d.dataset.node);
+  };
+  d.appendChild(btn);
+}
+
+/* 步骤轨迹卡：会话恢复后各步骤的回退入口（折叠，点标题展开） */
+function renderStepTrail() {
+  if (!S.history.length) return;
+  const { card } = cardShell(`STEP TRAIL · 步骤轨迹 · ${S.history.length} 步（点步骤可回退重跑）`);
+  card.classList.add("trail");
+  card.onclick = (e) => {
+    if (e.target.closest(".trail-row")) return;
+    card.classList.toggle("open");
+  };
+  const list = h("div", "trail-list");
+  [...S.history].reverse().forEach((s) => {
+    const row = h("div", "trail-row");
+    row.appendChild(h("span", "trail-label", s.label || s.node));
+    if (s.ts) row.appendChild(h("span", "trail-ts mono", new Date(s.ts).toLocaleTimeString()));
+    row.appendChild(miniBtn("⟲", () => openRevertModal(s), "回退到此步并重跑下游"));
+    list.appendChild(row);
+  });
+  card.appendChild(list);
+  feedAppend(card);
+}
+
+function openRevertForNode(node) {
+  const anchor = node && anchorForNode(node);
+  if (!anchor) {
+    toast("该步骤暂无可回退的存档", "流程还没执行到这一步，或存档尚未生成", "err");
+    return;
+  }
+  openRevertModal(anchor);
+}
+
+async function openRevertModal(anchor, opts = {}) {
+  if (!anchor) {
+    toast("找不到可回退的存档点", "这条消息之前没有已落盘的步骤", "err");
+    return;
+  }
+  if (S.running) {
+    toast("流程推进中", "等当前步骤暂停（门禁或完成）后再回退", "err");
+    return;
+  }
+  S.revertCheckpointId = anchor.checkpoint_id;
+  S.rrEdits = {};
+  const body = $("revertBody");
+  body.innerHTML = "";
+  const head = h("div", "rv-anchor");
+  head.appendChild(h("b", null, `⟲ ${anchor.label || anchor.node}`));
+  if (anchor.ts) head.appendChild(h("span", "mono", new Date(anchor.ts).toLocaleString()));
+  body.appendChild(head);
+
+  // 将作废并重跑的下游步骤（历史里比锚点更新的步骤，倒序展示 = 执行顺序）
+  const i = S.history.findIndex((s) => s.checkpoint_id === anchor.checkpoint_id);
+  const down = i >= 0 ? [...S.history.slice(0, i)].reverse() : [];
+  const wrap = h("div", "rv-down");
+  wrap.appendChild(h("div", "rv-down-title", down.length
+    ? `以下 ${down.length} 步的产出将作废并重跑：`
+    : "该步骤之后暂无已落盘的产出，确认后直接从这一步继续。"));
+  if (down.length) {
+    const ul = h("ul");
+    down.forEach((s) => ul.appendChild(h("li", null, s.label || s.node)));
+    wrap.appendChild(ul);
+  }
+  body.appendChild(wrap);
+
+  // 需求就地编辑：改完随回退生效，下游按新需求执行（改需求重制图的关键入口）
+  try {
+    const rr = await api(`/api/sessions/${S.tid}/requirement-review`);
+    if ((rr.fields || []).length) {
+      const sec = h("div", "rv-req");
+      sec.appendChild(h("div", "rv-req-title", "顺带修改需求（可选）— 只有改动的字段会覆盖："));
+      sec.appendChild(gateRequirementBody(rr));
+      body.appendChild(sec);
+    }
+  } catch { /* 需求载荷拉取失败不阻塞回退 */ }
+
+  if (opts.notice) body.appendChild(h("p", "rr-hint", opts.notice));
+  $("revertHint").textContent = "";
+  $("revertModal").classList.remove("hidden");
+}
+
+async function submitRevert() {
+  if (!S.tid || !S.revertCheckpointId) return;
+  const btn = $("btnRevertGo");
+  btn.disabled = true;
+  try {
+    const fields = Object.keys(S.rrEdits || {}).length ? S.rrEdits : null;
+    const resp = await api(`/api/sessions/${S.tid}/revert`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ checkpoint_id: S.revertCheckpointId, fields }),
+    });
+    $("revertModal").classList.add("hidden");
+    S.revertCheckpointId = null;
+    toast("已回退",
+      `回到「${resp.label || resp.node}」${fields ? `（需求已改 ${Object.keys(fields).length} 处）` : ""}`
+      + (resp.restored ? ` · ${resp.restored}` : " · 下游将重跑"));
+    // 按回退后的存档重建对话流；若续跑已开始，openSession 会自动接上实时进度
+    await openSession(S.tid);
+    if (S.pendingEdit) {
+      $("chatInput").value = S.pendingEdit;
+      S.pendingEdit = null;
+      autoresize(); updateComposer();
+      $("chatInput").focus();
+    }
+  } catch (err) {
+    $("revertHint").textContent = "回退失败：" + err.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/* 「编辑重发」：第 k 条用户消息 ↔ 第 k 次开跑（compress_messages）锚点；
+   回退到其前一个存档 = 这条消息发出前的状态，原文放回输入框修改后重发。 */
+function editAndResend(msgEl, text) {
+  if (S.running || S.gate) {
+    toast("流程推进中", "等当前流程暂停后再编辑历史消息", "err");
+    return;
+  }
+  const idx = [...document.querySelectorAll("#feed .msg.me")].indexOf(msgEl);
+  const compressAnchors = [...S.history].filter((s) => s.node === "compress_messages").reverse();
+  const turnAnchor = compressAnchors[idx];
+  let pre = null;
+  if (turnAnchor) {
+    const i = S.history.findIndex((s) => s.checkpoint_id === turnAnchor.checkpoint_id);
+    pre = S.history[i + 1] || null;  // 历史新→旧；+1 = 时间上更早一步
+  }
+  if (!pre) {
+    $("chatInput").value = text;
+    autoresize(); updateComposer();
+    $("chatInput").focus();
+    toast("已放回输入框", "这条消息之前没有存档点；修改后直接发送即可");
+    return;
+  }
+  S.pendingEdit = text;
+  openRevertModal(pre, { notice: "回退到这条消息发出前；确认后原文会放回输入框，修改后重新发送。" });
 }
 
 /* ── 输入区 ──────────────────────────────────────────── */
@@ -1701,7 +1940,7 @@ function sendChat() {
   t.value = ""; autoresize();
   addUserMsg(text);
   setRunning(true);
-  startStream({ op: "message", text });
+  startRun({ op: "message", text });
 }
 
 async function createAndStart(text) {
@@ -1711,14 +1950,16 @@ async function createAndStart(text) {
       body: JSON.stringify({ set_fields: buildSetFields() }),
     });
     S.tid = thread_id;
+    localStorage.setItem("df-last-tid", thread_id);
     S.stage = "clarify";
     S.graph = null; S.report = null; S.gate = null;
+    S.history = []; S.lastSeq = 0;
     $("chatInput").value = ""; autoresize();
     resetFeed();
     setStep(0, true);
     addUserMsg(text);
     setRunning(true);
-    startStream({ op: "message", text });
+    startRun({ op: "message", text });
     renderCfgChips();
     updateCfgBtn();
     refreshSessions();
@@ -1728,11 +1969,12 @@ async function createAndStart(text) {
   }
 }
 
-/* ＋ 新会话：回到空态，等待 composer 输入 */
+/* ＋ 新会话：回到空态，等待 composer 输入（旧会话若有 run 在跑，服务端继续推进） */
 function newSession() {
-  if (S.running) { toast("请等待当前流程结束", "流程暂停后再新建会话", "err"); return; }
-  stopStream();
+  stopEvents();
   S.tid = null; S.gate = null; S.graph = null; S.report = null; S.stage = "clarify";
+  S.history = []; S.lastSeq = 0; S.pendingEdit = null;
+  localStorage.removeItem("df-last-tid");
   $("gateModal").classList.add("hidden");
   $("gatePill").classList.add("hidden");
   resetFeed();
@@ -2188,6 +2430,13 @@ function boot() {
   };
   $("btnGatePeek").onclick = closeGateToPeek;
   $("gatePill").onclick = reopenGate;
+  // 步骤回退（time-travel）
+  $("btnRevertCancel").onclick = () => {
+    $("revertModal").classList.add("hidden");
+    S.revertCheckpointId = null;
+    S.pendingEdit = null;
+  };
+  $("btnRevertGo").onclick = submitRevert;
   // 沉淀 Checklist
   $("btnDistillCancel").onclick = closeDistill;
   $("btnDistillGen").onclick = genDistill;
@@ -2202,7 +2451,11 @@ function boot() {
   updateCfgBtn();
   loadHealth();
   refreshSessions();
-  showEmptyState();
+
+  // 断线/误关浏览器恢复：自动回到上次会话（服务端 run 仍在推进时直接接上实时进度）
+  const lastTid = localStorage.getItem("df-last-tid");
+  if (lastTid) openSession(lastTid);
+  else showEmptyState();
 }
 
 boot();

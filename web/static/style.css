@@ -760,6 +760,64 @@ table.t-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 @keyframes toast-in { from { opacity: 0; transform: translateX(16px); } }
 .toast.out { transition: opacity .2s, transform .2s; opacity: 0; transform: translateX(16px); }
 
+/* ── 步骤回退（time-travel）+ 断线恢复 ───────────────── */
+
+/* 会话列表：运行中角标 */
+.sess-run { font-size: 10.5px; color: var(--ink-2); animation: sess-pulse 1.3s ease-in-out infinite; }
+@keyframes sess-pulse { 50% { opacity: .4; } }
+
+/* 用户消息 hover：编辑重发 */
+.msg.me { position: relative; }
+.msg-edit {
+  position: absolute; right: 0; top: -22px;
+  display: none; align-items: center;
+  height: 22px; padding: 0 8px; border-radius: 6px;
+  border: 1px solid var(--border); background: var(--surface); color: var(--ink-3);
+  font: 500 10.5px/1 ui-monospace, "SF Mono", Menlo, monospace; cursor: pointer;
+}
+.msg.me:hover .msg-edit { display: inline-flex; }
+.msg-edit:hover { color: var(--ink); border-color: var(--border-2); background: var(--hl); }
+
+/* 步骤分隔线 hover：从此重来 */
+.divider .revert-dot {
+  display: none; align-items: center;
+  height: 20px; padding: 0 8px; border-radius: 6px;
+  border: 1px solid var(--border); background: var(--surface); color: var(--ink-3);
+  font: 500 10px/1 ui-monospace, "SF Mono", Menlo, monospace; cursor: pointer;
+}
+.divider:hover .revert-dot { display: inline-flex; }
+.divider .revert-dot:hover { color: var(--ink); border-color: var(--border-2); background: var(--hl); }
+
+/* 步骤轨迹卡（会话恢复后的回退入口，默认折叠） */
+.card.trail .trail-list { display: none; flex-direction: column; gap: 2px; padding: 6px 15px 13px; }
+.card.trail.open .trail-list { display: flex; }
+.trail-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 5px 8px; border-radius: 7px; cursor: default;
+}
+.trail-row:hover { background: var(--hl); }
+.trail-row .trail-label { flex: 1; font-size: 12.5px; color: var(--ink-2); }
+.trail-row .trail-ts { font-size: 10.5px; color: var(--ink-4); }
+
+/* 回退确认弹窗 */
+.rv-anchor {
+  display: flex; align-items: baseline; gap: 12px;
+  padding: 10px 12px; border: 1px dashed var(--border-2); border-radius: 9px;
+}
+.rv-anchor b { font-size: 13.5px; }
+.rv-anchor span { font-size: 11px; color: var(--ink-4); }
+.rv-down { margin-top: 12px; }
+.rv-down-title { font-size: 12px; color: var(--ink-2); margin-bottom: 6px; }
+.rv-down ul { margin: 0; padding: 0 0 0 4px; list-style: none; display: flex; flex-wrap: wrap; gap: 6px; }
+.rv-down li {
+  font: 500 11px/1 ui-monospace, "SF Mono", Menlo, monospace;
+  padding: 4px 8px; border-radius: 6px;
+  border: 1px solid var(--border); color: var(--ink-3);
+  text-decoration: line-through; text-decoration-color: var(--ink-4);
+}
+.rv-req { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 12px; }
+.rv-req-title { font-size: 12px; color: var(--ink-2); margin-bottom: 8px; }
+
 /* ── 响应式 ───────────────────────────────────────── */
 .only-mobile { display: none; }
 @media (max-width: 960px) {

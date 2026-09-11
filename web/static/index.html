@@ -168,6 +168,26 @@
   </div>
 </div>
 
+<!-- ── 步骤回退模态（time-travel）────────────────────── -->
+<div id="revertModal" class="gate-overlay hidden" role="dialog" aria-modal="true">
+  <div class="gate-panel">
+    <header class="gate-head">
+      <span class="gate-tag mono">⟲ REVERT · 步骤回退</span>
+      <div class="gate-head-text">
+        <h3 id="revertTitle">从此步重来</h3>
+        <p id="revertSub" class="mono">回退到该步骤刚完成的存档点 · 之后的产出作废并按当前状态重跑</p>
+      </div>
+    </header>
+    <div class="gate-body" id="revertBody"></div>
+    <footer class="gate-foot">
+      <span id="revertHint" class="mono distill-hint"></span>
+      <span class="spacer"></span>
+      <button id="btnRevertCancel" class="btn ghost">取消</button>
+      <button id="btnRevertGo" class="btn primary">⟲ 回退并重跑下游</button>
+    </footer>
+  </div>
+</div>
+
 <div id="toasts" class="toasts"></div>
 
 <script src="/static/app.js"></script>

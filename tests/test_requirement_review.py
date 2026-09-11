@@ -305,10 +305,6 @@ class TestRouteAndWiring:
         # 无附加信息仍是裸字符串（旧门禁兼容）
         assert _gate_resume("confirm").resume == "confirm"
 
-    def test_query_fields_parsing(self):
-        from web.server import _parse_fields
+    # 注：query 版 fields 解析（_parse_fields）随 GET /stream 端点一并移除，
+    # POST /gates 的 fields 走 JSON body（dict），无需字符串解析。
 
-        assert _parse_fields('{"a": 1}') == {"a": 1}
-        assert _parse_fields("") is None
-        assert _parse_fields("not-json") is None
-        assert _parse_fields("[1,2]") is None  # 非 dict 忽略

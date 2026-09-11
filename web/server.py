@@ -3,8 +3,13 @@
 架构原则：
   - 图/checkpoint/provider 全量复用 devflow.orchestrator / cli 辅助
   - 事件协议与 CLI 共用 devflow.events.events_from_stream（单一事件源）
-  - SSE 下行（GET + EventSource），POST 上行（消息 / 门禁决策 / 文档解析）
-  - 同一线程同一时刻只允许一个 SSE 流（per-tid 锁），防止 checkpoint 并发写
+  - 推进请求（POST message/gate/revert）立即返回，图在后台线程跑完；
+    进度经 per-tid RunBus 缓冲（seq 单调递增），GET /events 订阅：
+    先回放缓冲（after=游标，断线重连零丢失），再实时 tail 到 stream_end。
+    客户端断开/换会话/关浏览器都不影响运行，回来按游标续看。
+  - 同一会话同一时刻只允许一个 run（per-tid 锁），防 checkpoint 并发写
+  - 进行中的 run 落 data/runs/<tid>.json 标记：服务重启时扫描，对停在
+    非门禁节点（半途）的会话自动 stream(None) 续跑
 
 启动：
   cp .env.example .env   # 填 key；不填则 Mock 兜底模式
@@ -14,7 +19,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import time
 import uuid
+from collections import deque
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +41,7 @@ from devflow.doc_reader import read_doc
 from devflow.doctor import first_run_notice
 from devflow.events import events_from_stream
 from devflow.orchestrator import _get_sqlite_conn, build_graph_with_providers, initial_state
+from devflow.timetravel import list_steps, revert as revert_thread
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -45,6 +55,177 @@ def _tid_lock(tid: str) -> asyncio.Lock:
     if tid not in _tid_locks:
         _tid_locks[tid] = asyncio.Lock()
     return _tid_locks[tid]
+
+
+# ═══════════════════════════════════════════════════════════════════
+# RunBus：per-tid 运行事件总线（缓冲重放 + 多客户端实时订阅）
+# ═══════════════════════════════════════════════════════════════════
+
+
+@dataclass
+class RunBus:
+    seq: int = 0                                    # 会话内单调递增游标（跨 run 不清零）
+    buffer: deque = field(default_factory=deque)    # [(seq, event)]，本 run 全部事件
+    subscribers: set = field(default_factory=set)   # 实时订阅者的 asyncio.Queue
+    running: bool = False
+    task: asyncio.Task | None = None
+
+
+_buses: dict[str, RunBus] = {}
+
+
+def _bus(tid: str) -> RunBus:
+    if tid not in _buses:
+        _buses[tid] = RunBus()
+    return _buses[tid]
+
+
+def _session_running(tid: str) -> bool:
+    return _bus(tid).running or _tid_lock(tid).locked()
+
+
+# ── run 落盘标记：服务重启时扫描续跑 ────────────────────────────────
+
+
+def _runs_dir() -> Path:
+    return Path(settings.CHECKPOINT_SQLITE_PATH).parent / "runs"
+
+
+def _mark_run(tid: str) -> None:
+    try:
+        d = _runs_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{tid}.json").write_text(
+            json.dumps({"started_at": time.time(), "pid": os.getpid()}), encoding="utf-8"
+        )
+    except OSError:
+        pass  # 标记尽力而为；失败只影响重启续跑
+
+
+def _clear_run_mark(tid: str) -> None:
+    try:
+        (_runs_dir() / f"{tid}.json").unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+# interrupt 门禁节点：停在这些位置 = 等用户决策，重启后不自动跑
+_GATE_NODES = {"requirement_review", "graph_type_select", "graph_review",
+               "checklist_route_gate", "review"}
+
+
+def _gate_pending(graph: Any, tid: str) -> bool:
+    """会话是否停在门禁 interrupt 上（有挂起 task 且带 interrupts）。
+
+    不能只看 snap.next 非空——新建会话 update_state 后 next 也非空。
+    此时从消息通道再发输入会从 START 重跑一轮、脱离挂起点的恢复上下文，
+    必须先由门禁通道（Command(resume)）完成决策。
+    """
+    try:
+        snap = graph.get_state(_config(thread_id=tid))
+    except Exception:  # noqa: BLE001 - 状态读取失败不拦消息，交给正常流程暴露问题
+        return False
+    for task in getattr(snap, "tasks", ()) or ():
+        if getattr(task, "interrupts", None):
+            return True
+    return False
+
+
+async def start_run(tid: str, input_msg: Any) -> dict[str, Any]:
+    """把一次图推进放到后台执行，事件进 RunBus；立即返回。
+
+    同一会话已有 run 在跑 → accepted=False。消费进度走 GET /events 订阅。
+    """
+    bus = _bus(tid)
+    lock = _tid_lock(tid)
+    if bus.running or lock.locked():
+        return {"accepted": False, "reason": "该会话正在推进中"}
+    await lock.acquire()
+    bus.running = True
+    bus.buffer.clear()  # seq 继续递增，旧游标依然有效
+    graph = build_graph_with_providers()
+    bus.task = asyncio.create_task(_run_graph(graph, tid, input_msg, bus, lock))
+    _mark_run(tid)
+    return {"accepted": True, "last_seq": bus.seq}
+
+
+async def _run_graph(graph: Any, tid: str, input_msg: Any, bus: RunBus, lock: asyncio.Lock) -> None:
+    """后台推进图：同步 stream → to_thread → 事件写总线并广播。客户端断开无感。"""
+    q: asyncio.Queue = asyncio.Queue()
+
+    def run() -> None:
+        try:
+            for event in events_from_stream(
+                graph.stream(input_msg, _config(thread_id=tid),
+                             stream_mode=["updates", "messages", "custom"])
+            ):
+                q.put_nowait(event)
+        except Exception as e:  # noqa: BLE001 — 事件流内任何异常都要落到前端
+            q.put_nowait({"type": "error", "error": str(e)})
+        finally:
+            q.put_nowait({"type": "stream_end", "stage": "paused"})
+
+    thread_task = asyncio.create_task(asyncio.to_thread(run))
+    try:
+        while True:
+            event = await asyncio.wait_for(q.get(), timeout=600)
+            bus.seq += 1
+            bus.buffer.append((bus.seq, event))
+            for sub in list(bus.subscribers):
+                sub.put_nowait((bus.seq, event))
+            if event.get("type") == "stream_end":
+                break
+    except asyncio.TimeoutError:
+        event = {"type": "error", "error": "推进超时（单事件等待超过 600s），已结束本次运行"}
+        bus.seq += 1
+        bus.buffer.append((bus.seq, event))
+        for sub in list(bus.subscribers):
+            sub.put_nowait((bus.seq, event))
+    except Exception as e:  # noqa: BLE001
+        event = {"type": "error", "error": str(e)}
+        bus.seq += 1
+        bus.buffer.append((bus.seq, event))
+        for sub in list(bus.subscribers):
+            sub.put_nowait((bus.seq, event))
+    finally:
+        bus.running = False
+        bus.task = None
+        _clear_run_mark(tid)
+        if not thread_task.done():
+            await asyncio.shield(thread_task)  # 跑完落盘（断线/超时后的收尾与旧版一致）
+        lock.release()
+
+
+async def _events_gen(bus: RunBus, after: int):
+    """SSE 生成器：先回放缓冲 seq>after，再实时 tail；run 结束（stream_end）后关闭。
+
+    空闲 15s 发 SSE 注释行保活；首帧 stream_meta 让客户端对齐游标与运行态。
+    """
+    q: asyncio.Queue = asyncio.Queue()
+    bus.subscribers.add(q)  # 先订阅再回放：间隙事件进 q，按 seq 去重，零丢失
+    seen = after
+    try:
+        yield _sse({"type": "stream_meta", "seq": bus.seq, "running": bus.running})
+        for seq, ev in list(bus.buffer):
+            if seq > after:
+                seen = seq
+                yield _sse({**ev, "seq": seq})
+        if not bus.running and bus.buffer and bus.buffer[-1][1].get("type") == "stream_end":
+            return  # 上一轮已完整结束，回放完即收
+        while True:
+            try:
+                seq, ev = await asyncio.wait_for(q.get(), timeout=15)
+            except asyncio.TimeoutError:
+                yield ": ping\n\n"
+                continue
+            if seq <= seen:
+                continue
+            seen = seq
+            yield _sse({**ev, "seq": seq})
+            if ev.get("type") == "stream_end":
+                return
+    finally:
+        bus.subscribers.discard(q)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -92,7 +273,7 @@ def create_session(body: CreateSession) -> dict[str, Any]:
     if body.set_fields:
         state["requirement"] = apply_assignments(state["requirement"], body.set_fields)
     # 只写初始 checkpoint，不跑任何节点（省一次空澄清 LLM 调用）；
-    # 首条用户消息经由 /stream 推进 compress → clarify_extract
+    # 首条用户消息经由 POST /messages 推进 compress → clarify_extract
     graph.update_state(_config(thread_id=tid), state)
     return {"thread_id": tid, "stage": "clarify"}
 
@@ -128,6 +309,7 @@ def list_sessions() -> list[dict[str, Any]]:
     for tid, _ in rows[:50]:
         entry: dict[str, Any] = {
             "thread_id": tid, "title": "", "stage": "clarify", "has_graph": False,
+            "running": _session_running(tid), "last_seq": _bus(tid).seq,
         }
         try:
             vals = graph.get_state(_config(thread_id=tid)).values or {}
@@ -157,12 +339,57 @@ def session_state(tid: str) -> dict[str, Any]:
         snap = graph.get_state(_config(thread_id=tid))
     except Exception as e:
         raise HTTPException(404, f"会话不存在或读取失败: {e}")
+    bus = _bus(tid)
     return {
         "thread_id": tid,
         "stage": (snap.values or {}).get("current_stage", "clarify"),
         "next": list(snap.next or []),
         "values": _serialize_state(snap.values),
+        "running": _session_running(tid),
+        "last_seq": bus.seq,
     }
+
+
+@app.get("/api/sessions/{tid}/history")
+def session_history(tid: str) -> dict[str, Any]:
+    """回退锚点清单（新→旧）：每条 = 一次节点落盘的检查点。
+
+    前端用它给对话流里的步骤分隔线/产物卡挂「从此步重来」入口。
+    """
+    if not _thread_exists(tid):
+        raise HTTPException(404, f"会话不存在: {tid}")
+    graph = build_graph_with_providers()
+    try:
+        return {"steps": list_steps(graph, tid), "running": _session_running(tid)}
+    except Exception as e:
+        raise HTTPException(500, f"读取检查点历史失败: {e}")
+
+
+class RevertBody(BaseModel):
+    checkpoint_id: str
+    fields: dict[str, Any] | None = None  # 需求就地编辑（dot-path → 值），随回退生效
+
+
+@app.post("/api/sessions/{tid}/revert")
+async def revert_session(tid: str, body: RevertBody) -> dict[str, Any]:
+    """回退到某步骤（节点刚落盘的检查点）并自动续跑下游。
+
+    时序：先开新分支（清下游字段 / 可选改需求 / 跨落盘点还原备份文件），
+    再从新分支 tip 以 stream(None) 推进——进度走 GET /events 订阅。
+    """
+    if not _thread_exists(tid):
+        raise HTTPException(404, f"会话不存在: {tid}")
+    if _session_running(tid):
+        raise HTTPException(409, "该会话正在推进中，请等当前流程结束或暂停后再回退")
+    graph = build_graph_with_providers()
+    try:
+        info = revert_thread(graph, tid, body.checkpoint_id, fields=body.fields)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"回退失败: {e}")
+    started = await start_run(tid, None)  # 从新分支 tip 续跑；轮末锚点会立即 stream_end
+    return {**info, "run": started}
 
 
 @app.get("/api/sessions/{tid}/graph-type-candidates")
@@ -260,6 +487,8 @@ def _serialize_state(values: Any) -> dict[str, Any]:
 def delete_session(tid: str) -> dict[str, Any]:
     if not _thread_exists(tid):
         raise HTTPException(404, f"会话不存在: {tid}")
+    if _session_running(tid):
+        raise HTTPException(409, "会话正在推进中，先等流程暂停再删除")
     conn = _get_sqlite_conn()
     for table in ("checkpoints", "writes"):
         try:
@@ -267,6 +496,8 @@ def delete_session(tid: str) -> dict[str, Any]:
         except Exception:
             pass  # 表不存在则跳过
     conn.commit()
+    _clear_run_mark(tid)
+    _buses.pop(tid, None)
     return {"deleted": tid}
 
 
@@ -618,7 +849,7 @@ def commit_checklist(tid: str, body: DistillCommit) -> dict[str, Any]:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# SSE 流（消息 / 门禁决策）
+# SSE 流（事件订阅）+ 推进入口（消息 / 门禁决策 / 回退）
 # ═══════════════════════════════════════════════════════════════════
 
 
@@ -626,92 +857,19 @@ def _sse(payload: dict[str, Any]) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
 
 
-async def _sse_from_sync_stream(graph: Any, input_msg: dict[str, Any], tid: str):
-    """同步 stream（同步 SqliteSaver 不支持 astream）→ SSE 事件流。
+@app.get("/api/sessions/{tid}/events")
+async def events_stream(tid: str, after: int = 0) -> StreamingResponse:
+    """订阅会话进度（SSE）：回放缓冲 seq>after → 实时 tail 到 stream_end。
 
-    to_thread 跑生成器，asyncio.Queue 桥接回事件循环，零新依赖。
-    双流模式 ["updates", "messages"]：节点完成事件 + LLM token 增量。
+    断线重连带上次游标即可补齐丢失事件；浏览器关闭/换会话后回来同样适用。
     """
-    lock = _tid_lock(tid)
-    if lock.locked():
-        yield _sse({"type": "error", "error": "该会话正在推进中，请稍候"})
-        yield _sse({"type": "stream_end", "stage": "busy"})
-        return
-    async with lock:
-        q: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-
-        def run() -> None:
-            try:
-                for event in events_from_stream(
-                    graph.stream(
-                        input_msg, _config(thread_id=tid),
-                        stream_mode=["updates", "messages", "custom"],
-                    )
-                ):
-                    q.put_nowait(event)
-            except Exception as e:
-                q.put_nowait({"type": "error", "error": str(e)})
-            finally:
-                q.put_nowait({"type": "stream_end", "stage": "paused"})
-
-        task = asyncio.create_task(asyncio.to_thread(run))
-        try:
-            while True:
-                event = await asyncio.wait_for(q.get(), timeout=600)
-                yield _sse(event)
-                if event.get("type") == "stream_end":
-                    break
-        except asyncio.CancelledError:
-            raise  # 客户端断开：让 Starlette 取消，to_thread 任务继续无害运行
-        finally:
-            if not task.done():
-                await asyncio.shield(task)
-
-
-@app.post("/api/sessions/{tid}/messages")
-async def send_message(tid: str, body: SendMessage) -> StreamingResponse:
     if not _thread_exists(tid):
         raise HTTPException(404, f"会话不存在: {tid}")
-    graph = build_graph_with_providers()
     return StreamingResponse(
-        _sse_from_sync_stream(graph, {"messages": [HumanMessage(content=body.text)]}, tid),
+        _events_gen(_bus(tid), max(0, after)),
         media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
-
-
-@app.get("/api/sessions/{tid}/stream")
-async def stream_sse(
-    tid: str, op: str, text: str = "", decision: str = "", comment: str = "",
-    selected: str = "", fields: str = "",
-) -> StreamingResponse:
-    """浏览器 EventSource 用：GET + query 参数。
-
-    op=message&text=<用户消息> ；
-    op=gate&decision=approve|reject[&comment=<意见>][&selected=<逗号分隔业务路径>]
-            [&fields=<需求确认门禁的就地修改 JSON>] 。
-    """
-    if not _thread_exists(tid):
-        raise HTTPException(404, f"会话不存在: {tid}")
-    graph = build_graph_with_providers()
-    if op == "gate":
-        input_msg: Any = _gate_resume(decision, comment, selected, _parse_fields(fields))
-    else:
-        input_msg = {"messages": [HumanMessage(content=text)]}
-    return StreamingResponse(
-        _sse_from_sync_stream(graph, input_msg, tid), media_type="text/event-stream"
-    )
-
-
-def _parse_fields(fields: str) -> dict[str, Any] | None:
-    """query 里的 fields（JSON 字符串）→ dict；空/非法一律忽略（不当成错误）。"""
-    raw = (fields or "").strip()
-    if not raw:
-        return None
-    try:
-        parsed = json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
-        return None
-    return parsed if isinstance(parsed, dict) else None
 
 
 def _gate_resume(
@@ -735,17 +893,66 @@ def _gate_resume(
     return Command(resume=decision)
 
 
-@app.post("/api/sessions/{tid}/gates")
-async def decide_gate(tid: str, body: GateDecision) -> StreamingResponse:
+@app.post("/api/sessions/{tid}/messages")
+async def send_message(tid: str, body: SendMessage) -> dict[str, Any]:
+    """提交用户消息：立即返回，进度走 GET /events 订阅。"""
     if not _thread_exists(tid):
         raise HTTPException(404, f"会话不存在: {tid}")
-    graph = build_graph_with_providers()
+    if _gate_pending(build_graph_with_providers(), tid):
+        raise HTTPException(409, "当前有等待确认的门禁，请先在门禁卡片上完成选择，再继续对话")
+    result = await start_run(tid, {"messages": [HumanMessage(content=body.text)]})
+    if not result.get("accepted"):
+        raise HTTPException(409, result.get("reason", "该会话正在推进中"))
+    return result
+
+
+@app.post("/api/sessions/{tid}/gates")
+async def decide_gate(tid: str, body: GateDecision) -> dict[str, Any]:
+    """提交门禁决策：立即返回，进度走 GET /events 订阅。"""
+    if not _thread_exists(tid):
+        raise HTTPException(404, f"会话不存在: {tid}")
     input_msg: Any = _gate_resume(
         body.decision, body.comment or "", ",".join(body.selected or []), body.fields
     )
-    return StreamingResponse(
-        _sse_from_sync_stream(graph, input_msg, tid), media_type="text/event-stream"
-    )
+    result = await start_run(tid, input_msg)
+    if not result.get("accepted"):
+        raise HTTPException(409, result.get("reason", "该会话正在推进中"))
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 服务重启：扫描进行中标记，对停在半途的会话自动续跑
+# ═══════════════════════════════════════════════════════════════════
+
+
+@app.on_event("startup")
+async def resume_interrupted_runs() -> None:
+    """重启续跑：上次进程内跑到一半的会话，从最后 checkpoint 自动推进到下一暂停点。
+
+    只续跑停在「非门禁节点」的会话——门禁挂起说明在等用户决策，保持等待。
+    """
+    d = _runs_dir()
+    if not d.is_dir():
+        return
+    marks = list(d.glob("*.json"))
+    if not marks:
+        return
+    print(f"[resume] 发现 {len(marks)} 个进行中标记，尝试自动续跑", flush=True)
+    graph = build_graph_with_providers()
+    for f in marks:
+        tid = f.stem
+        f.unlink(missing_ok=True)  # 标记先清掉；续跑真正启动时 start_run 会重打
+        try:
+            if not _thread_exists(tid):
+                continue
+            next_nodes = [str(n) for n in (graph.get_state(_config(thread_id=tid)).next or [])]
+            if not next_nodes or set(next_nodes) & _GATE_NODES:
+                print(f"[resume] {tid} 停在门禁/轮末（{next_nodes or 'END'}），保持等待用户", flush=True)
+                continue
+            result = await start_run(tid, None)
+            print(f"[resume] {tid} 已自动续跑: accepted={result.get('accepted')}", flush=True)
+        except Exception as e:  # noqa: BLE001 — 单会话续跑失败不影响其余
+            print(f"[resume] {tid} 续跑失败: {e}", flush=True)
 
 
 # ═══════════════════════════════════════════════════════════════════

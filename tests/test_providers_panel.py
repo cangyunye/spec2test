@@ -251,11 +251,15 @@ class TestDisableAndSticky:
 
 
 class TestPostMessageStream:
-    """消息走 POST 请求体（修长文本 GET URL 400）：50KB 文本必须正常出流。"""
+    """消息走 POST 请求体（修长文本 GET URL 400）：50KB 文本必须正常推进不报错。
+
+    2026-09 架构调整后 POST /messages 立即返回，进度进 RunBus 缓冲；
+    本用例改为校验 accepted + 缓冲事件流的完整收尾（等价断言）。
+    """
 
     @pytest.mark.asyncio
     async def test_50kb_text_streams_without_error(self):
-        import json
+        import asyncio
 
         import web.server as srv
 
@@ -263,17 +267,17 @@ class TestPostMessageStream:
             type("C", (), {"thread_id": None, "set_fields": []})()
         )["thread_id"]
         big_text = "需求：商城下单支付流程，含库存校验与超时取消。" * 2600  # ≈50KB
-        resp = await srv.send_message(tid, srv.SendMessage(text=big_text))
-        assert resp.status_code == 200
+        result = await srv.send_message(tid, srv.SendMessage(text=big_text))
+        assert result["accepted"] is True
 
-        payloads = []
-        async for chunk in resp.body_iterator:
-            for line in str(chunk).splitlines():
-                if line.startswith("data:"):
-                    try:
-                        payloads.append(json.loads(line[5:].strip()))
-                    except Exception:
-                        pass
+        bus = srv._bus(tid)
+        for _ in range(600):  # 最多等 30s：mock 图推进很快
+            if not bus.running:
+                break
+            await asyncio.sleep(0.05)
+        assert not bus.running, "run 未在限时内结束"
+
+        payloads = [e for _, e in bus.buffer]
         kinds = [e.get("type") for e in payloads]
         assert "stream_end" in kinds, f"流未正常收尾: {kinds[-6:]}"
         assert "error" not in kinds, (
