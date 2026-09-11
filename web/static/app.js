@@ -343,7 +343,7 @@ function renderGraphCard(graph) {
   actions.appendChild(miniBtn("＋", () => { gState.s = Math.min(3, gState.s + .15); gApply($("gCanvas"), $("gZoom")); }, "放大"));
   actions.appendChild(miniBtn("1:1", () => { gState = { s: 1, tx: 0, ty: 0 }; gApply($("gCanvas"), $("gZoom")); }, "重置视图"));
   actions.appendChild(miniBtn("⧉ 复制源码", () => copyText(graph.mermaid_source, "Mermaid 源码已复制")));
-  actions.appendChild(miniBtn("⭳ .mmd", () => download(`logic-${graph.graph_id || S.tid}.mmd`, graph.mermaid_source)));
+  actions.appendChild(miniBtn("↓ .mmd", () => download(`logic-${graph.graph_id || S.tid}.mmd`, graph.mermaid_source)));
 
   const vp = h("div", "graph-vp");
   const canvas = h("div", "graph-canvas"); canvas.id = "gCanvas";
@@ -620,8 +620,8 @@ function renderTestCard(report) {
   renderRows();
 
   // 导出
-  actions.appendChild(miniBtn("⭳ CSV", () => exportTestCSV(cases), "导出 CSV（Excel 可开）"));
-  actions.appendChild(miniBtn("⭳ MD", () => exportTestMD(cases, report), "导出 Markdown（总-分结构）"));
+  actions.appendChild(miniBtn("↓ CSV", () => exportTestCSV(cases), "导出 CSV（Excel 可开）"));
+  actions.appendChild(miniBtn("↓ MD", () => exportTestMD(cases, report), "导出 Markdown（总-分结构）"));
   actions.appendChild(miniBtn("⧉ 复制", () => copyText(testToMD(cases, report), "测试用例文档已复制")));
   if (cases.length) {
     actions.appendChild(miniBtn("☰ 沉淀", () => openDistill(report), "勾选有效用例，AI 归纳为业务检查清单入库"));
@@ -715,17 +715,17 @@ function renderExportBar() {
   const { card } = cardShell("EXPORT · 导出交付物");
   const bar = h("div", "exportbar");
   bar.appendChild(h("span", "t", "把本会话全部产物（需求 / 逻辑图 / 变更 / 测试场景）打包带走："));
-  bar.appendChild(miniBtn("⭳ Markdown 汇总", async () => {
+  bar.appendChild(miniBtn("↓ Markdown 汇总", async () => {
     const resp = await fetch(`/api/sessions/${S.tid}/export?format=md`);
     download(`devflow-${S.tid}.md`, await resp.text(), "text/markdown;charset=utf-8");
     toast("已导出", "Markdown 汇总");
   }));
-  bar.appendChild(miniBtn("⭳ JSON", async () => {
+  bar.appendChild(miniBtn("↓ JSON", async () => {
     const resp = await fetch(`/api/sessions/${S.tid}/export?format=json`);
     download(`devflow-${S.tid}.json`, JSON.stringify(await resp.json(), null, 2), "application/json");
     toast("已导出", "结构化 JSON");
   }));
-  if (S.report) bar.appendChild(miniBtn("⭳ 测试 CSV", () => exportTestCSV((S.report.test_cases || []).map(normCase))));
+  if (S.report) bar.appendChild(miniBtn("↓ 测试 CSV", () => exportTestCSV((S.report.test_cases || []).map(normCase))));
   card.appendChild(bar);
   feedAppend(card);
 }
