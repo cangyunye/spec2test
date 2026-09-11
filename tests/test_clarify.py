@@ -762,3 +762,100 @@ class TestExtractSources:
             requirement_sources={"project_context": "inferred"},
         )
         assert out["requirement_sources"] == {"project_context": "inferred"}
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 抽取改走 json_schema 档（部分网关 function_calling 会截断 tool_call 参数）
+# + 长输入零抽取的静默失败可见化
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestJsonSchemaExtraction:
+    async def _extract(self, monkeypatch, payload, user_text="给商城下单支付加库存校验", **state_over):
+        captured: dict = {}
+
+        async def fake(**kwargs):
+            captured.update(kwargs)
+            return payload
+
+        async def fake_title(**kwargs):
+            return "下单支付"
+
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_json", fake)
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_text", fake_title)
+        state = {
+            "messages": [HumanMessage(content=user_text)],
+            "requirement": empty_requirement(),
+            "session_title": "已有标题",
+        } | state_over
+        return await clarify_extract_async(state), captured  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_extract_passes_json_schema_not_response_model(self, monkeypatch):
+        out, captured = await self._extract(monkeypatch, {"project_context": "x"})
+        assert captured.get("response_model") is None
+        schema = captured.get("json_schema")
+        assert schema and "req_type" in schema.get("properties", {})
+
+    @pytest.mark.asyncio
+    async def test_schema_violation_recorded_as_retryable_failure(self, monkeypatch):
+        """字段类型不合规（json_schema 档不做 pydantic 校验）→ 在节点内补校验并显式报错。"""
+        out, _ = await self._extract(monkeypatch, {"req_type": 123})
+        assert out["last_error"] and "RequirementExtract" in out["last_error"]
+        assert out["last_error_retryable"] is True
+
+    @pytest.mark.asyncio
+    async def test_no_progress_flag_long_input_zero_extraction(self, monkeypatch):
+        out, _ = await self._extract(
+            monkeypatch, {},
+            user_text="我们是一个商城系统，这次要做下单支付流程，涉及库存校验、超时取消和状态流转，请帮我们整理需求",
+        )
+        assert out["clarify_round_no_progress"] is True
+        assert out["clarify_round_user_chars"] >= 30
+
+    @pytest.mark.asyncio
+    async def test_short_input_zero_extraction_not_flagged(self, monkeypatch):
+        out, _ = await self._extract(monkeypatch, {}, user_text="继续")
+        assert out["clarify_round_no_progress"] is False
+        assert out["clarify_round_user_chars"] == 2
+
+    @pytest.mark.asyncio
+    async def test_real_extraction_clears_no_progress(self, monkeypatch):
+        out, _ = await self._extract(monkeypatch, {"project_context": "商城下单支付"})
+        assert out["clarify_round_no_progress"] is False
+
+
+class TestBuildQuestionNoProgressWarn:
+    @pytest.mark.asyncio
+    async def test_long_input_zero_extraction_warns_user(self, monkeypatch):
+        async def fake(**kwargs):
+            return "请补充项目背景与验收标准。"
+
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_text", fake)
+        state = {
+            "messages": [HumanMessage(content="一大段长描述")],
+            "missing_fields": ["project_context"],
+            "clarify_round_no_progress": True,
+            "clarify_round_user_chars": 120,
+        }
+        from devflow.nodes.clarify import clarify_build_question_async
+
+        out = await clarify_build_question_async(state)  # type: ignore[arg-type]
+        content = out["messages"][0].content
+        assert "没能从中抽取到新的需求字段" in content
+        assert "请补充项目背景与验收标准" in content  # 原追问仍在
+
+    @pytest.mark.asyncio
+    async def test_no_flag_no_warning(self, monkeypatch):
+        async def fake(**kwargs):
+            return "请补充项目背景。"
+
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_text", fake)
+        state = {
+            "messages": [HumanMessage(content="长描述")],
+            "missing_fields": ["project_context"],
+        }
+        from devflow.nodes.clarify import clarify_build_question_async
+
+        out = await clarify_build_question_async(state)  # type: ignore[arg-type]
+        assert "没能从中抽取到新的需求字段" not in out["messages"][0].content

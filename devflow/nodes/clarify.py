@@ -30,10 +30,15 @@ from typing import Any
 
 from langchain_core.messages import AIMessage
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from ..config import settings
-from ..errors import CLARIFY_LOOP_EXHAUSTED, ClarifyLoopExhaustedError, DevFlowError
+from ..errors import (
+    CLARIFY_LOOP_EXHAUSTED,
+    ClarifyLoopExhaustedError,
+    DevFlowError,
+    LlmOutputFormatError,
+)
 from ..llm_client import invoke_json, invoke_text
 from ..schemas import (
     REQUIREMENT_SCHEMA,
@@ -218,7 +223,7 @@ async def clarify_extract_async(state: GlobalState) -> dict[str, Any]:
 
     # 若完全没用户输入，直接返回（不做事）
     if not latest_user_text.strip():
-        return {"requirement": existing, **ok_ret}
+        return {"requirement": existing, "clarify_round_user_chars": 0, **ok_ret}
 
     # 1.5 模式切换指令识别（短路）；mode_update 会透传到本轮所有返回路径
     mode_update: dict[str, Any] = {}
@@ -230,9 +235,13 @@ async def clarify_extract_async(state: GlobalState) -> dict[str, Any]:
         if residual:
             latest_user_text = residual  # 指令后带的补充内容仍做一次抽取
         else:
-            return {"requirement": existing, **ok_ret, **mode_update}
+            return {"requirement": existing, "clarify_round_user_chars": 0, **ok_ret, **mode_update}
 
     # 2. LLM 结构化抽取
+    # 走 json_schema 档（裸补全 + 本地解析）而非 response_model 的 function_calling 档：
+    # 部分 OpenAI 兼容网关的 tool_call 参数会被截断——实测同一网关 function_calling 只填
+    # req_type + target_modules 两个字段、其余全 null，残缺需求被当成功、下游反复追问；
+    # json_mode 则 9 个字段全填齐。字段类型安全由下方 model_validate 兜底（不合规 → 可重试）。
     try:
         extracted = await invoke_json(
             system_prompt=SYSTEM_PROMPT_EXTRACT,
@@ -241,9 +250,19 @@ async def clarify_extract_async(state: GlobalState) -> dict[str, Any]:
                 latest_ai_message=latest_ai_text or "（无）",
                 latest_user_message=latest_user_text,
             ),
-            response_model=RequirementExtract,
+            json_schema=RequirementExtract.model_json_schema(),
             response_type="requirement_extract",
         )
+        # json_schema 档只保证「是 JSON object」，字段级类型安全在这里补校验；
+        # 不合规抛可重试的 OUTPUT_FORMAT，由既有的 except DevFlowError 路径提示重试。
+        try:
+            RequirementExtract.model_validate(extracted)
+        except ValidationError as ve:
+            raise LlmOutputFormatError(
+                f"需求抽取结果不符合 RequirementExtract schema: {ve}",
+                validation_errors=[err["msg"] for err in ve.errors()],
+                extra={"raw_tail": str(extracted)[:200]},
+            ) from ve
     except DevFlowError as e:
         retry = state.get("retry_count", {}) or {}
         retry["clarify_extract"] = retry.get("clarify_extract", 0) + 1
@@ -305,6 +324,11 @@ async def clarify_extract_async(state: GlobalState) -> dict[str, Any]:
     out_req: dict[str, Any] = {
         "requirement": merged,
         "requirement_sources": sources,
+        # 本轮用户输入长度 + 是否「有输入但啥也没抽出」：build_question 据此识别
+        # 结构化输出静默失败（长输入零抽取，首轮也会命中），明确告知用户回答没写入
+        "clarify_round_user_chars": len(latest_user_text.strip()),
+        "clarify_round_no_progress": merged == existing
+        and len(latest_user_text.strip()) >= 30,
         **title_update,
         "last_error": None,
         "last_error_code": None,
@@ -542,15 +566,24 @@ async def clarify_build_question_async(state: GlobalState) -> dict[str, Any]:
         # 兜底：直接把缺失字段原样展示给用户
         text = fallback + f"\n(LLM 出错: {e})"
 
-    # 失败可见化：last_error 非空 ⇒ 本轮 clarify_extract 失败（成功时节点会写 None 清掉）。
-    # 此时 requirement 没有更新，用户上一轮的回答等于没被记录——必须明说，
-    # 否则表现为「反复重复同一个问题清单」，用户无从知道抽取在失败。
+    # 失败可见化（两条触发路径）：
+    #   a) last_error 非空 → 上轮 clarify_extract 抛错（成功时节点会写 None 清掉）；
+    #   b) 上轮用户输入很长（≥30 字）却什么都没抽出来（requirement 未变）——
+    #      多为结构化输出没按 schema 落地（静默空壳/截断），首轮也会命中。
+    # 命中任一即明说「回答没被写入」，否则表现为反复重复同一份问题清单，
+    # 用户无从知道是抽取在失败还是需求本身不完整。
     err_code = state.get("last_error_code")
     if err_code:
         err_msg = str(state.get("last_error") or "")[:160]
         text = (
             f"⚠️ 上一轮回答的需求抽取失败（[{err_code}] {err_msg}），"
             "你的回答这次没能写入需求清单，请重试一次或换种说法。\n\n" + text
+        )
+    elif state.get("clarify_round_no_progress"):
+        text = (
+            "⚠️ 你上一条消息内容不少，但本轮没能从中抽取到新的需求字段"
+            "（疑似模型输出异常或被截断），你的回答这次没能写入需求清单。"
+            "请重试一次或把关键信息拆开逐条说明。\n\n" + text
         )
 
     # 选择卡只在普通模式首轮出现一次（键序保证事件在 AI 追问之后触发，卡片落在问题下方）

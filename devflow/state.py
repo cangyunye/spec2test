@@ -169,6 +169,8 @@ class GlobalState(TypedDict, total=False):
     clarify_mode: Literal["normal", "brainstorm", "grill"]   # 澄清模式：普通列表 / 头脑风暴 / 拷问
     clarify_mode_prompt: bool                # 首轮追问后弹「头脑风暴 / 拷问」选择卡（一次即收）
     missing_fields: list[str]                # 校验节点输出的缺失字段/错误
+    clarify_round_user_chars: int            # 本轮用户输入长度（观测 + 静默失败识别）
+    clarify_round_no_progress: bool          # 本轮有输入（≥30字）却零抽取：抽取静默失败
     requirement_confirmed: bool              # 制图前需求确认门禁是否已通过（抽取到新信息时重置）
     requirement_sources: dict[str, str]      # 需求字段来源：field → "user"（用户原话）/ "inferred"（AI 推断）
     review_feedback: Optional[str]           # 门禁 reject 时用户填写的修改意见
