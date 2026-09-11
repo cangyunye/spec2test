@@ -851,7 +851,15 @@ async def invoke_text(
             _mark_provider_success(p_spec)
             return str(content)
 
-        policy = RetryPolicy(max_attempts=max_retries + 1, base_backoff=1.0, deadline_total=120.0)
+        # 单次调用必须限时：慢模型/流式拖尾会吃满总 deadline（120s），表现为
+        # check-llm（20s 单发探针）通过、真实调用却 DEADLINE.EXCEEDED 全走 Mock。
+        # 45s 单发上限保证单次尝试能失败并轮换下一个 provider，而不是拖垮整个 deadline。
+        policy = RetryPolicy(
+            max_attempts=max_retries + 1,
+            base_backoff=1.0,
+            deadline_total=120.0,
+            timeout_per_attempt=45.0,
+        )
         dec = retry_with_backoff(policy, wrap_context=f"llm.invoke_text[{p_spec['name']}]")
         do_run = dec(_run)
 
@@ -916,7 +924,14 @@ async def _invoke_json_once(
                 return obj.model_dump(mode="json")
             return dict(obj)
 
-        pol = RetryPolicy(max_attempts=max_retries + 1, base_backoff=1.0, deadline_total=180.0)
+        # 同 invoke_text：单次调用限时（结构化输出更大更慢，给 60s），
+        # 避免慢模型把 180s 总 deadline 拖空——超时即失败并轮换下一个 provider。
+        pol = RetryPolicy(
+            max_attempts=max_retries + 1,
+            base_backoff=1.0,
+            deadline_total=180.0,
+            timeout_per_attempt=60.0,
+        )
         dec = retry_with_backoff(pol, wrap_context=f"llm.structured:{model_spec}")
         do_run = dec(run_structured)
         try:
