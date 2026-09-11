@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import asyncio
+
+import pytest
 import json
 from typing import Any
 
@@ -155,3 +157,129 @@ class TestMockMermaid:
         src = json.loads(msg.content)["mermaid_source"]
         assert "\n" in src and "\\n" not in src
         assert mermaid_problems(sanitize_mermaid(src)) == []
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 空壳检测 + 结构化数据确定性重建（网关截断 mermaid_source 的兜底）
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestStubRebuild:
+    def test_stub_detection(self):
+        from devflow.mermaid_fix import is_stub_mermaid
+
+        assert is_stub_mermaid("", "flowchart")
+        assert is_stub_mermaid("flowchart TD", "flowchart")
+        assert is_stub_mermaid("sequenceDiagram", "sequence")
+        assert not is_stub_mermaid("flowchart TD\n  a[提交订单] --> b[校验库存]", "flowchart")
+
+    def test_rebuild_flowchart(self):
+        from devflow.mermaid_fix import mermaid_problems, rebuild_mermaid_source
+
+        src = rebuild_mermaid_source({
+            "nodes": [
+                {"node_id": "n-1", "label": '提交"订单"', "node_type": "io"},
+                {"node_id": "n-2", "label": "校验库存", "node_type": "module"},
+            ],
+            "edges": [
+                {"from_node": "n-1", "to_node": "n-2", "condition": "库存充足"},
+                {"from_node": "n-1", "to_node": "n-9", "condition": "坏边"},
+            ],
+        }, "flowchart")
+        assert src and src.startswith("flowchart TD")
+        assert 'n-1["提交#quot;订单#quot;"]' in src  # 标签引号被转义
+        assert 'n-1 -->|"库存充足"| n-2' in src
+        assert "n-9" not in src  # 指向不存在节点的坏边被剔除
+        assert mermaid_problems(src, "flowchart") == []
+
+    def test_rebuild_sequence(self):
+        from devflow.mermaid_fix import rebuild_mermaid_source
+
+        src = rebuild_mermaid_source({
+            "participants": [
+                {"alias": "USER", "label": "操作用户", "kind": "actor"},
+                {"alias": "APP", "label": "商城", "kind": "service"},
+            ],
+            "messages": [
+                {"from_participant": "USER", "to_participant": "APP",
+                 "kind": "sync", "label": "提交订单"},
+                {"from_participant": "APP", "to_participant": "USER",
+                 "kind": "return", "label": "返回订单号"},
+            ],
+        }, "sequence")
+        assert "sequenceDiagram" in src
+        assert "actor USER as 操作用户" in src
+        assert "USER ->> APP: 提交订单" in src
+        assert "APP -->> USER: 返回订单号" in src
+
+    def test_rebuild_state(self):
+        from devflow.mermaid_fix import rebuild_mermaid_source
+
+        src = rebuild_mermaid_source({
+            "states": [
+                {"state_id": "s_pay", "label": "待支付", "kind": "normal"},
+                {"state_id": "s_done", "label": "已支付", "kind": "final"},
+            ],
+            "transitions": [
+                {"from_state": "s_pay", "to_state": "s_done", "event": "扣款成功"},
+            ],
+        }, "state")
+        assert "stateDiagram-v2" in src
+        assert "s_pay : 待支付" in src
+        assert "s_pay --> s_done: 扣款成功" in src
+
+    def test_rebuild_er(self):
+        from devflow.mermaid_fix import mermaid_problems, rebuild_mermaid_source
+
+        src = rebuild_mermaid_source({
+            "entities": [
+                {"e_id": "e-order", "table": "ORDER",
+                 "attributes": [{"name": "order_id", "type": "int", "is_pk": True}]},
+                {"e_id": "e-user", "table": "USER", "attributes": []},
+            ],
+            "relations": [
+                {"from_entity": "e-user", "to_entity": "e-order",
+                 "cardinality": "one_to_many", "label": "places"},
+            ],
+        }, "er")
+        assert "erDiagram" in src and "ORDER {" in src
+        assert "int order_id PK" in src
+        assert "USER ||--o{ ORDER : places" in src
+        assert mermaid_problems(src, "er") == []
+
+    def test_rebuild_returns_none_when_data_insufficient(self):
+        from devflow.mermaid_fix import rebuild_mermaid_source
+
+        assert rebuild_mermaid_source({"nodes": []}, "flowchart") is None
+        assert rebuild_mermaid_source({"entities": [{"e_id": "x"}]}, "er") is None
+        assert rebuild_mermaid_source({}, "unknown") is None
+
+    @pytest.mark.asyncio
+    async def test_graph_generate_rebuilds_stub_mermaid(self, monkeypatch):
+        """集成：LLM 返回结构化数据完整但 mermaid_source 是空壳 → 自动重建。"""
+        import devflow.nodes.graph_gen as gg
+
+        async def fake(**kwargs):
+            return {
+                "nodes": [
+                    {"node_id": "n-1", "label": "提交订单", "node_type": "io",
+                     "code_ref": None, "is_modified": True},
+                    {"node_id": "n-2", "label": "校验库存", "node_type": "module",
+                     "code_ref": None, "is_modified": True},
+                ],
+                "edges": [
+                    {"edge_id": "e-1", "from_node": "n-1", "to_node": "n-2",
+                     "edge_type": "call", "condition": "库存充足", "is_modified": True},
+                ],
+                "mermaid_source": "flowchart TD",  # 空壳（网关截断形态）
+            }
+
+        monkeypatch.setattr(gg, "invoke_json", fake)
+        state = {"graph_type": "flowchart",
+                 "requirement": {"project_context": "商城下单支付"},
+                 "code_context": []}
+        out = await gg.graph_generate_async(state)  # type: ignore[arg-type]
+        lg = out["logic_graph"]
+        assert lg is not None and "提交订单" in lg["mermaid_source"]
+        assert "n-1 -->" in lg["mermaid_source"]
+        assert out["last_error"] is None

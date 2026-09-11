@@ -17,7 +17,12 @@ from pydantic import BaseModel, Field
 
 from ..graph_types import normalize_graph_type
 from ..llm_client import invoke_json
-from ..mermaid_fix import mermaid_problems, sanitize_mermaid
+from ..mermaid_fix import (
+    is_stub_mermaid,
+    mermaid_problems,
+    rebuild_mermaid_source,
+    sanitize_mermaid,
+)
 from ..schemas import new_graph_id, validate_logic_graph
 from ..state import GlobalState
 
@@ -328,6 +333,17 @@ async def graph_generate_async(state: GlobalState) -> dict[str, Any]:
     # Mermaid 语法自检修复：剥代码块围栏、字面量 \n、（flowchart）特殊字符标签补引号、
     # 缺声明行自动补齐（详见 mermaid_fix 模块 docstring）
     mermaid_source = sanitize_mermaid(str(result["mermaid_source"] or ""), graph_type)
+    # 网关在 function calling 下偶发把 mermaid_source 截断成只剩声明行的空壳，
+    # 而同响应的结构化数据（nodes/edges/participants/…）完整独立——用结构化数据
+    # 确定性重建，保证渲染图与结构一致且必定可渲染
+    if is_stub_mermaid(mermaid_source, graph_type):
+        rebuilt = rebuild_mermaid_source(_dump(result), graph_type)
+        if rebuilt:
+            import logging
+            logging.getLogger(__name__).warning(
+                "mermaid_source 为空壳（疑似网关截断），已从结构化数据重建"
+            )
+            mermaid_source = rebuilt
     residual = mermaid_problems(mermaid_source, graph_type)
     if residual:
         # 修不干净的问题仅记录，不阻断流程（前端有源码视图兜底）

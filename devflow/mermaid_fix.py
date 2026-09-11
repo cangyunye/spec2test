@@ -15,6 +15,7 @@ sanitize_mermaid 按 1→5 逐项修复。标签加引号与 classDef 补齐是 
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from .graph_types import DEFAULT_GRAPH_TYPE, graph_type_meta
 
@@ -179,3 +180,117 @@ def mermaid_problems(src: str, graph_type: str = DEFAULT_GRAPH_TYPE) -> list[str
         if missing:
             problems.append(f"使用了未定义的 class: {', '.join(sorted(missing))}")
     return problems
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 空壳检测 + 结构化数据确定性重建
+# ═══════════════════════════════════════════════════════════════════
+
+def is_stub_mermaid(src: str, graph_type: str = DEFAULT_GRAPH_TYPE) -> bool:
+    """判断 Mermaid 源码是否只是声明头的空壳（无任何节点/连线）。
+
+    网关在 function calling 下偶发把 mermaid_source 截断成只剩声明行
+    （如「flowchart TD」），而同响应里的结构化数据（nodes/edges/…）完整独立。
+    """
+    problems = mermaid_problems(src, graph_type)
+    return "mermaid 源码为空" in problems or "没有任何节点或连线" in problems
+
+
+def _esc_label(text: Any) -> str:
+    """转义标签里可能破坏 mermaid 语法的引号（mermaid 支持 #quot; 实体）。"""
+    return str(text).replace('"', "#quot;")
+
+
+_ER_CARDINALITY_TOKENS: dict[str, str] = {
+    "one_to_one": "||--||",
+    "one_to_many": "||--o{",
+    "many_to_one": "}o--||",
+    "many_to_many": "}o--o{",
+}
+
+
+def rebuild_mermaid_source(graph: dict[str, Any], graph_type: str) -> str | None:
+    """从结构化数据确定性重建 Mermaid 源码；结构化数据不全时返回 None（保持原样）。
+
+    mermaid_source 是模型独立产出、且最容易被网关截断的字段；而 nodes/edges、
+    participants/messages、states/transitions、entities/relations 与它同源但各自
+    完整。空壳时用它重建，保证渲染图与结构一致且必定可渲染。
+    """
+    if graph_type == "er":
+        entities = graph.get("entities") or []
+        relations = graph.get("relations") or []
+        if len(entities) < 2:
+            return None
+        name_of = {e.get("e_id"): e.get("table") for e in entities}
+        lines = ["erDiagram"]
+        for e in entities:
+            lines.append(f"{e.get('table')} {{")
+            for a in e.get("attributes") or []:
+                pk = " PK" if a.get("is_pk") else ""
+                lines.append(f"  {a.get('type') or 'string'} {a.get('name')}{pk}")
+            lines.append("  }")
+        for r in relations:
+            frm = name_of.get(r.get("from_entity"))
+            to = name_of.get(r.get("to_entity"))
+            if not frm or not to:
+                continue
+            token = _ER_CARDINALITY_TOKENS.get(r.get("cardinality"), "||--o{")
+            lines.append(f"  {frm} {token} {to} : {r.get('label') or 'relates'}")
+        return "\n".join(lines) + "\n"
+
+    if graph_type == "flowchart":
+        nodes = graph.get("nodes") or []
+        edges = graph.get("edges") or []
+        if not nodes or not edges:
+            return None
+        node_ids = {n["node_id"] for n in nodes}
+        lines = ["flowchart TD"]
+        for n in nodes:
+            label = _esc_label(n.get("label") or n["node_id"])
+            lines.append(f'{n["node_id"]}["{label}"]')
+        for e in edges:
+            if e.get("from_node") in node_ids and e.get("to_node") in node_ids:
+                cond = f'|"{_esc_label(e["condition"])}"|' if e.get("condition") else ""
+                lines.append(f'{e["from_node"]} -->{cond} {e["to_node"]}')
+        return "\n".join(lines) + "\n"
+
+    if graph_type == "sequence":
+        participants = graph.get("participants") or []
+        messages = graph.get("messages") or []
+        if not participants:
+            return None
+        aliases = {p["alias"] for p in participants}
+        lines = ["sequenceDiagram"]
+        for p in participants:
+            kind = "actor" if p.get("kind") == "actor" else "participant"
+            lines.append(f"{kind} {p['alias']} as {_esc_label(p.get('label') or p['alias'])}")
+        arrows = {"sync": "->>", "async": "-)", "return": "-->>"}
+        for m in messages:
+            if m.get("from_participant") in aliases and m.get("to_participant") in aliases:
+                arrow = arrows.get(m.get("kind"), "->>")
+                lines.append(
+                    f"  {m['from_participant']} {arrow} {m['to_participant']}: "
+                    f"{m.get('label') or ''}"
+                )
+        return "\n".join(lines) + "\n"
+
+    if graph_type == "state":
+        states = graph.get("states") or []
+        transitions = graph.get("transitions") or []
+        if not states or not transitions:
+            return None
+        state_ids = {s["state_id"] for s in states}
+        lines = ["stateDiagram-v2"]
+        for s in states:
+            lines.append(f"  {s['state_id']} : {_esc_label(s.get('label') or s['state_id'])}")
+            if s.get("kind") == "initial":
+                lines.append(f"  [*] --> {s['state_id']}")
+            elif s.get("kind") == "final":
+                lines.append(f"  {s['state_id']} --> [*]")
+        for t in transitions:
+            if t.get("from_state") in state_ids and t.get("to_state") in state_ids:
+                event = f": {t['event']}" if t.get("event") else ""
+                lines.append(f"  {t['from_state']} --> {t['to_state']}{event}")
+        return "\n".join(lines) + "\n"
+
+    return None
