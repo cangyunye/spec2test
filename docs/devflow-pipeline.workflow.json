@@ -1,0 +1,83 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "DevFlow 需求到测试全链路",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "output": "docs/devflow-pipeline.html"
+  },
+  "lanes": [
+    { "id": "gate", "label": "用户 · 门禁①②" },
+    { "id": "agent", "label": "编排 · 澄清 / 制图 / 生成" },
+    { "id": "verify", "label": "清单 · 测试 · 验收③" }
+  ],
+  "phases": [
+    { "id": "p_clarify", "label": "需求澄清", "fromCol": 0, "toCol": 1 },
+    { "id": "p_draw", "label": "确认 · 制图 · 评审", "fromCol": 2, "toCol": 3, "variant": "emphasis" },
+    { "id": "p_deliver", "label": "交付与验收", "fromCol": 4, "toCol": 5, "variant": "dashed" }
+  ],
+  "mainPath": ["intake", "clarify", "req_gate", "graph_gen", "graph_gate", "code_chain", "test_chain", "final_gate"],
+  "semanticChecks": {
+    "allowedRoots": ["intake"],
+    "allowedTerminals": ["final_gate"],
+    "requiredEdges": [
+      { "from": "req_gate", "to": "graph_gen" },
+      { "from": "code_chain", "to": "test_chain" }
+    ],
+    "requiredPaths": [
+      { "from": "intake", "to": "final_gate" }
+    ]
+  },
+  "nodes": [
+    { "id": "intake", "lane": "gate", "col": 0, "type": "frontend", "label": "需求输入", "sublabel": "对话 / 文档", "width": 168 },
+    { "id": "clarify", "lane": "agent", "col": 1, "type": "backend", "label": "澄清与校验", "sublabel": "抽取 → 校验", "width": 168 },
+    { "id": "question", "lane": "agent", "col": 2, "type": "frontend", "label": "追问澄清", "sublabel": "一轮一问", "width": 168 },
+    { "id": "req_gate", "lane": "gate", "col": 2, "type": "security", "label": "需求确认①", "sublabel": "字段来源核对", "tag": "AI 推断", "width": 168 },
+    { "id": "graph_gen", "lane": "agent", "col": 3, "type": "backend", "label": "选型制图", "sublabel": "type → generate", "width": 168 },
+    { "id": "graph_gate", "lane": "gate", "col": 3, "type": "security", "label": "制图评审②", "sublabel": "驳回带意见", "width": 168 },
+    { "id": "code_chain", "lane": "agent", "col": 4, "type": "backend", "label": "检索与生成", "sublabel": "渲染 → 落盘", "width": 168 },
+    { "id": "test_chain", "lane": "verify", "col": 4, "type": "backend", "label": "测试设计与执行", "sublabel": "清单注入 · 六类策略", "tag": ".checklist", "width": 168 },
+    { "id": "final_gate", "lane": "verify", "col": 5, "type": "security", "label": "人工验收③", "sublabel": "驳回带意见", "width": 168 }
+  ],
+  "edges": [
+    { "id": "e_intake_clarify", "from": "intake", "to": "clarify", "variant": "emphasis", "role": "main" },
+    { "id": "e_clarify_gate", "from": "clarify", "to": "req_gate", "label": "信息完整", "variant": "emphasis", "role": "main" },
+    { "id": "e_clarify_question", "from": "clarify", "to": "question", "label": "信息有缺口", "variant": "default", "role": "branch" },
+    { "id": "e_question_clarify", "from": "question", "to": "clarify", "label": "用户补充", "variant": "dashed", "role": "return" },
+    { "id": "e_gate_graph", "from": "req_gate", "to": "graph_gen", "label": "确认通过", "variant": "emphasis", "role": "main" },
+    { "id": "e_graph_review", "from": "graph_gen", "to": "graph_gate", "variant": "emphasis", "role": "main" },
+    { "id": "e_review_code", "from": "graph_gate", "to": "code_chain", "label": "有项目代码", "variant": "emphasis", "role": "main" },
+    { "id": "e_review_nocode", "from": "graph_gate", "to": "test_chain", "label": "仅需求模式", "variant": "default", "role": "branch" },
+    { "id": "e_code_test", "from": "code_chain", "to": "test_chain", "variant": "emphasis", "role": "main" },
+    { "id": "e_test_accept", "from": "test_chain", "to": "final_gate", "variant": "emphasis", "role": "main" },
+    { "id": "e_test_fix", "from": "test_chain", "to": "code_chain", "label": "失败回修 ≤3 轮", "variant": "dashed", "role": "error" },
+    { "id": "e_reject_back", "from": "final_gate", "to": "code_chain", "label": "驳回 · 回炉修正", "variant": "dashed", "role": "error" }
+  ],
+  "cards": [
+    {
+      "dot": "rose",
+      "title": "三门禁 · 人工把关",
+      "items": [
+        "需求确认①把字段摊开核对来源，只在存在 AI 推断字段时打断",
+        "制图评审②与人工验收③驳回必须带修改意见，意见回传定向修正"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "双模式分流",
+      "items": [
+        "有项目代码：检索 → 渲染 → 生成 → 落盘 → 真实执行测试",
+        "无代码走仅需求模式：评审逻辑图后直接基于需求出端到端用例"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "业务清单闭环",
+      "items": [
+        "测试设计前按需求路由 .checklist 业务库，确认后注入检查点核对覆盖",
+        "有效用例可沉淀回库；各节点重试超限统一落死信，会话可断点续跑"
+      ]
+    }
+  ]
+}
