@@ -877,7 +877,7 @@ table.t-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 @media (max-width: 1120px) { .step-label { display: none; } .step + .step::before { width: 14px; margin: 0 6px; } }
 
 /* ═══════════════════════════════════════════════════════════════
-   业务 Checklist 库浏览页（/library）· 与主界面共用同一套设计变量
+   TC-CHECKLIST 浏览页（/library）· 与主界面共用同一套设计变量
    ═══════════════════════════════════════════════════════════════ */
 body.libpage { overflow: hidden; display: flex; flex-direction: column; }
 .libpage a.chip { text-decoration: none; }
@@ -989,7 +989,7 @@ body.libpage { overflow: hidden; display: flex; flex-direction: column; }
 }
 
 /* ═══════════════════════════════════════════════════════════════
-   主界面清单库浏览抽屉（右侧向左展开）+ 详情阅读模态
+   主界面 TC-CHECKLIST 浏览抽屉（右侧向左展开）+ 详情阅读模态
    z 序：阅读模态 93 > 抽屉 92 > 抽屉遮罩 91 > 门禁等弹窗 90
    （清单路由空态卡里也要能打开抽屉浏览，故需盖过门禁层）
    ═══════════════════════════════════════════════════════════════ */
@@ -1052,3 +1052,9 @@ body.libpage { overflow: hidden; display: flex; flex-direction: column; }
 .fq-opt:hover { border-color: var(--ink-3); color: var(--ink); }
 .fq-opt.is-active { border-color: var(--accent, #4f7cff); color: var(--accent, #4f7cff); background: rgba(79, 124, 255, 0.08); }
 .fq-opt.is-rec { border-style: dashed; }
+
+/* 抽屉头部的副标与库根切换栏（项目根 / 库根 + 最近使用下拉） */
+.lib-drawer-sub { font-size: 10.5px; color: var(--ink-3); }
+.lib-drawer-rootbar { display: flex; gap: 6px; margin-bottom: 8px; }
+.lib-drawer-rootbar .dl-select { flex: none; max-width: 92px; }
+.lib-drawer-rootbar .dl-input { flex: 1; min-width: 0; }

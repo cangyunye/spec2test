@@ -1,6 +1,6 @@
 "use strict";
 /* ═══════════════════════════════════════════════════════════════
-   DevFlow · 业务 Checklist 库浏览页（独立文档页 /library）
+   DevFlow · TC-CHECKLIST（testcases 检查清单）浏览页（独立文档页 /library）
    只读：库全树 + 分节条目 + 检索/优先级筛选；主题与主界面共用
    ═══════════════════════════════════════════════════════════════ */
 
@@ -150,7 +150,7 @@ async function loadLibrary(explicit) {
       doc.appendChild(h("div", "cl-empty",
         data.exists === false
           ? `路径不存在：${data.root}（换成 project_root 或先运行 devflow checklist init）`
-          : "清单库还是空的：运行 `devflow checklist init`，或在主界面清单路由卡上传文档入库。"));
+          : "TC-CHECKLIST 还是空的：运行 `devflow checklist init`，或在主界面清单路由卡上传文档入库。"));
       $("libRootNote").textContent = "库根：" + S.root;
       $("libStats").textContent = "";
       return;

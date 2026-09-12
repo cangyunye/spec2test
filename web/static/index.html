@@ -29,7 +29,7 @@
     <nav id="stepper" class="stepper" aria-label="流程进度"></nav>
 
     <div class="top-actions">
-      <button id="btnLibrary" class="chip" title="浏览业务 Checklist 库（右侧抽屉）">☰ 清单库</button>
+      <button id="btnLibrary" class="chip" title="浏览 TC-CHECKLIST · testcases 检查清单（右侧抽屉）">☰ TC-CHECKLIST</button>
       <button id="btnHealth" class="chip" title="配置状态">
         <span class="dot" id="healthDot"></span><span id="healthText">检测中</span>
       </button>
@@ -164,7 +164,7 @@
       <button id="btnDistillCancel" class="btn ghost">取消</button>
       <button id="btnDistillBack" class="btn ghost hidden">← 返回调整</button>
       <button id="btnDistillGen" class="btn primary">✦ 生成预览</button>
-      <button id="btnDistillCommit" class="btn primary hidden">✓ 确认写入清单库</button>
+      <button id="btnDistillCommit" class="btn primary hidden">✓ 确认写入 TC-CHECKLIST</button>
     </footer>
   </div>
 </div>
@@ -186,7 +186,7 @@
       <button id="btnImportCancel" class="btn ghost">取消</button>
       <button id="btnImportBack" class="btn ghost hidden">← 返回调整</button>
       <button id="btnImportGen" class="btn primary">✦ 解析预览</button>
-      <button id="btnImportCommit" class="btn primary hidden">✓ 确认写入清单库</button>
+      <button id="btnImportCommit" class="btn primary hidden">✓ 确认写入 TC-CHECKLIST</button>
     </footer>
   </div>
 </div>
@@ -208,16 +208,16 @@
       <button id="btnManualCancel" class="btn ghost">取消</button>
       <button id="btnManualBack" class="btn ghost hidden">← 返回调整</button>
       <button id="btnManualGen" class="btn primary">✦ 规范化预览</button>
-      <button id="btnManualCommit" class="btn primary hidden">✓ 确认写入清单库</button>
+      <button id="btnManualCommit" class="btn primary hidden">✓ 确认写入 TC-CHECKLIST</button>
     </footer>
   </div>
 </div>
 
-<!-- ── 清单详情阅读模态（清单库抽屉里点标题打开）───── -->
+<!-- ── 清单详情阅读模态（TC-CHECKLIST 抽屉里点标题打开）── -->
 <div id="libraryModal" class="gate-overlay lib-reader-overlay hidden" role="dialog" aria-modal="true">
   <div class="gate-panel distill-panel">
     <header class="gate-head">
-      <span class="gate-tag mono">LIBRARY · 清单详情</span>
+      <span class="gate-tag mono">TC-CHECKLIST · 清单详情</span>
       <div class="gate-head-text">
         <h3 id="libReaderTitle">业务 Checklist</h3>
         <p id="libReaderSub" class="mono"></p>
@@ -232,15 +232,25 @@
   </div>
 </div>
 
-<!-- ── 清单库浏览抽屉（右侧，向左展开；点标题进上方阅读模态）── -->
+<!-- ── TC-CHECKLIST 浏览抽屉（右侧，向左展开；点标题进上方阅读模态）── -->
 <div id="libScrim" class="lib-scrim hidden"></div>
-<aside id="libDrawer" class="lib-drawer hidden" role="dialog" aria-label="清单库浏览">
+<aside id="libDrawer" class="lib-drawer hidden" role="dialog" aria-label="TC-CHECKLIST 浏览">
   <header class="lib-drawer-head">
-    <b>☰ 清单库</b>
+    <b>☰ TC-CHECKLIST</b>
+    <span class="lib-drawer-sub">testcases 检查清单</span>
     <span class="spacer"></span>
     <button id="btnLibDrawerClose" class="icon-btn" title="关闭（Esc）">×</button>
   </header>
   <div class="lib-drawer-tools">
+    <div class="lib-drawer-rootbar">
+      <select id="libDrawerMode" class="dl-select" title="项目根 = 读 <root>/.checklist；库根 = 直接指定清单目录">
+        <option value="project_root">项目根</option>
+        <option value="library_root">库根</option>
+      </select>
+      <input id="libDrawerRootInput" class="dl-input mono" list="libDrawerRootList"
+             placeholder="留空 = 全局默认" spellcheck="false">
+      <datalist id="libDrawerRootList"></datalist>
+    </div>
     <input id="libDrawerSearch" class="lib-search" placeholder="检索业务 / 检查点…" spellcheck="false">
   </div>
   <div id="libDrawerBody" class="lib-drawer-body"></div>

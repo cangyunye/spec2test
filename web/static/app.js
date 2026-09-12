@@ -13,14 +13,14 @@ const S = {
   autoScroll: true, live: new Map(), theme: document.documentElement.dataset.theme || "dark",
   mermaidReady: false,
   lastSeq: 0,        // 事件游标：断线重连/换会话回来按此补齐丢失进度
-  req: {},           // 当前会话 requirement（含 project_root，清单库跳转用）
+  req: {},           // 当前会话 requirement（含 project_root，TC-CHECKLIST 浏览用）
   history: [],       // 回退锚点（GET /history，新→旧）
   msgIds: new Set(), // 已渲染的消息 id：compress 截断会整批重发保留消息，据此去重
   pendingEdit: null, // 「编辑重发」流程中：回退完成后放回输入框的原文
   adoptSel: new Set(),      // 测试卡勾选采纳的用例 id（采纳 = 评审通过）
   pendingDistill: null,     // 评审通过后要弹的沉淀建议卡：null=不弹，数组=预勾选的采纳集
   distillPromptEl: null,    // 已插出的沉淀建议卡 DOM（防重复）
-  lib: { root: "", tree: [], exists: true, search: "" }, // 清单库浏览抽屉数据（/api/library 全量缓存）
+  lib: { root: "", tree: [], exists: true, search: "" }, // TC-CHECKLIST 浏览抽屉数据（/api/library 全量缓存）
 };
 
 /* 是否提供项目代码：true=代码模式（检索/生成）；false=仅需求模式（直接出端到端用例） */
@@ -1198,8 +1198,8 @@ function gateSubText(gate) {
     if (!(S.gatePayload.candidates || []).length) {
       const n = S.gatePayload.business_count || 0;
       return n
-        ? `清单库有 ${n} 个业务，但都与本需求不匹配 · 可上传清单文档入库，或跳过直接生成`
-        : "清单库还是空的 · 可上传清单文档入库，或跳过直接生成用例";
+        ? `TC-CHECKLIST 有 ${n} 个业务，但都与本需求不匹配 · 可上传清单文档入库，或跳过直接生成`
+        : "TC-CHECKLIST 还是空的 · 可上传清单文档入库，或跳过直接生成用例";
     }
     return "AI 已按需求匹配业务清单 · 取消勾选即不加载 · 确认后清单作为用例设计依据";
   }
@@ -1420,7 +1420,7 @@ function rrControl(f) {
 /* 清单路由确认树：业务/子业务两级勾选，勾业务联动全选子业务 */
 function gateChecklistBody(p) {
   const wrap = h("div", "cl-route");
-  const root = p.root ? h("div", "cl-root mono", `清单库：${p.root}`) : null;
+  const root = p.root ? h("div", "cl-root mono", `TC-CHECKLIST：${p.root}`) : null;
   if (root) wrap.appendChild(root);
   const list = h("div", "cl-list");
   (p.candidates || []).forEach((biz) => {
@@ -1464,25 +1464,26 @@ function setClSelected(rel, on) {
 /* 清单路由空态（空库/无匹配）：不再静默，给上传入库与库浏览入口 */
 function gateChecklistEmptyBody(p) {
   const wrap = h("div", "cl-route");
-  if (p.root) wrap.appendChild(h("div", "cl-root mono", `清单库：${p.root}`));
+  if (p.root) wrap.appendChild(h("div", "cl-root mono", `TC-CHECKLIST：${p.root}`));
   const note = h("div", "cl-empty");
   note.appendChild(h("p", null, (p.business_count || 0)
     ? `库中有 ${p.business_count} 个业务类型，但都与当前需求不匹配。`
-    : "清单库中还没有业务清单。"));
+    : "TC-CHECKLIST 中还没有业务清单。"));
   note.appendChild(h("p", null,
     "有现成的业务检查清单（内部 wiki 页面、验收清单、历史用例文档）？上传后 AI 会按库规范归纳入库，确认后即可注入本单用例设计。"));
   const actions = h("div", "cl-empty-actions");
   actions.appendChild(miniBtn("📤 上传清单文档入库", () => openImportModal("gate"), "支持 .md / .txt / .docx"));
-  actions.appendChild(miniBtn("☰ 查看清单库", () => openLibraryDrawer(), "浏览当前清单库"));
+  actions.appendChild(miniBtn("☰ 查看 TC-CHECKLIST", () => openLibraryDrawer(), "浏览当前 TC-CHECKLIST"));
   note.appendChild(actions);
   wrap.appendChild(note);
   wrap.appendChild(h("p", "cl-hint", "跳过也能继续：本轮按常规流程设计用例，跑完后仍可在测试卡上沉淀。"));
   return wrap;
 }
 
-/* 清单库浏览抽屉（右侧向左展开）：标题导航 + 关键词检索，点标题进详情阅读模态。
+/* TC-CHECKLIST 浏览抽屉（右侧向左展开）：标题导航 + 关键词检索，点标题进详情阅读模态。
    数据源为非会话接口 /api/library，每次打开重取（沉淀/入库后即是新内容）；
-   不要求会话存在——无会话时按 project_root 空 = 全局库浏览。 */
+   库根可切换——项目根模式读 <root>/.checklist，库根模式直接指定，都不填 = 全局默认。
+   不要求会话存在；会话的 project_root 只作首次预填，不覆盖用户显式输入的库根。 */
 async function openLibraryDrawer() {
   $("libScrim").classList.remove("hidden");
   $("libDrawer").classList.remove("hidden");
@@ -1491,18 +1492,60 @@ async function openLibraryDrawer() {
   const body = $("libDrawerBody");
   body.innerHTML = "";
   body.appendChild(h("div", "cl-empty", "加载中…"));
+  if (!$("libDrawerRootInput").value.trim()) {
+    const sessionRoot = String((S.req || {}).project_root || "").trim();
+    $("libDrawerMode").value = sessionRoot ? "project_root"
+      : (localStorage.getItem("df-lib-mode") || "project_root");
+    $("libDrawerRootInput").value = sessionRoot || (localStorage.getItem("df-lib-root") || "");
+  }
+  loadLibDrawerRoots();
+  await loadLibraryDrawer();
+}
+
+/* 库根切换加载：Enter / 切类型触发；用户显式操作才写入记忆（与 /library 页共用 df-lib-*） */
+async function loadLibraryDrawer() {
+  const body = $("libDrawerBody");
+  const mode = $("libDrawerMode").value;
+  const value = $("libDrawerRootInput").value.trim();
   $("libDrawerRoot").textContent = "";
-  const projectRoot = String((S.req || {}).project_root || "").trim();
+  body.innerHTML = "";
+  body.appendChild(h("div", "cl-empty", "加载中…"));
+  const params = new URLSearchParams();
+  if (value) params.set(mode, value);
   try {
-    const data = await api(`/api/library?project_root=${encodeURIComponent(projectRoot)}`);
+    const data = await api("/api/library" + (params.toString() ? "?" + params.toString() : ""));
     S.lib.root = data.root || "";
     S.lib.tree = data.tree || [];
     S.lib.exists = data.exists !== false;
     renderLibDrawer();
+    // 常见误区点破：<项目根>/.checklist 不存在时 resolve_root 会静默回退全局默认库
+    if (!S.lib.tree.length && mode === "project_root" && value
+        && !S.lib.root.replace(/[\/]+$/, "").toLowerCase().endsWith(".checklist")) {
+      body.appendChild(h("div", "cl-empty",
+        `${value} 下没有找到 .checklist 目录，当前显示的是回退后的全局默认库。`
+        + "请确认项目根路径；也可把上方类型切为「库根」直接指定清单目录。"));
+    }
   } catch (err) {
     body.innerHTML = "";
     body.appendChild(h("div", "cl-empty", "加载失败：" + err.message));
   }
+}
+
+/* 最近用过的 project_root（取自历史会话），供库根输入下拉速选 */
+async function loadLibDrawerRoots() {
+  try {
+    const data = await api("/api/library/roots");
+    const list = $("libDrawerRootList");
+    list.innerHTML = "";
+    (data.roots || []).forEach((r) => list.appendChild(h("option", null, r)));
+    if (data.default && !$("libDrawerRootInput").value.trim())
+      $("libDrawerRootInput").placeholder = `留空 = 全局默认（${data.default}）`;
+  } catch { /* 便利项，失败不阻塞浏览 */ }
+}
+
+function saveLibDrawerRoot() {
+  localStorage.setItem("df-lib-mode", $("libDrawerMode").value);
+  localStorage.setItem("df-lib-root", $("libDrawerRootInput").value.trim());
 }
 
 function closeLibDrawer() {
@@ -1527,7 +1570,7 @@ function renderLibDrawer() {
   if (!S.lib.tree.length) {
     body.appendChild(h("div", "cl-empty", S.lib.exists === false
       ? `路径不存在：${S.lib.root}`
-      : "清单库还是空的。可在清单路由卡上传文档入库，或跑完用例后在测试卡上沉淀。"));
+      : `TC-CHECKLIST 还是空的 · 库根：${S.lib.root}。上方填项目根可读取 <项目>/.checklist，或先沉淀 / 导入入库。`));
   } else {
     let shown = 0;
     S.lib.tree.forEach((biz) => {
@@ -1801,7 +1844,7 @@ function submitGate(decision, comment) {
     const n = routeDecision === "confirm" ? (S.clSelected || []).length : 0;
     addDivider(
       routeDecision === "confirm" ? `清单已确认 · 注入 ${n} 项`
-        : routeEmpty ? "清单库暂无匹配 · 已跳过注入" : "已跳过清单注入",
+        : routeEmpty ? "TC-CHECKLIST 暂无匹配 · 已跳过注入" : "已跳过清单注入",
       null, true,
     );
   } else if (isReqReview) {
@@ -1880,7 +1923,7 @@ function bizSectionEl(tree, rootLabel) {
   newWrap.append(dirIn, nameIn, descIn);
   sel.onchange = () => newWrap.classList.toggle("hidden", sel.value !== "__new__");
   bizSec.appendChild(newWrap);
-  if (rootLabel) bizSec.appendChild(h("div", "dl-root mono", "清单库：" + rootLabel));
+  if (rootLabel) bizSec.appendChild(h("div", "dl-root mono", "TC-CHECKLIST：" + rootLabel));
   return { bizSec, sel };
 }
 
@@ -2061,7 +2104,7 @@ async function commitDistill() {
   btn.disabled = true;
   try {
     await commitPreview("distillHint", d.preview);
-    toast("已登记到清单库", `${d.preview.rel_dir}/checklist.md（下次生成自动路由可用）`);
+    toast("已登记到 TC-CHECKLIST", `${d.preview.rel_dir}/checklist.md（下次生成自动路由可用）`);
     closeDistill();
   } catch (err) {
     $("distillHint").textContent = "写入失败：" + err.message;
@@ -3200,7 +3243,7 @@ function boot() {
   $("btnDistillGen").onclick = genDistill;
   $("btnDistillBack").onclick = () => distillShowForm(true);
   $("btnDistillCommit").onclick = commitDistill;
-  // 上传清单文档入库 / 手写清单 / 清单库浏览
+  // 上传清单文档入库 / 手写清单 / TC-CHECKLIST 浏览
   $("btnImportCancel").onclick = closeImportModal;
   $("btnImportGen").onclick = genImport;
   $("btnImportBack").onclick = () => importShowForm(true);
@@ -3209,7 +3252,7 @@ function boot() {
   $("btnManualGen").onclick = genManual;
   $("btnManualBack").onclick = () => manualShowForm(true);
   $("btnManualCommit").onclick = commitManual;
-  // 清单库浏览抽屉 + 详情阅读模态
+  // TC-CHECKLIST 浏览抽屉 + 详情阅读模态
   $("btnLibrary").onclick = openLibraryDrawer;
   $("btnLibDrawerClose").onclick = closeLibDrawer;
   $("libScrim").onclick = closeLibDrawer;
@@ -3217,6 +3260,10 @@ function boot() {
     S.lib.search = $("libDrawerSearch").value;
     renderLibDrawer();
   });
+  $("libDrawerRootInput").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { saveLibDrawerRoot(); loadLibraryDrawer(); }
+  });
+  $("libDrawerMode").onchange = () => { saveLibDrawerRoot(); loadLibraryDrawer(); };
   $("btnLibraryClose").onclick = () => $("libraryModal").classList.add("hidden");
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
