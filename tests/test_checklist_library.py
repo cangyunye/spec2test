@@ -335,6 +335,31 @@ def test_init_library_creates_example(tmp_path):
     assert written  # 首次有产出记录
 
 
+def test_init_library_seeds_general(tmp_path):
+    init_library(tmp_path)
+    rels = {n["rel_dir"]: n for n in library_view(tmp_path)}
+    assert {"api", "frontend", "sql", "shell"} <= set(rels)
+    assert rels["api"]["item_count"] == 24
+    assert [c["rel_dir"] for c in rels["frontend"]["children"]] == [
+        "frontend/auth", "frontend/layout", "frontend/usability",
+    ]
+    # 内置业务已存在时跳过，不覆盖用户修改
+    cl = tmp_path / "shell" / "checklist.md"
+    cl.write_text(
+        cl.read_text(encoding="utf-8").replace("set -euo pipefail", "用户自定义内容"),
+        encoding="utf-8",
+    )
+    init_library(tmp_path)
+    assert "用户自定义内容" in cl.read_text(encoding="utf-8")
+
+
+def test_init_library_no_general(tmp_path):
+    init_library(tmp_path, with_general=False, with_example=False)
+    names = {p.name for p in tmp_path.iterdir() if p.is_dir()}
+    assert not names & {"api", "frontend", "sql", "shell"}
+    assert (tmp_path / "_template" / "scenario.md").is_file()
+
+
 def test_summarize_requirement():
     text = summarize_requirement(
         {

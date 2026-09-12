@@ -441,12 +441,20 @@ def checklist_init(
         Path(""), "--root", help="库根目录；缺省按 DEVFLOW_CHECKLIST_ROOT → data/checklist 解析"
     ),
     no_example: bool = typer.Option(False, "--no-example", help="不生成 payment 示例业务"),
+    no_general: bool = typer.Option(
+        False, "--no-general", help="不生成内置通用清单（接口/前端/SQL/Shell）"
+    ),
 ) -> None:
-    """初始化 Checklist 库：README + _template 模板（默认附 payment 示例，可立即体验路由）。"""
+    """初始化 Checklist 库：README + _template 模板 + payment 示例 + 内置通用领域清单。
+
+    已存在的业务不会被覆盖；只想要空库模板时同时加 --no-example --no-general。
+    """
     from .checklist.scaffold import init_library
 
     target = root if str(root) else None
-    written = init_library(target, with_example=not no_example)
+    written = init_library(
+        target, with_example=not no_example, with_general=not no_general
+    )
     console.print(f"[green]✓[/] Checklist 库已就绪 → [bold]{target or '（自动解析根）'}[/]")
     for p in written:
         console.print(f"  · {p}")
