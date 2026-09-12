@@ -17,6 +17,7 @@ from devflow.checklist.distill import (
 )
 from devflow.checklist.library import (
     checklist_tree,
+    library_node,
     library_view,
     load_checklists,
     load_scenario,
@@ -249,6 +250,21 @@ def test_library_view_missing_checklist(tmp_path):
     assert tree[0]["has_checklist"] is False
     assert tree[0]["item_count"] == 0
     assert tree[0]["sections"] == []
+
+def test_library_node_single(lib):
+    node = library_node(lib, "payment")
+    assert node["rel_dir"] == "payment"
+    assert node["name"] == "支付业务"
+    assert node["has_checklist"] is True
+    assert node["sections"][0]["items"][0]["text"] == "支付成功"
+    assert node["children"] == []  # 单节点视图不含子业务
+
+
+def test_library_node_missing_and_invalid(lib):
+    assert library_node(lib, "no/such") is None      # scenario.md 不存在
+    assert library_node(lib, "_template") is None    # "_" 前缀模板目录非法
+    assert library_node(lib, "../payment") is None   # 路径穿越拒绝
+    assert library_node(lib, "") is None
 
 
 def _distill_out() -> DistillOutput:

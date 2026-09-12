@@ -108,12 +108,17 @@ async function api(url, opts) {
   return resp.json();
 }
 
-function toast(title, body, kind) {
+function toast(title, body, kind, action) {
   const box = $("toasts");
   while (box.children.length >= 3) box.firstChild.remove(); // 最多同时 3 条
   const t = h("div", "toast" + (kind === "err" ? " err" : ""));
   t.appendChild(h("b", null, title));
   if (body) t.appendChild(h("p", null, body));
+  if (action) {
+    const b = h("button", "toast-act", action.label);
+    b.onclick = (e) => { e.stopPropagation(); t.remove(); action.onClick(); };
+    t.appendChild(b);
+  }
   t.onclick = () => t.remove();
   box.appendChild(t);
   setTimeout(() => { t.classList.add("out"); setTimeout(() => t.remove(), 250); }, 4500);
@@ -1427,15 +1432,15 @@ function gateChecklistBody(p) {
     list.appendChild(clCheckbox(biz, 0, (on) => {
       // 业务勾选联动子业务
       (biz.children || []).forEach((sub) => setClSelected(sub.rel_dir, on));
-    }));
-    (biz.children || []).forEach((sub) => list.appendChild(clCheckbox(sub, 1)));
+    }, p.root));
+    (biz.children || []).forEach((sub) => list.appendChild(clCheckbox(sub, 1, null, p.root)));
   });
   wrap.appendChild(list);
   wrap.appendChild(h("p", "cl-hint", "勾选业务会联动其子业务；可单独取消某个子业务。确认后清单内容将注入测试设计，并在用例卡片标注来源。"));
   return wrap;
 }
 
-function clCheckbox(node, depth, onChange) {
+function clCheckbox(node, depth, onChange, libRoot) {
   const row = h("label", "cl-item" + (depth ? " sub" : ""));
   const cb = h("input");
   cb.type = "checkbox";
@@ -1451,9 +1456,28 @@ function clCheckbox(node, depth, onChange) {
   text.appendChild(h("b", null, node.name || node.rel_dir));
   text.appendChild(h("span", "cl-dir mono", node.rel_dir));
   row.appendChild(text);
+  // 👁 预览：确认注入前先看清单内容。label 内的 button 是交互元素，点击不会误触勾选
+  const prev = miniBtn("👁 预览", (e) => {
+    e.stopPropagation();
+    previewGateNode(libRoot, node.rel_dir);
+  }, "预览该业务的清单内容（只读）");
+  prev.style.marginLeft = "auto";
+  row.appendChild(prev);
   if (node.description) row.appendChild(h("span", "cl-desc", node.description));
   if (node.reason) row.appendChild(h("span", "cl-reason mono", "↳ " + node.reason));
   return row;
+}
+
+/* 门禁预览：门禁载荷只有 frontmatter 摘要，正文按需拉单节点视图后弹阅读模态 */
+async function previewGateNode(libRoot, rel) {
+  try {
+    const params = new URLSearchParams({ rel_dir: rel });
+    if (libRoot) params.set("library_root", libRoot);
+    const node = await api("/api/library/node?" + params.toString());
+    openLibReaderNode(node, libRoot);
+  } catch (err) {
+    toast("预览失败", err.message, "err");
+  }
 }
 
 function setClSelected(rel, on) {
@@ -1484,7 +1508,7 @@ function gateChecklistEmptyBody(p) {
    数据源为非会话接口 /api/library，每次打开重取（沉淀/入库后即是新内容）；
    库根可切换——项目根模式读 <root>/.checklist，库根模式直接指定，都不填 = 全局默认。
    不要求会话存在；会话的 project_root 只作首次预填，不覆盖用户显式输入的库根。 */
-async function openLibraryDrawer() {
+function showLibDrawer() {
   $("libScrim").classList.remove("hidden");
   $("libDrawer").classList.remove("hidden");
   S.lib.search = "";
@@ -1492,6 +1516,12 @@ async function openLibraryDrawer() {
   const body = $("libDrawerBody");
   body.innerHTML = "";
   body.appendChild(h("div", "cl-empty", "加载中…"));
+  return body;
+}
+
+async function openLibraryDrawer() {
+  showLibDrawer();
+  // 首次（输入为空时）预填库根：会话 project_root > 上次使用（与 /library 页共用存储）> 留空（全局默认）
   if (!$("libDrawerRootInput").value.trim()) {
     const sessionRoot = String((S.req || {}).project_root || "").trim();
     $("libDrawerMode").value = sessionRoot ? "project_root"
@@ -1500,6 +1530,26 @@ async function openLibraryDrawer() {
   }
   loadLibDrawerRoots();
   await loadLibraryDrawer();
+}
+
+/* 入库提示「查看」直达：按会话库根打开抽屉并定位闪烁到新业务行 */
+async function openLibraryDrawerAt(rel) {
+  showLibDrawer();
+  $("libDrawerMode").value = "project_root";
+  $("libDrawerRootInput").value = String((S.req || {}).project_root || "").trim();
+  saveLibDrawerRoot();
+  loadLibDrawerRoots();
+  await loadLibraryDrawer();
+  flashLibRow(rel);
+}
+
+/* 在抽屉列表里定位某个业务行：滚动到中间并短暂高亮 */
+function flashLibRow(rel) {
+  const btn = [...$("libDrawerBody").querySelectorAll(".lib-nav-row")].find((b) => b.dataset.rel === rel);
+  if (!btn) return;
+  btn.scrollIntoView({ block: "center" });
+  btn.classList.add("lib-item-flash");
+  setTimeout(() => btn.classList.remove("lib-item-flash"), 1800);
 }
 
 /* 库根切换加载：Enter / 切类型触发；用户显式操作才写入记忆（与 /library 页共用 df-lib-*） */
@@ -1520,7 +1570,7 @@ async function loadLibraryDrawer() {
     renderLibDrawer();
     // 常见误区点破：<项目根>/.checklist 不存在时 resolve_root 会静默回退全局默认库
     if (!S.lib.tree.length && mode === "project_root" && value
-        && !S.lib.root.replace(/[\/]+$/, "").toLowerCase().endsWith(".checklist")) {
+        && !S.lib.root.replace(/[\\/]+$/, "").toLowerCase().endsWith(".checklist")) {
       body.appendChild(h("div", "cl-empty",
         `${value} 下没有找到 .checklist 目录，当前显示的是回退后的全局默认库。`
         + "请确认项目根路径；也可把上方类型切为「库根」直接指定清单目录。"));
@@ -1574,11 +1624,9 @@ function renderLibDrawer() {
   } else {
     let shown = 0;
     S.lib.tree.forEach((biz) => {
-      if (libNodeMatches(biz, q)) { body.appendChild(libDrawerRow(biz, 0)); shown += 1; }
+      shown += appendLibDrawerNode(body, biz, 0, q);
       (biz.children || []).forEach((sub) => {
-        if (!libNodeMatches(sub, q)) return;
-        body.appendChild(libDrawerRow(sub, 1));
-        shown += 1;
+        shown += appendLibDrawerNode(body, sub, 1, q);
       });
     });
     if (q && !shown) body.appendChild(h("div", "cl-empty", "没有匹配的业务或检查点，换个关键词试试。"));
@@ -1589,21 +1637,91 @@ function renderLibDrawer() {
     + (S.lib.tree.length ? ` · ${S.lib.tree.length} 业务 · ${total} 条` : "");
 }
 
-function libDrawerRow(node, depth) {
+/* 一行业务标题 +（检索态）命中的检查点直列；返回是否显示。
+   检索即所得：命中在检查点文本里时直接列出条目，点一条直达阅读模态对应位置。 */
+function appendLibDrawerNode(body, node, depth, q) {
+  const hits = q ? libNodeItemHits(node, q) : [];
+  if (q && !hits.length && !libNodeMatches(node, q)) return 0;
+  body.appendChild(libDrawerRow(node, depth, hits.length));
+  const cap = Math.min(hits.length, 8); // 单业务最多直列 8 条，防长清单刷爆抽屉
+  for (let i = 0; i < cap; i++) body.appendChild(libDrawerHit(node, hits[i], depth, q));
+  if (hits.length > cap) {
+    const more = h("button", "lib-drawer-hit d" + depth, `还有 ${hits.length - cap} 条命中…`);
+    more.type = "button";
+    more.onclick = () => openLibReader(node.rel_dir);
+    body.appendChild(more);
+  }
+  return 1;
+}
+
+/* 检查点文本命中明细（记录分节/条目下标，供阅读模态滚动定位） */
+function libNodeItemHits(node, q) {
+  const hits = [];
+  (node.sections || []).forEach((sec, secIdx) => {
+    (sec.items || []).forEach((it, idx) => {
+      if (String(it.text || "").toLowerCase().includes(q))
+        hits.push({ sec: secIdx, idx, priority: it.priority, text: it.text });
+    });
+  });
+  return hits;
+}
+
+/* 检索高亮：先 esc 转义原文，查询词同样转义并做正则转义后包 <mark>，防 XSS */
+function libHighlight(text, q) {
+  let out = esc(text);
+  const eq = esc(q).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (eq) out = out.replace(new RegExp(eq, "gi"), (m) => '<mark class="lib-hl">' + m + "</mark>");
+  return out;
+}
+
+function libDrawerRow(node, depth, hitCount = 0) {
   const btn = h("button", "lib-nav-row" + (depth ? " sub" : ""));
   btn.type = "button";
+  btn.dataset.rel = node.rel_dir;
   btn.appendChild(h("span", "lib-nav-name", node.name || node.rel_dir));
   btn.appendChild(h("span", "cl-dir mono", node.rel_dir));
-  btn.appendChild(h("span", "lib-nav-count", node.has_checklist ? `${node.item_count} 条` : "无清单"));
+  const count = hitCount > 0 ? `命中 ${hitCount} 条`
+    : (node.has_checklist ? `${node.item_count} 条` : "无清单");
+  btn.appendChild(h("span", "lib-nav-count", count));
   btn.onclick = () => openLibReader(node.rel_dir);
   return btn;
 }
 
-/* 详情阅读模态：scenario 路由标签 + checklist 分节条目（P0-P2 徽标），
-   usage / 描述走 mdBlock / mdInline 轻量 markdown 渲染（先转义再注入受控标签）。 */
-function openLibReader(rel) {
+/* 命中条目行：优先级徽标 + 高亮文本 */
+function libDrawerHit(node, hit, depth, q) {
+  const btn = h("button", "lib-drawer-hit d" + depth);
+  btn.type = "button";
+  btn.appendChild(h("span", "lib-pri-badge " + (hit.priority || "other").toLowerCase(), hit.priority || "—"));
+  const txt = h("span", "lib-drawer-hit-text");
+  txt.innerHTML = libHighlight(hit.text || "", q);
+  btn.appendChild(txt);
+  btn.onclick = () => openLibReaderAt(node.rel_dir, hit.sec, hit.idx);
+  return btn;
+}
+
+/* 从命中条目直达：打开阅读模态并滚动定位到该条（短暂高亮） */
+function openLibReaderAt(rel, secIdx, itemIdx) {
   const node = (S.lib.tree || []).flatMap((b) => [b, ...(b.children || [])]).find((n) => n.rel_dir === rel);
   if (!node) return;
+  openLibReaderNode(node);
+  const sec = $("libraryBody").querySelectorAll(".lib-sec")[secIdx];
+  const li = sec ? sec.querySelectorAll(".lib-item")[itemIdx] : null;
+  if (li) {
+    li.scrollIntoView({ block: "center" });
+    li.classList.add("lib-item-flash");
+    setTimeout(() => li.classList.remove("lib-item-flash"), 1800);
+  }
+}
+
+/* 详情阅读模态：scenario 路由标签 + checklist 分节条目（P0-P2 徽标），
+   usage / 描述走 mdBlock / mdInline 轻量 markdown 渲染（先转义再注入受控标签）。
+   node 可来自抽屉缓存（S.lib.tree）或门禁预览的按需拉取；libRoot 用于「完整清单页」深链。 */
+function openLibReader(rel) {
+  const node = (S.lib.tree || []).flatMap((b) => [b, ...(b.children || [])]).find((n) => n.rel_dir === rel);
+  if (node) openLibReaderNode(node);
+}
+
+function openLibReaderNode(node, libRoot) {
   $("libReaderTitle").textContent = node.name || node.rel_dir;
   $("libReaderSub").textContent = node.has_checklist
     ? `${node.rel_dir} · ${node.item_count} 条检查点`
@@ -1611,7 +1729,8 @@ function openLibReader(rel) {
   const body = $("libraryBody");
   body.innerHTML = "";
   body.appendChild(libReaderArticle(node));
-  $("libReaderFullLink").href = "/library?library_root=" + encodeURIComponent(S.lib.root || "");
+  $("libReaderFullLink").href = "/library?library_root="
+    + encodeURIComponent(libRoot ?? S.lib.root ?? "");
   $("libraryModal").classList.remove("hidden");
 }
 
@@ -2104,7 +2223,8 @@ async function commitDistill() {
   btn.disabled = true;
   try {
     await commitPreview("distillHint", d.preview);
-    toast("已登记到 TC-CHECKLIST", `${d.preview.rel_dir}/checklist.md（下次生成自动路由可用）`);
+    toast("已登记到 TC-CHECKLIST", `${d.preview.rel_dir}/checklist.md（下次生成自动路由可用）`, null,
+      { label: "☰ 查看", onClick: () => openLibraryDrawerAt(d.preview.rel_dir) });
     closeDistill();
   } catch (err) {
     $("distillHint").textContent = "写入失败：" + err.message;
@@ -2216,7 +2336,8 @@ async function commitImport() {
   btn.disabled = true;
   try {
     await commitPreview("importHint", d.preview);
-    toast("清单文档已入库", `${d.preview.rel_dir}/checklist.md（溯源 import:${d.file?.name || ""}）`);
+    toast("清单文档已入库", `${d.preview.rel_dir}/checklist.md（溯源 import:${d.file?.name || ""}）`, null,
+      { label: "☰ 查看", onClick: () => openLibraryDrawerAt(d.preview.rel_dir) });
     const rel = d.preview.rel_dir;
     const from = d.from;
     closeImportModal();
@@ -2337,7 +2458,8 @@ async function commitManual() {
   btn.disabled = true;
   try {
     await commitPreview("manualHint", d.preview);
-    toast("手写清单已入库", `${d.preview.rel_dir}/checklist.md（下次生成自动路由可用）`);
+    toast("手写清单已入库", `${d.preview.rel_dir}/checklist.md（下次生成自动路由可用）`, null,
+      { label: "☰ 查看", onClick: () => openLibraryDrawerAt(d.preview.rel_dir) });
     closeManualModal();
   } catch (err) {
     $("manualHint").textContent = "写入失败：" + err.message;

@@ -1058,3 +1058,26 @@ body.libpage { overflow: hidden; display: flex; flex-direction: column; }
 .lib-drawer-rootbar { display: flex; gap: 6px; margin-bottom: 8px; }
 .lib-drawer-rootbar .dl-select { flex: none; max-width: 92px; }
 .lib-drawer-rootbar .dl-input { flex: 1; min-width: 0; }
+
+/* ── 抽屉检索命中直列 + 关键词高亮 + 直达定位闪烁 + toast 动作按钮 ── */
+.lib-drawer-hit {
+  display: flex; align-items: baseline; gap: 8px; width: 100%; text-align: left;
+  border: 1px solid transparent; border-radius: 8px; padding: 5px 8px;
+  background: transparent; color: var(--ink-2); cursor: pointer; font: inherit;
+}
+.lib-drawer-hit:hover { background: var(--hl); color: var(--ink); }
+.lib-drawer-hit.d0 { margin-left: 18px; }
+.lib-drawer-hit.d1 { margin-left: 34px; }
+.lib-drawer-hit-text { font-size: 12px; line-height: 1.55; min-width: 0; overflow-wrap: anywhere; }
+mark.lib-hl {
+  background: var(--surface-3); color: var(--ink);
+  border-radius: 3px; padding: 0 1px; box-shadow: inset 0 0 0 1px var(--border-2);
+}
+.lib-item-flash { animation: libflash 1.8s ease; }
+@keyframes libflash { 0%, 55% { background: var(--hl); box-shadow: inset 0 0 0 1px var(--border-2); } }
+.toast-act {
+  display: block; margin-top: 7px;
+  border: 1px solid var(--border-2); border-radius: 999px; background: transparent;
+  color: var(--ink-2); font: 500 11px/1 inherit; padding: 5px 12px; cursor: pointer;
+}
+.toast-act:hover { color: var(--ink); border-color: var(--ink-3); }

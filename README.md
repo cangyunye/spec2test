@@ -76,8 +76,10 @@ SiliconFlow 等 OpenAI 兼容服务的 Key（不配置则 Mock 演示模式）�
   （选已有或新建），目标目录已有清单自动合并去重，`sources` 跨次累积，预览确认后入库。
 - **CLI**：`devflow checklist init`（生成模板与 payment/refund 示例）· `list`（库树）· `show <业务路径>`。
 - **库浏览**：顶栏「☰ TC-CHECKLIST」（testcases 检查清单）从右侧展开浏览抽屉——标题导航 +
-  关键词检索，库根可切换（项目根模式读 `<项目>/.checklist`，或直接指定库根），点标题用模态框
-  阅读详情（scenario 路由标签 + checklist 分节条目，轻量 markdown 渲染），不打断当前会话；
+  关键词检索（命中的检查点直列并高亮，点击直达原文位置），库根可切换（项目根模式读
+  `<项目>/.checklist`，或直接指定库根），点标题用模态框阅读详情（scenario 路由标签 +
+  checklist 分节条目，轻量 markdown 渲染），不打断当前会话；清单路由门禁可点「👁 预览」
+  先看清单内容再确认注入，沉淀 / 导入 / 手写入库后的提示可一键「查看」定位新业务；
   也可直接访问 `/library` 独立文档页，展示库全树（只读），支持切换 `project_root` / 库根、
   关键词检索与 P0–P2 筛选。
 

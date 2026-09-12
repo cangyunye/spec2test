@@ -374,6 +374,18 @@ def _view_node(root: Path, doc: ScenarioDoc, *, children: list[dict[str, Any]]) 
     }
 
 
+def library_node(root: Path, rel_dir: str) -> Optional[dict[str, Any]]:
+    """单节点文档视图（清单路由门禁预览等按需取用）。
+
+    与 _view_node 同构（含 sections 分节条目），但不含 children；
+    rel 非法或 scenario.md 缺失返回 None（调用方转 404 / 空态）。
+    """
+    doc = load_scenario(root, rel_dir)
+    if doc is None:
+        return None
+    return _view_node(root, doc, children=[])
+
+
 def library_view(root: Path) -> list[dict[str, Any]]:
     """库全树 + 正文（独立浏览页数据源）：业务 → 子业务。
 
@@ -446,6 +458,7 @@ __all__ = [
     "build_candidates",
     "catalog_for_routing",
     "checklist_tree",
+    "library_node",
     "library_view",
     "load_checklists",
     "load_scenario",

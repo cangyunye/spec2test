@@ -824,6 +824,23 @@ def library_api(project_root: str = "", library_root: str = "") -> dict[str, Any
     return {"root": str(root), "exists": root.is_dir(), "tree": library_view(root)}
 
 
+@app.get("/api/library/node")
+def library_node_api(rel_dir: str, project_root: str = "", library_root: str = "") -> dict[str, Any]:
+    """单节点文档视图（清单路由门禁「预览」等按需取用，正文分节含 items）。
+
+    库根解析与 /api/library 一致；rel 非法或 scenario.md 缺失返回 404。
+    """
+    from devflow.checklist.library import library_node, resolve_root
+
+    explicit = library_root.strip()
+    root = Path(explicit).expanduser() if explicit else resolve_root(project_root.strip())
+    rel = rel_dir.strip()
+    node = library_node(root, rel)
+    if node is None:
+        raise HTTPException(status_code=404, detail=f"未找到该业务的清单：{rel}")
+    return node
+
+
 @app.get("/api/library/roots")
 def library_roots() -> dict[str, Any]:
     """已知 project_root 去重列表（取自最近会话），供浏览页快速切换库根。"""

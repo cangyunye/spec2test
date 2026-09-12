@@ -25,3 +25,25 @@ def test_falls_back_to_context_when_title_blank():
 def test_empty_when_nothing_available():
     assert _session_title({}) == ""
     assert _session_title({"requirement": {}}) == ""
+
+
+def test_library_node_api_found_and_404(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from devflow.checklist.library import write_checklist
+    from web.server import app
+
+    write_checklist(
+        tmp_path,
+        "payment",
+        "---\nname: 支付\n---\n## 使用场景\n支付",
+        "## 正向\n- [P0] 支付成功",
+    )
+    c = TestClient(app)
+    r = c.get("/api/library/node", params={"rel_dir": "payment", "library_root": str(tmp_path)})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["name"] == "支付"
+    assert body["sections"][0]["items"][0]["priority"] == "P0"
+    missing = c.get("/api/library/node", params={"rel_dir": "nope", "library_root": str(tmp_path)})
+    assert missing.status_code == 404
