@@ -1416,7 +1416,8 @@ async function openLibraryTree() {
   body.appendChild(h("div", "cl-empty", "加载中…"));
   $("libraryModal").classList.remove("hidden");
   try {
-    const data = await api(`/api/sessions/${S.tid}/checklist-tree`);
+    const projectRoot = String((S.req || {}).project_root || "").trim();
+    const data = await api(`/api/library?project_root=${encodeURIComponent(projectRoot)}`);
     body.innerHTML = "";
     const tree = data.tree || [];
     if (!tree.length) {
@@ -1428,6 +1429,11 @@ async function openLibraryTree() {
       (biz.children || []).forEach((sub) => body.appendChild(libRow(sub, 1)));
     });
     if (data.root) body.appendChild(h("div", "dl-root mono", "清单库：" + data.root));
+    const link = h("a", "lib-open-link", "在新页面打开完整清单 →");
+    link.href = "/library?library_root=" + encodeURIComponent(data.root || "");
+    link.target = "_blank";
+    link.rel = "noopener";
+    body.appendChild(link);
   } catch (err) {
     body.innerHTML = "";
     body.appendChild(h("div", "cl-empty", "加载失败：" + err.message));

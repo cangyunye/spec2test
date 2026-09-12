@@ -17,8 +17,10 @@ from devflow.checklist.distill import (
 )
 from devflow.checklist.library import (
     checklist_tree,
+    library_view,
     load_checklists,
     load_scenario,
+    parse_checklist_sections,
     parse_frontmatter,
     resolve_root,
     scan_business_types,
@@ -200,6 +202,53 @@ def test_checklist_tree(lib):
     assert biz["rel_dir"] == "payment"
     assert biz["item_count"] == 1
     assert biz["children"][0]["rel_dir"] == "payment/refund"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 文档视图（独立浏览页 /library）
+# ═══════════════════════════════════════════════════════════════════
+
+
+def test_parse_checklist_sections():
+    md = (
+        "---\nname: x\nupdated: 2026-01-01\n---\n\n"
+        "## 正向\n- [P0] 支付成功\n- [p1] 回调幂等\n\n"
+        "## 反向\n- 非法输入被拒绝\n"
+    )
+    secs = parse_checklist_sections(md)
+    assert [s["category"] for s in secs] == ["正向", "反向"]
+    assert secs[0]["items"][0] == {"priority": "P0", "text": "支付成功"}
+    assert secs[0]["items"][1] == {"priority": "P1", "text": "回调幂等"}
+    # 无优先级前缀的条目容错保留，不丢内容
+    assert secs[1]["items"][0] == {"priority": "", "text": "非法输入被拒绝"}
+
+
+def test_parse_checklist_sections_empty_and_dangling():
+    assert parse_checklist_sections("") == []
+    # 分节前悬空的条目无归属，忽略（不虚构分节）
+    assert parse_checklist_sections("说明文字\n- [P0] 悬空条目") == []
+
+
+def test_library_view(lib):
+    tree = library_view(lib)
+    assert [n["rel_dir"] for n in tree] == ["payment"]
+    biz = tree[0]
+    assert biz["name"] == "支付业务"
+    assert biz["keywords"] == ["支付"]
+    assert biz["has_checklist"] is True
+    assert biz["item_count"] == 1
+    assert biz["sections"][0]["items"][0]["text"] == "支付成功"
+    assert [c["rel_dir"] for c in biz["children"]] == ["payment/refund"]
+    assert biz["children"][0]["item_count"] == 1
+
+
+def test_library_view_missing_checklist(tmp_path):
+    write_checklist(tmp_path, "plain", "---\nname: 无清单业务\n---\n正文", "")
+    tree = library_view(tmp_path)
+    assert len(tree) == 1
+    assert tree[0]["has_checklist"] is False
+    assert tree[0]["item_count"] == 0
+    assert tree[0]["sections"] == []
 
 
 def _distill_out() -> DistillOutput:

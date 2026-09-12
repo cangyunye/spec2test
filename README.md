@@ -75,6 +75,8 @@ SiliconFlow 等 OpenAI 兼容服务的 Key（不配置则 Mock 演示模式）�
   （AI 规范化）/ 暂不；也可随时在测试场景卡点「☰ 沉淀」。归纳时标记业务类型
   （选已有或新建），目标目录已有清单自动合并去重，`sources` 跨次累积，预览确认后入库。
 - **CLI**：`devflow checklist init`（生成模板与 payment/refund 示例）· `list`（库树）· `show <业务路径>`。
+- **Web 浏览页**：顶栏「☰ 清单库」或直接访问 `/library`——独立文档页展示库全树与
+  `checklist.md` 分节条目（只读），支持切换 `project_root` / 库根、关键词检索与 P0–P2 筛选。
 
 ## 架构一览
 

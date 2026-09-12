@@ -763,6 +763,46 @@ def checklist_tree_api(tid: str) -> dict[str, Any]:
     return {"root": str(root), "tree": checklist_tree(root)}
 
 
+@app.get("/api/library")
+def library_api(project_root: str = "", library_root: str = "") -> dict[str, Any]:
+    """独立浏览页数据源（非会话）：库全树 + 正文分节。
+
+    `library_root` 显式指定库根时直接使用（可覆盖 env 优先级，便于按项目浏览）；
+    否则按 `project_root` 走 resolve_root 解析。路径不存在返回空树（空库合法）。
+    """
+    from devflow.checklist.library import library_view, resolve_root
+
+    explicit = library_root.strip()
+    root = Path(explicit).expanduser() if explicit else resolve_root(project_root.strip())
+    return {"root": str(root), "exists": root.is_dir(), "tree": library_view(root)}
+
+
+@app.get("/api/library/roots")
+def library_roots() -> dict[str, Any]:
+    """已知 project_root 去重列表（取自最近会话），供浏览页快速切换库根。"""
+    from devflow.checklist.library import resolve_root
+
+    conn = _get_sqlite_conn()
+    try:
+        rows = conn.execute(
+            "SELECT thread_id, MAX(checkpoint_id) FROM checkpoints GROUP BY thread_id"
+        ).fetchall()
+    except Exception:
+        rows = []
+    rows.sort(key=lambda r: str(r[1] or ""), reverse=True)
+    graph = build_graph_with_providers()
+    roots: list[str] = []
+    for tid, _ in rows[:50]:
+        try:
+            vals = graph.get_state(_config(thread_id=tid)).values or {}
+            pr = str((vals.get("requirement") or {}).get("project_root") or "").strip()
+            if pr and pr not in roots:
+                roots.append(pr)
+        except Exception:
+            continue
+    return {"default": str(resolve_root("")), "roots": roots}
+
+
 class DistillRequest(BaseModel):
     # 用户标记的业务类型：rel_dir 必填（已有业务或新建英文目录名）
     business: dict[str, Any] | None = None
@@ -1083,6 +1123,12 @@ async def resume_interrupted_runs() -> None:
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
+
+
+@app.get("/library")
+def library_page() -> FileResponse:
+    """独立清单库浏览页（顶栏入口 + 清单弹窗「新页面打开」）。"""
+    return FileResponse(STATIC_DIR / "library.html")
 
 
 # ═══════════════════════════════════════════════════════════════════

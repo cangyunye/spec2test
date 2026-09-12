@@ -307,6 +307,89 @@ def write_checklist(
 
 
 # ═══════════════════════════════════════════════════════════════════
+# 文档视图（独立浏览页 /library）：分节解析 + 全树正文
+# ═══════════════════════════════════════════════════════════════════
+
+_HEADING_RE = re.compile(r"^#{1,6}\s+(.+?)\s*$")
+_BULLET_RE = re.compile(r"^\s*[-*+]\s+(.*\S)\s*$")
+_PRIORITY_RE = re.compile(r"^\[?\s*(P[0-2])\s*\]?\s*[:：]?\s*(.*)$", re.IGNORECASE)
+
+
+def parse_checklist_sections(md: str) -> list[dict[str, Any]]:
+    """checklist.md → [{category, items: [{priority, text}]}]。
+
+    兼容用户手写：无 frontmatter / 无分节 / 条目缺 [P0] 前缀都容错——
+    非标准条目按 priority="" 保留，绝不因格式差异丢内容或抛异常。
+    """
+    if not md or not md.strip():
+        return []
+    _, body = parse_frontmatter(md)
+    sections: list[dict[str, Any]] = []
+    current: Optional[dict[str, Any]] = None
+    for line in body.splitlines():
+        heading = _HEADING_RE.match(line)
+        if heading:
+            current = {"category": heading.group(1).strip(), "items": []}
+            sections.append(current)
+            continue
+        bullet = _BULLET_RE.match(line)
+        if bullet and current is not None:
+            raw = bullet.group(1).strip()
+            pm = _PRIORITY_RE.match(raw)
+            if pm:
+                current["items"].append(
+                    {"priority": pm.group(1).upper(), "text": pm.group(2).strip()}
+                )
+            else:
+                current["items"].append({"priority": "", "text": raw})
+    return sections
+
+
+def _view_node(root: Path, doc: ScenarioDoc, *, children: list[dict[str, Any]]) -> dict[str, Any]:
+    """单节点文档视图：scenario 路由标签 + checklist 分节条目。"""
+    d = root / doc.rel_dir
+    checklist_md = ""
+    checklist_path = d / CHECKLIST_FILE
+    if checklist_path.is_file():
+        try:
+            checklist_md = checklist_path.read_text(encoding="utf-8")
+        except OSError as e:
+            logger.warning("checklist.md 读取失败 %s: %s", checklist_path, e)
+    sections = parse_checklist_sections(checklist_md)
+    meta, _ = parse_frontmatter(checklist_md) if checklist_md else ({}, "")
+    raw_sources = meta.get("sources") if isinstance(meta, dict) else None
+    return {
+        "rel_dir": doc.rel_dir,
+        "name": doc.name,
+        "description": doc.description,
+        "keywords": doc.keywords,
+        "references": [r.model_dump() for r in doc.references],
+        "usage": doc.usage,
+        "has_checklist": bool(checklist_md.strip()),
+        "item_count": sum(len(s["items"]) for s in sections),
+        "updated": str(meta.get("updated") or "") if isinstance(meta, dict) else "",
+        "sources": [str(s) for s in raw_sources] if isinstance(raw_sources, list) else [],
+        "sections": sections,
+        "children": children,
+    }
+
+
+def library_view(root: Path) -> list[dict[str, Any]]:
+    """库全树 + 正文（独立浏览页数据源）：业务 → 子业务。
+
+    与 checklist_tree 同为只读；读取失败降级为空内容，不抛异常。
+    """
+    tree: list[dict[str, Any]] = []
+    for biz in scan_business_types(root):
+        children = [
+            _view_node(root, sub, children=[])
+            for sub in scan_sub_businesses(root, biz.rel_dir)
+        ]
+        tree.append(_view_node(root, biz, children=children))
+    return tree
+
+
+# ═══════════════════════════════════════════════════════════════════
 # 树状视图（CLI list / GET /api/checklist/tree）
 # ═══════════════════════════════════════════════════════════════════
 
@@ -363,8 +446,10 @@ __all__ = [
     "build_candidates",
     "catalog_for_routing",
     "checklist_tree",
+    "library_view",
     "load_checklists",
     "load_scenario",
+    "parse_checklist_sections",
     "parse_frontmatter",
     "resolve_root",
     "scan_business_types",

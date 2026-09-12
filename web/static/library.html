@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="zh" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DevFlow · 业务 Checklist 库</title>
+<script>
+  // 主题预涂装：与主界面共用 df-theme，避免刷新闪色
+  (function () {
+    var t = localStorage.getItem("df-theme") || "dark";
+    document.documentElement.dataset.theme = t;
+  })();
+</script>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="libpage">
+
+<header class="lib-topbar">
+  <div class="brand">
+    <span class="brand-mark"></span>
+    <span class="brand-name">Dev<em>Flow</em></span>
+    <span class="brand-sub">业务 Checklist 库</span>
+  </div>
+
+  <div class="lib-rootbar">
+    <select id="libMode" class="dl-select" title="路径类型">
+      <option value="library_root">库根</option>
+      <option value="project_root">project_root</option>
+    </select>
+    <input id="libRoot" class="dl-input mono" spellcheck="false"
+           placeholder="留空 = 全局库 data/checklist">
+    <datalist id="libRootList"></datalist>
+    <button id="libLoad" class="chip-btn">加载</button>
+  </div>
+
+  <div class="top-actions">
+    <span id="libStats" class="lib-stats mono"></span>
+    <button id="libTheme" class="icon-btn" title="切换明暗主题">◐</button>
+    <a class="chip" href="/">← 返回主应用</a>
+  </div>
+</header>
+
+<div class="lib-shell">
+  <aside class="lib-side">
+    <div class="lib-tools">
+      <input id="libSearch" class="dl-input lib-search" type="search"
+             placeholder="检索检查点…" spellcheck="false">
+      <div id="libPri" class="lib-pri" role="group" aria-label="优先级筛选">
+        <button class="lib-pri-chip on" data-pri="P0">P0</button>
+        <button class="lib-pri-chip on" data-pri="P1">P1</button>
+        <button class="lib-pri-chip on" data-pri="P2">P2</button>
+        <button class="lib-pri-chip on" data-pri="OTHER">其他</button>
+      </div>
+    </div>
+    <nav id="libTree" class="lib-tree" aria-label="业务清单导航">
+      <div class="cl-empty">加载中…</div>
+    </nav>
+    <div id="libRootNote" class="dl-root mono"></div>
+  </aside>
+
+  <main id="libDoc" class="lib-doc">
+    <div class="cl-empty">选择左侧业务查看清单文档。</div>
+  </main>
+</div>
+
+<script src="/static/library.js"></script>
+</body>
+</html>
