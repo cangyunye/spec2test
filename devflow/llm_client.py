@@ -112,7 +112,7 @@ _MOCK_DEMO_TEST_DESIGN: dict[str, Any] = {
 
 
 # Mock 兜底用的各图种类模板（response_type=logic_graph）：保证无 Key 演示模式下
-# sequence / state / er 三种制图也有合法结构化产物（flowchart 沿用下方内联模板）。
+# sequence / state / er / journey 四种制图也有合法结构化产物（flowchart 沿用下方内联模板）。
 _MOCK_DEMO_SEQUENCE: dict[str, Any] = {
     "participants": [
         {"alias": "USER", "label": "操作用户", "kind": "actor", "is_modified": False},
@@ -190,11 +190,37 @@ _MOCK_DEMO_ER: dict[str, Any] = {
     ),
 }
 
+_MOCK_DEMO_JOURNEY: dict[str, Any] = {
+    "sections": [
+        {"section_id": "sec1", "label": "开始使用", "is_modified": False},
+        {"section_id": "sec2", "label": "核心操作", "is_modified": True},
+    ],
+    "tasks": [
+        {"task_id": "j1", "label": "打开应用", "score": 7, "actors": ["用户"],
+         "section_id": "sec1", "is_modified": False},
+        {"task_id": "j2", "label": "执行核心操作", "score": 5,
+         "actors": ["用户", "Mock 演示服务"], "section_id": "sec2", "is_modified": True},
+        {"task_id": "j3", "label": "获得结果", "score": 8, "actors": ["用户"],
+         "section_id": "sec2", "is_modified": False},
+    ],
+    "mermaid_source": (
+        "journey\n"
+        "  title Mock 演示用户旅程\n"
+        "  section 开始使用\n"
+        "    打开应用: 7: 用户\n"
+        "  section 核心操作\n"
+        "    执行核心操作: 5: 用户, Mock 演示服务\n"
+        "    获得结果: 8: 用户"
+    ),
+}
+
 # 制图提示词里的种类特征串 → mock 模板（检测顺序：先种类后通用，避免被通用分支截胡）
 _MOCK_GRAPH_BY_MARKER: list[tuple[str, dict[str, Any]]] = [
     ("sequenceDiagram", _MOCK_DEMO_SEQUENCE),
     ("stateDiagram-v2", _MOCK_DEMO_STATE),
     ("erDiagram", _MOCK_DEMO_ER),
+    # journey 的声明头本身就是小写单词，直接用首行声明做特征串
+    ("journey", _MOCK_DEMO_JOURNEY),
 ]
 
 

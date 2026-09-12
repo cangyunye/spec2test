@@ -111,9 +111,24 @@ class ErRelation(TypedDict, total=False):
     is_modified: bool
 
 
+class JourneySection(TypedDict, total=False):
+    section_id: str
+    label: str                 # 旅程阶段名（如「下单支付」）
+    is_modified: bool
+
+
+class JourneyTask(TypedDict, total=False):
+    task_id: str
+    label: str                 # 用户动作 / 触点
+    score: int                 # 满意度 0~9（mermaid journey 按分数段画表情）
+    actors: list[str]          # 参与角色
+    section_id: Optional[str]  # 归属分组；null = 不归组
+    is_modified: bool
+
+
 class LogicGraph(TypedDict, total=False):
     graph_id: str
-    graph_type: str            # flowchart（默认）/ sequence / state / er
+    graph_type: str            # flowchart（默认）/ sequence / state / er / journey
     nodes: list[LogicNode]     # 全种类兜底投影（下游 code_gen/test_gen/review 只认 nodes/edges）
     edges: list[LogicEdge]
     mermaid_source: str
@@ -124,6 +139,8 @@ class LogicGraph(TypedDict, total=False):
     transitions: list[StateTransition]
     entities: list[ErEntity]
     relations: list[ErRelation]
+    sections: list[JourneySection]
+    tasks: list[JourneyTask]
 
 
 class OpenCodeSessions(TypedDict, total=False):
@@ -170,7 +187,7 @@ class GlobalState(TypedDict, total=False):
     # ── 4. 流程控制字段 ────────────────────────────────
     session_title: str                        # 会话名称：澄清阶段从主要功能生成（LLM 起名，失败退 project_context 截断）
     current_stage: StageType
-    graph_type: Optional[str]                # 制图前门禁选定：flowchart/sequence/state/er
+    graph_type: Optional[str]                # 制图前门禁选定：flowchart/sequence/state/er/journey
     clarify_mode: Literal["normal", "brainstorm", "grill"]   # 澄清模式：普通列表 / 头脑风暴 / 拷问
     clarify_mode_prompt: bool                # 首轮追问后弹「头脑风暴 / 拷问」选择卡（一次即收）
     missing_fields: list[str]                # 校验节点输出的缺失字段/错误

@@ -1099,8 +1099,8 @@ const GATE_META = {
   checklist_route: { n: 0, tag: "GATE · 清单路由", title: "业务清单路由：确认要注入的检查清单" },
 };
 
-const GRAPH_TYPE_ICONS = { flowchart: "⎯>", sequence: "⇄", state: "◉", er: "▤" };
-const GRAPH_TYPE_LABELS = { flowchart: "流程图", sequence: "时序图", state: "状态图", er: "ER 图" };
+const GRAPH_TYPE_ICONS = { flowchart: "⎯>", sequence: "⇄", state: "◉", er: "▤", journey: "☺" };
+const GRAPH_TYPE_LABELS = { flowchart: "流程图", sequence: "时序图", state: "状态图", er: "ER 图", journey: "用户旅程图" };
 
 function gateSubText(gate) {
   if (gate === "requirement_review") {

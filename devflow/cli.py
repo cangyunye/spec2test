@@ -668,7 +668,10 @@ def _interactive_loop(tid: str, *, full: bool = False) -> None:
             if "graph_type_select" in next_nodes:
                 # 图种类门禁：序号 / 种类 id / 中文名均可，空 = 默认 flowchart
                 try:
-                    raw = console.input(f"[bold yellow]{prompt_label}[/] (1-4 / id / 回车=默认) > ").strip()
+                    raw = console.input(
+                        f"[bold yellow]{prompt_label}[/] "
+                        f"(1-{len(candidates)} / id / 回车=默认) > "
+                    ).strip()
                 except (EOFError, KeyboardInterrupt):
                     console.print("\n[dim]已退出（下次可用 devflow resume 继续）[/]")
                     return

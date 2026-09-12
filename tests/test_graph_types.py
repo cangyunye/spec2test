@@ -55,6 +55,17 @@ class TestSuggestGraphTypes:
         cands = {c["id"]: c for c in suggest_graph_types(req)}
         assert cands["sequence"]["recommended"] is True
 
+    def test_journey_keywords_recommend_journey(self):
+        req = {
+            "project_context": "优化下单用户旅程，减少关键触点的体验痛点",
+            "edge_cases": ["新用户首次使用流程卡顿"],
+            "acceptance_criteria": ["核心操作步骤满意度提升"],
+        }
+        cands = {c["id"]: c for c in suggest_graph_types(req)}
+        assert cands["journey"]["recommended"] is True
+        assert cands["journey"]["hit_count"] >= 2
+        assert cands["journey"]["reason"]
+
     def test_all_candidates_always_present_and_flowchart_first(self):
         cands = suggest_graph_types({})
         assert [c["id"] for c in cands][0] == "flowchart"
@@ -78,6 +89,8 @@ class TestNormalizeGraphType:
         assert normalize_graph_type("时序图") == "sequence"
         assert normalize_graph_type("状态图") == "state"
         assert normalize_graph_type("ER图") == "er"
+        assert normalize_graph_type("用户旅程图") == "journey"
+        assert normalize_graph_type("旅程图") == "journey"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -105,6 +118,13 @@ class TestSanitizeTypedMermaid:
         out = sanitize_mermaid("A ||--o{ B : has", "er")
         assert out.splitlines()[0] == "erDiagram"
 
+    def test_journey_missing_header_gets_prepended(self):
+        out = sanitize_mermaid("打开应用: 5: 用户\n支付订单(含优惠券): 3: 用户", "journey")
+        assert out.splitlines()[0] == "journey"
+        # 非 flowchart 不做标签加引号（journey 任务行以冒号分隔，加引号会原样显示）
+        assert '"支付订单(含优惠券)"' not in out
+        assert "支付订单(含优惠券): 3: 用户" in out
+
     def test_flowchart_still_injects_flowchart_td(self):
         out = sanitize_mermaid("n-1[表单(必填)] --> n-2", "flowchart")
         assert out.splitlines()[0] == "flowchart TD"
@@ -124,6 +144,14 @@ class TestProblemsTypedMermaid:
     def test_sequence_missing_header_reported(self):
         problems = mermaid_problems("A->>B: hi", "sequence")
         assert any("sequenceDiagram" in p for p in problems)
+
+    def test_journey_valid_no_problems(self):
+        src = "journey\n  section 下单\n    打开应用: 5: 用户\n    支付订单: 3: 用户"
+        assert mermaid_problems(src, "journey") == []
+
+    def test_journey_missing_header_reported(self):
+        problems = mermaid_problems("打开应用: 5: 用户", "journey")
+        assert any("journey" in p for p in problems)
 
     def test_flowchart_undefined_class_still_checked(self):
         problems = mermaid_problems(
@@ -189,8 +217,35 @@ def _er_graph() -> dict:
     }
 
 
+def _journey_graph() -> dict:
+    return {
+        "graph_id": "g-s4",
+        "graph_type": "journey",
+        "sections": [
+            {"section_id": "sec1", "label": "下单支付", "is_modified": True},
+        ],
+        "tasks": [
+            {"task_id": "j1", "label": "打开应用", "score": 7, "actors": ["用户"],
+             "section_id": None, "is_modified": False},
+            {"task_id": "j2", "label": "加入购物车", "score": 5, "actors": ["用户"],
+             "section_id": "sec1", "is_modified": True},
+            {"task_id": "j3", "label": "完成支付", "score": 8, "actors": ["用户", "商家"],
+             "section_id": "sec1", "is_modified": False},
+        ],
+        "mermaid_source": (
+            "journey\n"
+            "  打开应用: 7: 用户\n"
+            "  section 下单支付\n"
+            "    加入购物车: 5: 用户\n"
+            "    完成支付: 8: 用户, 商家"
+        ),
+    }
+
+
 class TestValidateTypedGraphs:
-    @pytest.mark.parametrize("graph", [_sequence_graph(), _state_graph(), _er_graph()])
+    @pytest.mark.parametrize(
+        "graph", [_sequence_graph(), _state_graph(), _er_graph(), _journey_graph()]
+    )
     def test_valid_typed_graphs_pass(self, graph):
         assert validate_logic_graph(graph) == []
 
@@ -209,6 +264,22 @@ class TestValidateTypedGraphs:
     def test_er_single_entity_rejected(self):
         g = _er_graph()
         g["entities"] = g["entities"][:1]
+        assert validate_logic_graph(g)
+
+    def test_journey_unknown_section_reference(self):
+        g = _journey_graph()
+        g["tasks"][1]["section_id"] = "sec_ghost"
+        errors = validate_logic_graph(g)
+        assert any("sec_ghost" in e for e in errors)
+
+    def test_journey_ungrouped_task_passes(self):
+        g = _journey_graph()
+        g["tasks"][1]["section_id"] = None
+        assert validate_logic_graph(g) == []
+
+    def test_journey_single_task_rejected(self):
+        g = _journey_graph()
+        g["tasks"] = g["tasks"][:1]  # 少于 minItems 2
         assert validate_logic_graph(g)
 
     def test_flowchart_unchanged_path(self):
@@ -306,6 +377,21 @@ class TestGraphGenerateTyped:
         assert validate_logic_graph(g) == []
 
     @pytest.mark.asyncio
+    async def test_journey_generation_projects_nodes(self, monkeypatch):
+        out = await self._generate("journey", _journey_graph(), monkeypatch)
+        assert out["last_error"] is None
+        g = out["logic_graph"]
+        assert g["graph_type"] == "journey"
+        # 投影兜底：tasks → nodes（触点→io），按旅程顺序两两连 data_flow 边
+        assert all(n["node_type"] == "io" for n in g["nodes"])
+        assert [n["node_id"] for n in g["nodes"]] == ["n-1", "n-2", "n-3"]
+        assert len(g["edges"]) == 2
+        assert all(e["edge_type"] == "data_flow" for e in g["edges"])
+        # 边的 is_modified 取两端任务并集：j1(false)-j2(true) → true；j2(true)-j3(false) → true
+        assert [e["is_modified"] for e in g["edges"]] == [True, True]
+        assert validate_logic_graph(g) == []
+
+    @pytest.mark.asyncio
     async def test_invalid_typed_payload_reports_errors(self, monkeypatch):
         bad = _sequence_graph()
         bad["messages"] = bad["messages"][:1]  # 少于 minItems 2
@@ -337,6 +423,7 @@ class TestMockDispatchByType:
         assert _mock_graph_payload("第一行必须是 sequenceDiagram")["participants"]
         assert _mock_graph_payload("第一行必须是 stateDiagram-v2")["states"]
         assert _mock_graph_payload("第一行必须是 erDiagram")["entities"]
+        assert _mock_graph_payload("第一行必须是 `journey`")["tasks"]
         assert _mock_graph_payload("普通需求澄清提示词") is None
 
     @pytest.mark.asyncio
@@ -361,3 +448,26 @@ class TestMockDispatchByType:
         assert g["participants"] and g["messages"]
         assert g["nodes"] and g["edges"]  # 投影兜底就位
         assert g["mermaid_source"].startswith("sequenceDiagram")
+
+    @pytest.mark.asyncio
+    async def test_mock_fallback_journey_end_to_end(self, monkeypatch):
+        """无真实 provider 时（Mock 兜底），journey 制图全链路产出合法结构。"""
+        import asyncio
+
+        from devflow.nodes.graph_gen import graph_generate
+
+        import devflow.llm_client as lc
+
+        monkeypatch.setattr(lc, "_candidates_providers", lambda: [])
+        out = await asyncio.to_thread(
+            graph_generate,
+            {"requirement": {"project_context": "x"}, "code_context": [],
+             "graph_type": "journey", "retry_count": {}},
+        )
+        assert out["last_error"] is None
+        g = out["logic_graph"]
+        assert g["graph_type"] == "journey"
+        assert g["sections"] and g["tasks"]
+        assert g["nodes"] and g["edges"]  # 投影兜底就位
+        assert validate_logic_graph(g) == []
+        assert g["mermaid_source"].startswith("journey")

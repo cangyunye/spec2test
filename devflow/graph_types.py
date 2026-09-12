@@ -3,7 +3,7 @@
 制图前由 graph_type_select 门禁把候选种类（含推荐标记）抛给用户选择；
 本模块是种类定义的唯一来源（id / 展示名 / mermaid 声明头 / 推断关键词）。
 
-四种候选全部受支持：生成、语法修复、结构化校验、前端渲染全链路可用。
+五种候选全部受支持：生成、语法修复、结构化校验、前端渲染全链路可用。
 推断是纯规则匹配（不调 LLM）：对需求文本字段做关键词命中计数，
 flowchart 恒为默认推荐；其余种类命中 ≥2 个不同关键词才标记推荐。
 """
@@ -50,6 +50,16 @@ GRAPH_TYPES: list[dict[str, str]] = [
         "keywords": [
             "数据库", "表结构", "建表", "字段", "存储", "实体", "数据模型",
             "持久化", "ORM", "orm", "迁移", "主键", "外键", "索引", "schema",
+        ],
+    },
+    {
+        "id": "journey",
+        "label": "用户旅程图",
+        "header": "journey",
+        "desc": "用户视角的阶段旅程与满意度：适合多角色多步骤操作流程、体验与痛点分析",
+        "keywords": [
+            "用户旅程", "旅程", "体验", "用户体验", "触点", "满意度", "痛点",
+            "角色", "用户流程", "操作步骤", "使用流程", "旅程图", "journey",
         ],
     },
 ]
@@ -123,5 +133,7 @@ def normalize_graph_type(value: Any) -> str:
         "时序图": "sequence", "时序": "sequence", "sequence": "sequence", "seq": "sequence",
         "状态图": "state", "状态": "state", "state": "state",
         "er": "er", "er图": "er", "er 图": "er",
+        "旅程图": "journey", "用户旅程图": "journey", "用户旅程": "journey",
+        "journey": "journey", "user journey": "journey",
     }
     return aliases.get(v, DEFAULT_GRAPH_TYPE)

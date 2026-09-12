@@ -109,7 +109,7 @@ LOGIC_GRAPH_SCHEMA: dict[str, Any] = {
     "required": ["graph_id", "nodes", "edges", "mermaid_source"],
     "properties": {
         "graph_id": {"type": "string", "minLength": 1},
-        "graph_type": {"type": "string", "enum": ["flowchart", "sequence", "state", "er"]},
+        "graph_type": {"type": "string", "enum": ["flowchart", "sequence", "state", "er", "journey"]},
         "nodes": {
             "type": "array",
             "items": {
@@ -160,7 +160,7 @@ LOGIC_GRAPH_SCHEMA: dict[str, Any] = {
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 2b. 多种类逻辑图 Schema（sequence / state / er）
+# 2b. 多种类逻辑图 Schema（sequence / state / er / journey）
 #
 # 结构化字段按种类分叉；flowchart 沿用上方 LOGIC_GRAPH_SCHEMA。
 # nodes/edges 依旧是全种类兜底投影（下游只认这两个字段），
@@ -175,7 +175,7 @@ _EDGES_FIELD: dict[str, Any] = {
 }
 _BASE_GRAPH_FIELDS: dict[str, Any] = {
     "graph_id": {"type": "string", "minLength": 1},
-    "graph_type": {"type": "string", "enum": ["flowchart", "sequence", "state", "er"]},
+    "graph_type": {"type": "string", "enum": ["flowchart", "sequence", "state", "er", "journey"]},
     "mermaid_source": {"type": "string", "minLength": 5},
 }
 _PARTICIPANT_ITEM = {
@@ -265,6 +265,35 @@ _RELATION_ITEM = {
         "is_modified": {"type": "boolean"},
     },
 }
+_SECTION_ITEM = {
+    "type": "object",
+    "required": ["section_id", "label", "is_modified"],
+    "additionalProperties": False,
+    "properties": {
+        "section_id": {"type": "string", "pattern": r"^sec[A-Za-z0-9_]*$"},
+        "label": {"type": "string", "minLength": 1},
+        "is_modified": {"type": "boolean"},
+    },
+}
+_TASK_ITEM = {
+    "type": "object",
+    "required": ["task_id", "label", "score", "actors", "section_id", "is_modified"],
+    "additionalProperties": False,
+    "properties": {
+        "task_id": {"type": "string", "pattern": r"^j[A-Za-z0-9_]*$"},
+        "label": {"type": "string", "minLength": 1},
+        # 满意度 0~9（mermaid journey 按分数段画表情）
+        "score": {"type": "integer", "minimum": 0, "maximum": 9},
+        "actors": {
+            "type": "array",
+            "minItems": 1,
+            "items": {"type": "string", "minLength": 1},
+        },
+        # 不归组（无分组 / 直接挂在旅程顶部）时为 null，引用校验跳过空值
+        "section_id": {"type": ["string", "null"]},
+        "is_modified": {"type": "boolean"},
+    },
+}
 
 SEQUENCE_GRAPH_SCHEMA: dict[str, Any] = {
     "$schema": "http://json-schema.org/draft-07/schema#",
@@ -312,6 +341,22 @@ ER_GRAPH_SCHEMA: dict[str, Any] = {
     },
 }
 
+JOURNEY_GRAPH_SCHEMA: dict[str, Any] = {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "JourneyGraph",
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["graph_id", "graph_type", "tasks", "mermaid_source"],
+    "properties": {
+        **_BASE_GRAPH_FIELDS,
+        # 分组可选项：journey 允许任务不归组（mermaid 语法本身不强制 section）
+        "sections": {"type": "array", "items": _SECTION_ITEM},
+        "tasks": {"type": "array", "minItems": 2, "items": _TASK_ITEM},
+        "nodes": _NODES_FIELD,
+        "edges": _EDGES_FIELD,
+    },
+}
+
 # 种类 → (schema, 引用完整性检查配置)：[引用字段] → 被引用集合的字段
 _TYPED_GRAPH_SCHEMAS: dict[str, tuple[dict[str, Any], list[tuple[str, str, str]]]] = {
     # (容器字段, 引用字段, 被引用 id 字段)
@@ -321,6 +366,7 @@ _TYPED_GRAPH_SCHEMAS: dict[str, tuple[dict[str, Any], list[tuple[str, str, str]]
                                    ("transitions", "to_state", "state_id")]),
     "er": (ER_GRAPH_SCHEMA, [("relations", "from_entity", "e_id"),
                              ("relations", "to_entity", "e_id")]),
+    "journey": (JOURNEY_GRAPH_SCHEMA, [("tasks", "section_id", "section_id")]),
 }
 
 
@@ -379,7 +425,8 @@ def validate_logic_graph(data: dict[str, Any]) -> list[str]:
     """校验逻辑图是否合规：按 graph_type 分派对应 Schema + 引用完整性检查。
 
     flowchart（含旧数据无 graph_type 字段）→ LOGIC_GRAPH_SCHEMA + nodes/edges 拓扑；
-    sequence / state / er → 各自 Schema + 引用字段 ⊆ 实体 id 集合。
+    sequence / state / er / journey → 各自 Schema + 引用字段 ⊆ 实体 id 集合
+    （journey 的 tasks.section_id 允许为 null，表示任务不归组）。
     """
     errors: list[str] = []
     graph_type = str(data.get("graph_type") or "flowchart")
@@ -394,10 +441,13 @@ def validate_logic_graph(data: dict[str, Any]) -> list[str]:
             return [f"{'/'.join(str(p) for p in e.path)}: {e.message}"]
         for container, ref_field, id_field in ref_checks:
             entity_key = {"messages": "participants", "transitions": "states",
-                          "relations": "entities"}[container]
+                          "relations": "entities", "tasks": "sections"}[container]
             known = {str(i.get(id_field)) for i in data.get(entity_key, []) if isinstance(i, dict)}
             for item in data.get(container, []):
-                ref = str(item.get(ref_field))
+                raw = item.get(ref_field)
+                if raw is None or not str(raw).strip():
+                    continue  # journey 任务可声明为不归组（section_id=null）
+                ref = str(raw)
                 if ref not in known:
                     errors.append(
                         f"{container}[{item.get(next(k for k in item if k.endswith('_id')), '?')}]"

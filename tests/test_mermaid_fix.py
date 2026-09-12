@@ -247,11 +247,40 @@ class TestStubRebuild:
         assert "USER ||--o{ ORDER : places" in src
         assert mermaid_problems(src, "er") == []
 
+    def test_rebuild_journey(self):
+        from devflow.mermaid_fix import is_stub_mermaid, mermaid_problems, rebuild_mermaid_source
+
+        src = rebuild_mermaid_source({
+            "sections": [
+                {"section_id": "sec1", "label": "下单支付"},
+            ],
+            "tasks": [
+                {"task_id": "j1", "label": "打开应用", "score": 7, "actors": ["用户"],
+                 "section_id": None},
+                {"task_id": "j2", "label": "完成支付", "score": 8,
+                 "actors": ["用户", "商家"], "section_id": "sec1"},
+                # 归到了未知分组 → 与不归组同样落到顶部无分组区
+                {"task_id": "j3", "label": "查看订单", "score": 5, "actors": ["用户"],
+                 "section_id": "sec_ghost"},
+            ],
+        }, "journey")
+        assert src and src.startswith("journey")
+        assert is_stub_mermaid("journey", "journey")
+        assert not is_stub_mermaid(src, "journey")
+        # 不归组/未知分组的任务在 section 之前展开（journey 语法无法退出分组）
+        lines = [ln.strip() for ln in src.splitlines()]
+        assert lines[1] == "打开应用: 7: 用户"
+        assert lines.index("查看订单: 5: 用户") < lines.index("section 下单支付")
+        assert "section 下单支付" in src
+        assert "完成支付: 8: 用户, 商家" in src
+        assert mermaid_problems(src, "journey") == []
+
     def test_rebuild_returns_none_when_data_insufficient(self):
         from devflow.mermaid_fix import rebuild_mermaid_source
 
         assert rebuild_mermaid_source({"nodes": []}, "flowchart") is None
         assert rebuild_mermaid_source({"entities": [{"e_id": "x"}]}, "er") is None
+        assert rebuild_mermaid_source({"tasks": []}, "journey") is None
         assert rebuild_mermaid_source({}, "unknown") is None
 
     @pytest.mark.asyncio

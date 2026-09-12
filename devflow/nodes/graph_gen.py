@@ -1,6 +1,6 @@
 """逻辑图节点组（按图种类分叉）：
   1. graph_generate   —— LLM 从需求 + 代码上下文生成可机读逻辑图
-                        （种类由 state.graph_type 决定：flowchart / sequence / state / er）
+                        （种类由 state.graph_type 决定：flowchart / sequence / state / er / journey）
   2. graph_validate   —— 程序校验逻辑图格式 & 拓扑/引用
 
 所有种类都会把原生结构投影成 nodes/edges 兜底视图（下游 code_gen / test_gen /
@@ -135,6 +135,28 @@ class ErGraphModel(BaseModel):
     mermaid_source: str = Field(min_length=5, description="完整的 Mermaid erDiagram 源码")
 
 
+class _JourneySection(BaseModel):
+    section_id: str = Field(pattern=r"^sec[A-Za-z0-9_]*$")
+    label: str = Field(min_length=1)
+    is_modified: bool
+
+
+class _JourneyTask(BaseModel):
+    task_id: str = Field(pattern=r"^j[A-Za-z0-9_]*$")
+    label: str = Field(min_length=1)
+    score: int = Field(ge=0, le=9, description="满意度 0~9：越高越顺畅")
+    actors: list[str] = Field(min_length=1)
+    section_id: str | None = None
+    is_modified: bool
+
+
+class JourneyGraphModel(BaseModel):
+    """LLM 生成的可机读用户旅程图。"""
+    sections: list[_JourneySection] = Field(default_factory=list)
+    tasks: list[_JourneyTask] = Field(min_length=2)
+    mermaid_source: str = Field(min_length=5, description="完整的 Mermaid journey 源码")
+
+
 # ── 各种类系统提示词 ───────────────────────────────────────────
 _FLOWCHART_RULES = """核心原则：
 1. 图 = 程序可遍历的结构化数据，不是给人看的装饰图。所有节点 node_id 必须以 n- 开头，所有边 edge_id 以 e- 开头。
@@ -238,11 +260,35 @@ ER_PROMPT = """你是一个资深数据架构师，擅长把需求拆解为可�
    不要输出 Markdown 代码块、不要加任何解释文字，直接输出 JSON。
 """
 
+JOURNEY_PROMPT = """你是一个资深用户体验分析师，擅长把需求拆解为可机读的用户旅程图（journey）。
+核心原则：
+1. 图 = 程序可遍历的结构化数据。任务 task_id 以 j 开头（如 j1、j2）；
+   分组 section_id 以 sec 开头（如 sec1、sec_order）。
+2. is_modified 必须准确标记：本次需求新增/改动的分组与任务标 true，复用的标 false。
+3. 任务 task 三要素：
+   - label：用户的一个动作 / 触点（动词开头的短语），不要含冒号、分号、竖线；
+   - score：满意度 0~9 整数（0~3 挫败/痛点，4~6 一般，7~9 顺畅）；
+   - actors：参与角色列表（可中文），如 ["用户", "客服"]。
+4. 分组 section 是旅程阶段（如「浏览商品」「下单支付」），可选；任务通过
+   section_id 归组，不归组填 null。
+5. Mermaid 源码语法硬规则（违反会导致渲染失败）：
+   - 第一行必须是 `journey`，不要用 ``` 代码块包裹输出；
+   - 可选标题行：`title 旅程标题`，放在 journey 之后、其他内容之前；
+   - 任务行格式固定为 `任务名: 分数: 角色1, 角色2`（两个冒号分隔，角色逗号分隔，
+     独占一行，任务名与角色里不要出现冒号/分号/换行）；
+   - 分组行：`section 分组名`，分组名独占一行。
+6. 旅程必须覆盖：起点 → 核心步骤（含痛点低分任务）→ 终点。
+7. 分组 0~4 个，任务 3~10 个。
+8. 最终输出必须是一个合法 JSON 对象，仅包含 sections / tasks / mermaid_source 三个字段；
+   不要输出 Markdown 代码块、不要加任何解释文字，直接输出 JSON。
+"""
+
 SYSTEM_PROMPTS: dict[str, str] = {
     "flowchart": "你是一个资深软件架构师，擅长把需求拆解为可机读的逻辑图（flowchart）。\n" + _FLOWCHART_RULES,
     "sequence": SEQUENCE_PROMPT,
     "state": STATE_PROMPT,
     "er": ER_PROMPT,
+    "journey": JOURNEY_PROMPT,
 }
 
 RESPONSE_MODELS: dict[str, type[BaseModel]] = {
@@ -250,6 +296,7 @@ RESPONSE_MODELS: dict[str, type[BaseModel]] = {
     "sequence": SequenceGraphModel,
     "state": StateGraphModel,
     "er": ErGraphModel,
+    "journey": JourneyGraphModel,
 }
 
 
@@ -378,6 +425,10 @@ async def graph_generate_async(state: GlobalState) -> dict[str, Any]:
         logic_graph["entities"] = [_dump(e) for e in result["entities"]]
         logic_graph["relations"] = [_dump(r) for r in result["relations"]]
         _project_er(logic_graph)
+    elif graph_type == "journey":
+        logic_graph["sections"] = [_dump(s) for s in result["sections"]]
+        logic_graph["tasks"] = [_dump(t) for t in result["tasks"]]
+        _project_journey(logic_graph)
     else:  # 防御：注册表与分派不同步时兜底报错
         return {
             "logic_graph": None,
@@ -412,7 +463,8 @@ async def graph_generate_async(state: GlobalState) -> dict[str, Any]:
 
 # ── 非 flowchart 种类 → nodes/edges 兜底投影 ───────────────────
 # 下游（code_gen / test_gen / review / 前端检查器）只认 nodes/edges；
-# 投影让所有种类在这条契约上保持可用。id 前缀换算：s1→n-1 / t1→e-1 / m1→e-1 / r1→e-1。
+# 投影让所有种类在这条契约上保持可用。id 前缀换算：s1→n-1 / t1→e-1 / m1→e-1 /
+# r1→e-1 / j1→n-1。
 
 _TO_NODE_ID = lambda pid: "n-" + re.sub(r"^[a-z]", "", str(pid), count=1)  # noqa: E731
 _TO_EDGE_ID = lambda tid: "e-" + re.sub(r"^[a-z]", "", str(tid), count=1)  # noqa: E731
@@ -486,6 +538,28 @@ def _project_er(graph: dict[str, Any]) -> None:
             "from_node": r["from_entity"], "to_node": r["to_entity"],
             "edge_type": "data_flow", "condition": None,
             "is_modified": bool(r.get("is_modified")),
+        })
+    graph["nodes"], graph["edges"] = nodes, edges
+
+
+def _project_journey(graph: dict[str, Any]) -> None:
+    """tasks → nodes/edges（用户触点→io，按旅程顺序两两连 data_flow 边，j1→n-1）。
+
+    分组（sections）是纯展示分组，不参与投影；边的 is_modified 取两端任务并集——
+    步骤衔接任一端被改动即视为改动。
+    """
+    nodes = [{
+        "node_id": _TO_NODE_ID(t["task_id"]), "label": t["label"], "node_type": "io",
+        "code_ref": None, "is_modified": bool(t.get("is_modified")),
+        "input_spec": None, "output_spec": None,
+    } for t in graph["tasks"]]
+    edges = []
+    for prev, cur in zip(nodes, nodes[1:]):
+        edges.append({
+            "edge_id": f"e-{len(edges) + 1}",
+            "from_node": prev["node_id"], "to_node": cur["node_id"],
+            "edge_type": "data_flow", "condition": None,
+            "is_modified": bool(prev.get("is_modified") or cur.get("is_modified")),
         })
     graph["nodes"], graph["edges"] = nodes, edges
 
