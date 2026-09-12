@@ -987,3 +987,21 @@ body.libpage { overflow: hidden; display: flex; flex-direction: column; }
   .lib-shell { grid-template-columns: 1fr; }
   .lib-side { border-right: none; border-bottom: 1px solid var(--border); max-height: 42vh; }
 }
+
+/* ── 拆分确认门禁卡（feature_questions）──────────────────────── */
+.fq-feats { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.fq-feat { display: flex; align-items: baseline; gap: 6px; font-size: 12.5px; color: var(--ink); }
+.fq-fid { color: var(--ink-3); font-size: 11px; }
+.fq-assumption { font-size: 12px; color: var(--ink-2); }
+.fq-q { display: flex; flex-direction: column; gap: 6px; padding: 6px 0; border-top: 1px dashed var(--border); }
+.fq-q:first-of-type { border-top: 0; }
+.fq-qtext { font-size: 12.5px; color: var(--ink); }
+.fq-opts { display: flex; flex-wrap: wrap; gap: 6px; }
+.fq-opt {
+  appearance: none; border: 1px solid var(--border); border-radius: 999px;
+  background: transparent; color: var(--ink-2);
+  font-size: 12px; padding: 4px 12px; cursor: pointer;
+}
+.fq-opt:hover { border-color: var(--ink-3); color: var(--ink); }
+.fq-opt.is-active { border-color: var(--accent, #4f7cff); color: var(--accent, #4f7cff); background: rgba(79, 124, 255, 0.08); }
+.fq-opt.is-rec { border-style: dashed; }

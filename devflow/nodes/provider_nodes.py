@@ -382,13 +382,19 @@ def make_test_gen_node(providers: Providers | None = None):
     """阶段三：测试生成节点。
 
     读取 state: requirement, logic_graph, code_changes, review_feedback,
-                opencode_sessions.test_gen
-    写入 state: test_report, opencode_sessions.test_gen, current_stage + SPEC 5 错误字段
+                opencode_sessions.test_gen, features, feature_questions
+    写入 state: test_report, opencode_sessions.test_gen, retry_count,
+                current_stage + SPEC 5 错误字段
 
     两种模式：
       代码模式（has_project_code）：测试目标来自 code_changes；为空则报错回炉。
       仅需求模式（无项目代码）：跳过代码检索/生成，直接基于需求 + 逻辑图设计
       端到端测试场景；目标从 target_modules / 逻辑图改动节点推导。
+
+    生成路径：
+      state.features 非空（feature 拆分模式）→ map-reduce：逐 feature 并发生成
+      （Semaphore 限流）→ 单 feature 确定性评审回炉 → 合并去重重编 case_id；
+      全部失败或无 features → 单次整单调用（默认可靠路径，保持兼容）。
     """
     p = providers or get_providers()
 
@@ -402,6 +408,7 @@ def make_test_gen_node(providers: Providers | None = None):
         sessions = state.get("opencode_sessions") or {}
         session_id = sessions.get("test_gen")
         requirement_only = not has_project_code(req)
+        features = [f for f in (state.get("features") or []) if isinstance(f, dict)]
 
         if requirement_only:
             # 仅需求模式：目标 = 需求里的模块列表，缺省则取逻辑图改动节点（兜底全部节点）
@@ -426,8 +433,44 @@ def make_test_gen_node(providers: Providers | None = None):
                 )
                 return _apply_error_out("test_gen", state, err, stage_when_fail="test")
 
+        checklist_ctx = state.get("checklist_context") or {}
+        checklists = checklist_ctx.get("checklists") or None
+        feature_questions = [
+            q for q in (state.get("feature_questions") or []) if isinstance(q, dict)
+        ]
+
+        if features:
+            map_reduce = await _run_feature_map_reduce(
+                p,
+                project_root=project_root,
+                target_symbols=target_symbols,
+                logic_graph=logic_graph,
+                session_id=session_id,
+                requirement=req if requirement_only else None,
+                feedback=state.get("review_feedback"),
+                checklists=checklists,
+                features=features,
+                feature_questions=feature_questions,
+            )
+            if map_reduce is not None:
+                report, extra_retries, failed_notes = map_reduce
+                retry_map = copy.deepcopy(state.get("retry_count") or {})
+                for key, n in extra_retries.items():
+                    retry_map[key] = retry_map.get(key, 0) + n
+                if failed_notes:
+                    report["self_check"] = list(report.get("self_check") or []) + failed_notes
+                return {
+                    "test_report": dict(report),
+                    "opencode_sessions": {**sessions, "test_gen": report["session_id"]},
+                    "retry_count": retry_map,
+                    "last_error": None,
+                    "last_error_code": None,
+                    "last_error_retryable": None,
+                    "current_stage": "test",
+                }
+            # map-reduce 全失败 → 落到下方单次整单路径
+
         try:
-            checklist_ctx = state.get("checklist_context") or {}
             report = await p.test_gen.generate(
                 project_root,
                 target_symbols,
@@ -437,7 +480,7 @@ def make_test_gen_node(providers: Providers | None = None):
                 session_id=session_id,
                 requirement=req if requirement_only else None,
                 feedback=state.get("review_feedback"),
-                checklists=checklist_ctx.get("checklists") or None,
+                checklists=checklists,
             )
         except DevFlowError as e:
             return _apply_error_out(
@@ -479,6 +522,170 @@ def make_test_gen_node(providers: Providers | None = None):
     test_gen_node.__name__ = "test_gen_node"
     test_gen_node.async_version = test_gen_node_async  # type: ignore[attr-defined]
     return test_gen_node
+
+
+# ═══════════════════════════════════════════════════════════════════
+# feature map-reduce：逐 feature 并发生成 → 单元评审 → 合并
+# ═══════════════════════════════════════════════════════════════════
+
+async def _run_feature_map_reduce(
+    p: Providers,
+    *,
+    project_root: str,
+    target_symbols: list[str],
+    logic_graph: dict[str, Any],
+    session_id: str | None,
+    requirement: dict[str, Any] | None,
+    feedback: str | None,
+    checklists: list[dict[str, str]] | None,
+    features: list[dict[str, Any]],
+    feature_questions: list[dict[str, Any]],
+) -> tuple[dict[str, Any], dict[str, int], list[str]] | None:
+    """feature 拆分模式的主流程。
+
+    返回 (合并报告, 追加重试计数 {"test_gen:<fid>": n}, 失败缺口备注)；
+    全部 feature 失败时返回 None（调用方回退单次整单）。
+    """
+    from ..config import settings
+    from ..feature_split import (
+        F0_ID,
+        SKILL_EXECUTE_NAME,
+        checklists_for_feature,
+        make_f0,
+        merge_feature_reports,
+        resolve_skill_paths,
+        validate_feature_report,
+    )
+
+    # ── 执行清单：≥2 个功能点时补 F0 集成轮（避免场景法跨功能串联丢失）──
+    exec_features = [dict(f) for f in features if f.get("feature_id") != F0_ID]
+    f0 = next((dict(f) for f in features if f.get("feature_id") == F0_ID), None)
+    if f0 is None and len(exec_features) >= 2:
+        f0 = make_f0()
+        f0["description"] = (
+            "跨功能点端到端场景（合并阶段补充）：用场景法串联各功能点，"
+            "覆盖主流程与常见分支的完整业务路径"
+        )
+    if f0 is not None:
+        exec_features.append(f0)
+
+    skill_paths = (
+        resolve_skill_paths(None, SKILL_EXECUTE_NAME)
+        if settings.TEST_DESIGN_USE_SKILLS else []
+    )
+    # 拆分门禁的问题决策随派发注入（未回答的按 recommended）
+    qa_lines = [
+        f"- 问：{q.get('question')}｜答：{q.get('answer') or q.get('recommended') or '(未回答，按推荐项执行)'}"
+        for q in feature_questions if q.get("question")
+    ]
+    if qa_lines:
+        for f in exec_features:
+            f["qa_decisions"] = list(qa_lines)
+
+    # ── 清单子集分配：功能点关键词认领；无人认领的归 F0（或唯一功能点）──
+    clist = list(checklists or [])
+    assigned: dict[str, list[dict[str, str]]] = {}
+    used: set[int] = set()
+    for f in exec_features:
+        idxs = [
+            i for i, cl in enumerate(clist)
+            if i not in used and checklists_for_feature([cl], f)
+        ]
+        if idxs:
+            assigned[f.get("feature_id", "")] = [clist[i] for i in idxs]
+            used.update(idxs)
+    unclaimed = [cl for i, cl in enumerate(clist) if i not in used]
+    if unclaimed:
+        fb_fid = exec_features[0].get("feature_id", "") if len(exec_features) == 1 else F0_ID
+        assigned.setdefault(fb_fid, [])
+        assigned[fb_fid] = list(assigned[fb_fid]) + unclaimed
+
+    sem = asyncio.Semaphore(max(1, settings.TEST_DESIGN_CONCURRENCY))
+    extra_retries: dict[str, int] = {}
+    gap_notes: list[str] = []
+    is_mock = bool(getattr(p.test_gen, "name", "").startswith("mock"))
+
+    async def _gen_one(feature: dict[str, Any]) -> dict[str, Any] | None:
+        fid = str(feature.get("feature_id") or "F?")
+        async with sem:
+            # 每功能点只喂自己的上下文：目标 = 自身模块，缺省用功能点名
+            feat_targets = [
+                str(m) for m in (feature.get("target_modules") or []) if m
+            ] or [str(feature.get("name") or fid)]
+
+            def _call(fb: str | None) -> Any:
+                return p.test_gen.generate(
+                    project_root,
+                    feat_targets,
+                    coverage_target=80,
+                    modified_branches_only=True,
+                    logic_graph=logic_graph,
+                    session_id=session_id,
+                    requirement=requirement,
+                    feedback=fb,
+                    checklists=assigned.get(fid) or None,
+                    feature=feature,
+                    skill_paths=skill_paths or None,
+                )
+
+            # provider 异常重试 1 次，仍失败记 gap（不拖垮整单）
+            report: dict[str, Any] | None = None
+            for provider_attempt in range(2):
+                try:
+                    report = dict(await _call(_merged_feedback(feedback, None)))
+                    break
+                except DevFlowError as e:
+                    err = e
+                except Exception as e:  # noqa: BLE001
+                    err = wrap_exception(e, context=f"test_gen:{fid}")
+                if provider_attempt == 0:
+                    logger.warning("feature %s 生成失败，重试 1 次: %s", fid, err)
+            if report is None:
+                gap_notes.append(f"[{fid}] 生成失败（重试后仍失败）：{err.message[:160]}")
+                return None
+            if is_mock:
+                return report
+
+            # 单元评审回炉：确定性校验不过 → 带问题清单重新生成
+            review_rounds = max(0, settings.TEST_DESIGN_REVIEW_ROUNDS)
+            reheat = 0
+            while reheat < review_rounds:
+                issues = validate_feature_report(feature, report)
+                if not issues:
+                    break
+                reheat += 1
+                extra_retries[f"test_gen:{fid}"] = extra_retries.get(f"test_gen:{fid}", 0) + 1
+                logger.info("feature %s 自检未通过，回炉第 %d 轮: %s", fid, reheat, issues)
+                try:
+                    report = dict(await _call(_merged_feedback(feedback, issues)))
+                except Exception as e:  # noqa: BLE001 — 回炉失败保留上一版报告
+                    logger.warning("feature %s 回炉生成失败，保留上版: %s", fid, e)
+                    break
+            issues = validate_feature_report(feature, report)
+            if issues:
+                gap_notes.append(f"[{fid}] 单元自检遗留 {len(issues)} 项：{issues[0]}")
+            return report
+
+    results = await asyncio.gather(*(_gen_one(f) for f in exec_features))
+    pairs = [
+        (f, r) for f, r in zip(exec_features, results) if r is not None
+    ]
+    if not pairs:
+        return None  # 全失败 → 单次整单兜底
+    merged = merge_feature_reports(pairs, features=exec_features, requirement=requirement)
+    return merged, extra_retries, gap_notes
+
+
+def _merged_feedback(base: str | None, issues: list[str] | None) -> str | None:
+    """人工驳回意见 + 本轮回炉问题清单合并成 feedback。"""
+    parts = [base.strip()] if base and base.strip() else []
+    if issues:
+        parts.append(
+            "上轮单功能点自检未通过，必须针对性补齐（每条准则在用例 rationale 里"
+            "注明「验收:<准则摘要>」或「边界:<场景摘要>」）：\n"
+            + "\n".join(f"- {x}" for x in issues)
+        )
+    return "\n\n".join(parts) or None
 
 
 # ═══════════════════════════════════════════════════════════════════

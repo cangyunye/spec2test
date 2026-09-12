@@ -955,6 +955,7 @@ async function startRun(params) {
         comment: params.comment || null,
         selected: params.selected ? params.selected.split(",").filter(Boolean) : null,
         fields,
+        answers: params.answers || null,
       }
     : { text: params.text || "" });
   try {
@@ -1151,7 +1152,7 @@ function onStreamEnd(e) {
     const gateStage = S.gate === "graph_review" ? "graph_review"
       : S.gate === "graph_type_select" ? "graph"
       : S.gate === "requirement_review" ? "requirement_review"
-      : S.gate === "checklist_route" ? "test" : "review";
+      : S.gate === "checklist_route" || S.gate === "feature_questions" ? "test" : "review";
     setStep(stepIdxForStage(gateStage), false);
     updateComposer();
   } else if (S.stage === "done") {
@@ -1179,6 +1180,7 @@ const GATE_META = {
   graph_review: { n: 1, title: "制图评审：逻辑图与需求对齐了吗？" },
   human_review: { n: 2, title: "人工验收：产物达到验收标准了吗？" },
   checklist_route: { n: 0, tag: "GATE · 清单路由", title: "业务清单路由：确认要注入的检查清单" },
+  feature_questions: { n: 0, tag: "GATE · 拆分确认", title: "测试拆分完成：确认功能点与待定问题" },
 };
 
 const GRAPH_TYPE_ICONS = { flowchart: "⎯>", sequence: "⇄", state: "◉", er: "▤", journey: "☺" };
@@ -1199,6 +1201,9 @@ function gateSubText(gate) {
         : "清单库还是空的 · 可上传清单文档入库，或跳过直接生成用例";
     }
     return "AI 已按需求匹配业务清单 · 取消勾选即不加载 · 确认后清单作为用例设计依据";
+  }
+  if (gate === "feature_questions") {
+    return "每个功能点将独立设计用例后合并 · 回答问题可修正拆分方向，跳过则按推荐项执行";
   }
   if (gate === "graph_review") {
     return S.noCode
@@ -1253,6 +1258,13 @@ function openGate(gate, payload) {
       $("btnReject").classList.remove("hidden");
       body.appendChild(gateChecklistBody(S.gatePayload));
     }
+  } else if (gate === "feature_questions") {
+    // 拆分问题确认：「确认」= 按所选答案开始逐功能点设计，「跳过」= 全部按推荐项
+    $("btnApprove").textContent = "确认，开始设计";
+    $("btnReject").textContent = "跳过 · 按推荐项继续";
+    $("btnReject").classList.remove("hidden");
+    $("btnApprove").classList.remove("hidden");
+    body.appendChild(gateFeatureQuestionsBody(S.gatePayload));
   } else {
     $("btnReject").textContent = "驳回";
     $("btnApprove").textContent = "通过";
@@ -1269,7 +1281,8 @@ function openGate(gate, payload) {
 
   $("gateModal").classList.remove("hidden");
   $("gatePill").classList.add("hidden");
-  setStep(stepIdxForStage(gate === "graph_type_select" ? "graph" : gate), false);
+  setStep(stepIdxForStage(gate === "graph_type_select" ? "graph"
+    : gate === "feature_questions" ? "test" : gate), false);
   refreshAdoptUI();
   updateComposer();
 }
@@ -1281,6 +1294,64 @@ function collectSuggested(candidates, out = []) {
     collectSuggested(c.children || [], out);
   });
   return out;
+}
+
+/* 拆分确认卡（feature_questions 门禁）：功能点概览 + AI 假设 + 待确认问题；
+   问题预选推荐项，可点选改答，未答的问题按 recommended 继续 */
+function gateFeatureQuestionsBody(p) {
+  const wrap = h("div", "rr-wrap");
+  S.fqAnswers = {};
+  const feats = p.features || [];
+  if (feats.length) {
+    const fsec = h("div", "dl-sec");
+    fsec.appendChild(h("h4", null, `功能点拆分（${feats.length} 个）`));
+    const ul = h("ul", "fq-feats");
+    feats.forEach((f) => {
+      const li = h("li", "fq-feat");
+      li.appendChild(h("span", "mono fq-fid", f.feature_id || ""));
+      li.appendChild(h("span", null, " " + (f.name || "")));
+      if (f.description) li.title = f.description;
+      ul.appendChild(li);
+    });
+    fsec.appendChild(ul);
+    wrap.appendChild(fsec);
+  }
+  const assum = (p.assumptions || []).filter(Boolean);
+  if (assum.length) {
+    const aseg = h("div", "dl-sec");
+    aseg.appendChild(h("h4", null, "AI 假设（未确认前按此执行）"));
+    assum.forEach((a) => aseg.appendChild(h("div", "fq-assumption", "· " + a)));
+    wrap.appendChild(aseg);
+  }
+  const qs = p.questions || [];
+  if (qs.length) {
+    const qsec = h("div", "dl-sec");
+    qsec.appendChild(h("h4", null, "待确认问题（不回答按推荐项继续）"));
+    qs.forEach((q, qi) => {
+      const block = h("div", "fq-q");
+      block.appendChild(h("div", "fq-qtext", `${qi + 1}. ${q.question}`));
+      const opts = q.options || [];
+      if (opts.length) {
+        const optWrap = h("div", "fq-opts");
+        opts.forEach((o) => {
+          const isRec = o === q.recommended;
+          const btn = h("button", "fq-opt" + (isRec ? " is-rec" : ""),
+            o + (isRec ? " ★推荐" : ""));
+          btn.onclick = () => {
+            S.fqAnswers[q.question] = o;
+            [...optWrap.children].forEach((c) => c.classList.remove("is-active"));
+            btn.classList.add("is-active");
+          };
+          if (isRec) { btn.classList.add("is-active"); S.fqAnswers[q.question] = o; }
+          optWrap.appendChild(btn);
+        });
+        block.appendChild(optWrap);
+      }
+      qsec.appendChild(block);
+    });
+    wrap.appendChild(qsec);
+  }
+  return wrap;
 }
 
 /* 需求确认卡（制图前门禁）：逐字段可编辑，AI 推断字段高亮；只回传被改动的字段 */
@@ -1604,6 +1675,10 @@ function submitGate(decision, comment) {
   const gate = S.gate;
   const isRoute = gate === "checklist_route";
   const isReqReview = gate === "requirement_review";
+  const isFq = gate === "feature_questions";
+  // 拆分确认门禁：approve/reject 映射为 confirm/skip，携带问题答案（未答按推荐项）
+  const fqDecision = isFq ? (decision === "approve" ? "confirm" : "skip") : null;
+  const fqAnswers = isFq ? (S.fqAnswers || {}) : null;
   // 清单路由门禁：approve/reject 映射为 confirm/skip，携带勾选的业务路径；
   // 空态（空库/无匹配）卡上「跳过，直接生成用例」也映射为 skip
   const routeEmpty = isRoute && !(S.gatePayload.candidates || []).length;
@@ -1633,6 +1708,13 @@ function submitGate(decision, comment) {
     } else {
       addDivider("需求未确认 · 退回补充", comment ? `「${comment.slice(0, 40)}」` : null, true);
     }
+  } else if (isFq) {
+    const answered = Object.keys(fqAnswers || {}).length;
+    addDivider(
+      decision === "approve" ? `拆分已确认 · 回答 ${answered} 个问题`
+        : "拆分确认已跳过 · 按推荐项执行",
+      null, true,
+    );
   } else {
     if (gate === "human_review" && decision === "approve") {
       // 终审通过（未走采纳提交）：之后也弹沉淀建议（无预勾选 = 全部用例）
@@ -1647,15 +1729,19 @@ function submitGate(decision, comment) {
     ? { op: "gate", decision: routeDecision, comment: "", selected }
     : isReqReview
       ? { op: "gate", decision: decision === "approve" ? "confirm" : "reject", comment: comment || "", fields }
-      : { op: "gate", decision, comment: comment || "" });
+      : isFq
+        ? { op: "gate", decision: fqDecision, comment: "", answers: fqAnswers }
+        : { op: "gate", decision, comment: comment || "" });
   toast(
     isRoute ? (routeDecision === "confirm" ? "清单已加载" : "已跳过清单")
       : isReqReview ? (decision === "approve"
         ? (editCount ? `已确认并按修改后的清单制图（${editCount} 项）` : "需求已确认，开始制图")
         : "需求已退回，请补充后继续")
+      : isFq ? (decision === "approve" ? "拆分已确认，开始逐功能点设计" : "已跳过确认，按推荐项继续")
         : decision === "approve" ? "已通过" : "意见已回传",
     isRoute ? (routeDecision === "confirm" ? "业务检查清单将作为用例设计依据" : "按常规流程设计用例")
       : isReqReview ? (decision === "approve" ? "确认内容将作为制图与用例设计依据" : "补充需求后会重新澄清并再次请你确认")
+      : isFq ? "回答结果将注入各功能点的用例设计"
         : decision === "approve" ? "流程继续推进" : "正在按意见重新执行",
   );
 }

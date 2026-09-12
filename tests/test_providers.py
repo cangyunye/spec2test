@@ -451,26 +451,85 @@ async def test_opencode_edit_body_spec242(stub_post):
     assert out["lint"][0]["level"] == "error"
 
 
+def test_opencode_run_args_cli_contract():
+    """测试设计改走 opencode run CLI：argv 组装（agent/session/dir/prompt 末位）。"""
+    p = OpenCodeTestProvider(bin_path="opencode", agent="test-designer", extra_args=["--auto"])
+    args = p._build_args("do it", session_id="sess-9", project_root="/tmp/prj")
+    assert args == [
+        "opencode", "run", "--format", "json",
+        "--agent", "test-designer",
+        "--session", "sess-9",
+        "--auto",
+        "--dir", "/tmp/prj",
+        "do it",
+    ]
+
+
+def test_opencode_parse_run_output_events_and_fallback():
+    from devflow.providers.opencode import _parse_run_output
+
+    import json as _json
+
+    envelope = _json.dumps({
+        "status": "ok", "feature_id": "F1",
+        "cases": [{"title": "t", "steps": "s", "expected": "e"}],
+    }, ensure_ascii=False)
+    raw = (
+        '{"type": "session.start", "sessionID": "sess-run-1"}\n'
+        '{"type": "message.part", "sessionID": "sess-run-1", '
+        '"part": {"type": "text", "text": ' + _json.dumps(envelope, ensure_ascii=False) + '}}\n'
+    )
+    text, sid = _parse_run_output(raw)
+    assert sid == "sess-run-1"
+    assert '"feature_id"' in text
+    # 非 JSONL：整段当纯文本
+    text2, sid2 = _parse_run_output("plain output, no events")
+    assert text2 == "plain output, no events" and sid2 is None
+
+
 @pytest.mark.asyncio
-async def test_opencode_test_body_spec243(stub_post):
-    stub_post["response"] = {
-        "session_id": "sess-test-1",
-        "test_cases": [],
-        "run": {"passed": 0, "failed": 1, "skipped": 0, "coverage_pct": None, "logs": "boom"},
-    }
-    p = OpenCodeTestProvider(base_url="http://oc", api_token="")
+async def test_opencode_test_envelope_contract(monkeypatch):
+    """opencode run 产出 feature envelope → TestReport（case 归一 + feature 归属）。"""
+    import json as _json
+
+    captured: dict = {}
+
+    async def fake_run(project_root, prompt, *, session_id=None, env_extra=None):
+        captured["prompt"] = prompt
+        captured["session_id"] = session_id
+        captured["env_extra"] = env_extra
+        envelope = _json.dumps({
+            "status": "ok", "feature_id": "F1",
+            "cases": [
+                {"title": "正向登录主流程", "case_type": "正向", "priority": "P0",
+                 "steps": "1. 打开登录页 2. 提交", "expected": "进入首页",
+                 "rationale": "验收:登录成功进入首页"},
+            ],
+            "coverage_self_check": ["正向已覆盖"],
+            "open_issues": [],
+        }, ensure_ascii=False)
+        event = _json.dumps(
+            {"type": "message.part", "sessionID": "sess-run-1",
+             "part": {"type": "text", "text": envelope}},
+            ensure_ascii=False,
+        )
+        return event
+
+    p = OpenCodeTestProvider(bin_path="opencode", agent="test-designer")
+    monkeypatch.setattr(p, "_run_opencode", fake_run)
     rep = await p.generate(
         "/tmp/prj",
         ["Auth.login"],
-        coverage_target=90,
-        modified_branches_only=False,
-        logic_graph={"graph_id": "gg-1"},
+        feature={"feature_id": "F1", "name": "登录",
+                 "acceptance_criteria": ["登录成功进入首页"]},
+        skill_paths=["/repo/.agents/skills/test-design-execute/SKILL.md"],
     )
-    last = stub_post["last"]
-    assert last["path"] == "/api/v1/tests/generate"
-    body = last["payload"]
-    assert body["target"]["files_or_symbols"] == ["Auth.login"]
-    assert body["target"]["modified_branches_only"] is False
-    assert body["target"]["logic_graph_ref"] == "gg-1"
-    assert body["framework"] == "pytest" and body["coverage_target"] == 90
-    assert rep["run"]["failed"] == 1 and rep["run"]["coverage_pct"] is None
+    assert "F1 登录" in captured["prompt"]
+    assert "先完整读取并严格遵守" in captured["prompt"] or "完整读取" in captured["prompt"]
+    # 技能派发：权限收紧的 env 注入（禁写禁执行）
+    assert captured["env_extra"]["OPENCODE_CONFIG_CONTENT"]
+    cases = rep["test_cases"]
+    assert cases[0]["feature_id"] == "F1" and cases[0]["feature_name"] == "登录"
+    assert cases[0]["priority"] == "P0"
+    assert rep["session_id"] == "sess-run-1"
+    assert rep["run"]["passed"] == 1

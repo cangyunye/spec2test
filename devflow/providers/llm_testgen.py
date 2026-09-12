@@ -105,43 +105,111 @@ def _build_user_prompt(
     requirement: dict[str, Any] | None = None,
     feedback: str | None = None,
     checklists: list[dict[str, str]] | None = None,
+    feature: dict[str, Any] | None = None,
 ) -> str:
-    graph_ctx = {
-        "graph_id": logic_graph.get("graph_id"),
-        "nodes": [
-            {"node_id": n.get("node_id"), "label": n.get("label"),
-             "node_type": n.get("node_type"), "is_modified": n.get("is_modified")}
-            for n in (logic_graph.get("nodes") or [])
-        ],
-        "edges": [
-            {"edge_id": e.get("edge_id"), "from_node": e.get("from_node"),
-             "to_node": e.get("to_node"), "edge_type": e.get("edge_type"),
-             "condition": e.get("condition")}
-            for e in (logic_graph.get("edges") or [])
-        ],
-    }
+    req = requirement or {}
     root_line = (
         f"【项目根目录】{project_root}\n" if project_root
         else "【项目根目录】（未提供项目代码，仅基于需求与逻辑图设计端到端测试场景）\n"
     )
-    parts = [
-        root_line,
-        f"【目标模块】{json.dumps(target_symbols, ensure_ascii=False)}\n",
-        f"【逻辑图】{json.dumps(graph_ctx, ensure_ascii=False)}\n",
-    ]
-    req = requirement or {}
-    req_sections: list[str] = []
-    if (req.get("project_context") or "").strip():
-        req_sections.append(f"项目背景：{req['project_context']}")
-    io = req.get("io_constraints") or {}
-    if (io.get("input") or "").strip() or (io.get("output") or "").strip():
-        req_sections.append(f"输入约束：{io.get('input', '')}；输出约束：{io.get('output', '')}")
-    for ec in req.get("edge_cases") or []:
-        req_sections.append(f"边界场景：{ec}")
-    for ac in req.get("acceptance_criteria") or []:
-        req_sections.append(f"验收标准：{ac}")
-    if req_sections:
-        parts.append("【需求要点】\n" + "\n".join(req_sections) + "\n")
+    if feature:
+        # feature 拆分模式：只喂该功能点的准则/边界/相关节点 + 精简全局背景，
+        # 控制单次会话上下文（map 阶段的核心约束）
+        fid = str(feature.get("feature_id") or "")
+        parts = [root_line]
+        head = f"【当前功能点】{fid} {feature.get('name', '')}"
+        if (feature.get("description") or "").strip():
+            head += f"\n{feature['description']}"
+        parts.append(head + "\n")
+        feat_targets = [m for m in (feature.get("target_modules") or []) if m]
+        parts.append(
+            f"【目标模块】{json.dumps(feat_targets or target_symbols, ensure_ascii=False)}\n"
+        )
+        node_ids = set(feature.get("node_ids") or [])
+        nodes = [n for n in (logic_graph.get("nodes") or []) if not node_ids or n.get("node_id") in node_ids]
+        keep = {n.get("node_id") for n in nodes}
+        edges = [
+            e for e in (logic_graph.get("edges") or [])
+            if e.get("from_node") in keep and e.get("to_node") in keep
+        ] if node_ids else (logic_graph.get("edges") or [])
+        graph_ctx = {
+            "graph_id": logic_graph.get("graph_id"),
+            "nodes": [
+                {"node_id": n.get("node_id"), "label": n.get("label"),
+                 "node_type": n.get("node_type"), "is_modified": n.get("is_modified")}
+                for n in nodes
+            ],
+            "edges": [
+                {"edge_id": e.get("edge_id"), "from_node": e.get("from_node"),
+                 "to_node": e.get("to_node"), "edge_type": e.get("edge_type"),
+                 "condition": e.get("condition")}
+                for e in edges
+            ],
+        }
+        parts.append(f"【逻辑图（本功能点相关）】{json.dumps(graph_ctx, ensure_ascii=False)}\n")
+
+        req_sections: list[str] = []
+        if (req.get("project_context") or "").strip():
+            req_sections.append(f"项目背景（全局）：{req['project_context']}")
+        io = req.get("io_constraints") or {}
+        if (io.get("input") or "").strip() or (io.get("output") or "").strip():
+            req_sections.append(f"全局约束：输入 {io.get('input', '')}；输出 {io.get('output', '')}")
+        for ac in feature.get("acceptance_criteria") or []:
+            req_sections.append(f"验收标准：{ac}")
+        for ec in feature.get("edge_cases") or []:
+            req_sections.append(f"边界场景：{ec}")
+        for line in feature.get("qa_decisions") or []:
+            req_sections.append(f"拆分确认决策：{line}")
+        if req_sections:
+            parts.append("【需求要点（本功能点）】\n" + "\n".join(req_sections) + "\n")
+        if fid == "F0":
+            siblings = "、".join(
+                str(s) for s in (feature.get("sibling_features") or []) if s
+            )
+            parts.append(
+                "本功能点是跨功能端到端综合场景：请用场景法串联"
+                f"（{siblings or '其他功能点'}）设计端到端用例，"
+                "覆盖主流程与常见分支的完整业务路径。\n"
+            )
+        parts.append(
+            "【归属标注（回炉校验依据，必须遵守）】每条用例的 rationale 必须注明依据来源：\n"
+            "- 来自验收标准 → 写「验收:<准则原文摘要>」\n"
+            "- 来自边界场景 → 写「边界:<场景原文摘要>」\n"
+            "- 来自业务清单规则 → 写「清单:<业务>/<条目摘要>」\n"
+            "- 常规功能用例 → 写「功能:<功能点名称>」\n"
+        )
+    else:
+        graph_ctx = {
+            "graph_id": logic_graph.get("graph_id"),
+            "nodes": [
+                {"node_id": n.get("node_id"), "label": n.get("label"),
+                 "node_type": n.get("node_type"), "is_modified": n.get("is_modified")}
+                for n in (logic_graph.get("nodes") or [])
+            ],
+            "edges": [
+                {"edge_id": e.get("edge_id"), "from_node": e.get("from_node"),
+                 "to_node": e.get("to_node"), "edge_type": e.get("edge_type"),
+                 "condition": e.get("condition")}
+                for e in (logic_graph.get("edges") or [])
+            ],
+        }
+        parts = [
+            root_line,
+            f"【目标模块】{json.dumps(target_symbols, ensure_ascii=False)}\n",
+            f"【逻辑图】{json.dumps(graph_ctx, ensure_ascii=False)}\n",
+        ]
+        req_sections: list[str] = []
+        if (req.get("project_context") or "").strip():
+            req_sections.append(f"项目背景：{req['project_context']}")
+        io = req.get("io_constraints") or {}
+        if (io.get("input") or "").strip() or (io.get("output") or "").strip():
+            req_sections.append(f"输入约束：{io.get('input', '')}；输出约束：{io.get('output', '')}")
+        for ec in req.get("edge_cases") or []:
+            req_sections.append(f"边界场景：{ec}")
+        for ac in req.get("acceptance_criteria") or []:
+            req_sections.append(f"验收标准：{ac}")
+        if req_sections:
+            parts.append("【需求要点】\n" + "\n".join(req_sections) + "\n")
     if feedback and feedback.strip():
         parts.append(
             "【上轮验收意见（用户驳回测试设计后给出的修改要求，本轮必须针对性修正）】\n"
@@ -160,10 +228,18 @@ def _build_user_prompt(
             cl_parts.append(str(cl.get("content", "")).strip())
             cl_parts.append("")
         parts.append("\n".join(cl_parts) + "\n")
-    parts.append(
+    tail = (
         "请按上述设计策略系统化输出测试场景组：先写 overview 测试概述（总-分结构的总文档），"
         "再输出 scenarios（每条标注 case_type 设计方法与 target 所属模块），最后给出 self_check 自检结论。"
     )
+    if feature:
+        tail = (
+            "请针对【当前功能点】按上述设计策略输出测试场景组：只设计本功能点的用例"
+            "（scenarios 的 target 填本功能点名称），"
+            "overview 写本功能点的设计要点（全局概述由系统聚合），"
+            "每条 rationale 按归属标注要求注明依据，最后给出 self_check 自检结论。"
+        )
+    parts.append(tail)
     return "\n".join(parts)
 
 class LlmTestGenProvider(TestGenProvider):
@@ -181,6 +257,8 @@ class LlmTestGenProvider(TestGenProvider):
         requirement: dict[str, Any] | None = None,
         feedback: str | None = None,
         checklists: list[dict[str, str]] | None = None,
+        feature: dict[str, Any] | None = None,
+        skill_paths: list[str] | None = None,
     ) -> TestReport:
         graph = logic_graph or {}
         result = await invoke_json(
@@ -188,6 +266,7 @@ class LlmTestGenProvider(TestGenProvider):
             user_prompt=_build_user_prompt(
                 project_root, target_symbols, graph,
                 requirement=requirement, feedback=feedback, checklists=checklists,
+                feature=feature,
             ),
             response_model=_TestDesign,
             response_type="test_design",
@@ -229,12 +308,20 @@ class LlmTestGenProvider(TestGenProvider):
                 "data_requirement": _sget(s, "data_requirement") or None,
                 "rationale": _sget(s, "rationale"),
                 "code_snippet": f"{_sget(s, 'steps')}\n预期: {_sget(s, 'expected')}",
+                **(
+                    {"feature_id": feature.get("feature_id", ""),
+                     "feature_name": feature.get("name", "")}
+                    if feature else {}
+                ),
             }
             for i, s in enumerate(scenarios)
         ]
         total = len(cases)
         return {
-            "session_id": session_id or "llm-test-design",
+            "session_id": (
+                f"llm-test-design:{feature.get('feature_id')}" if feature
+                else session_id or "llm-test-design"
+            ),
             "test_cases": cases,
             "run": {
                 "passed": total if total else 1,

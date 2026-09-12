@@ -35,6 +35,8 @@ NODE_LABELS: dict[str, str] = {
     "apply_code": "代码落盘",
     "checklist_route_match": "清单路由",
     "checklist_route_gate": "清单确认",
+    "feature_split": "测试拆分",
+    "feature_gate": "拆分确认",
     "test_gen": "测试设计",
     "test_run": "测试执行",
     "review": "人工验收",

@@ -1,5 +1,6 @@
 from .clarify import clarify_extract, clarify_validate, clarify_build_question
 from .compress import compress_messages
+from .feature_split import feature_gate_node, feature_split_node
 from .graph_gen import graph_generate, graph_validate
 from .graph_review import graph_review_node, route_after_graph_review
 from .graph_type import graph_type_select
@@ -30,6 +31,8 @@ __all__ = [
     "clarify_validate",
     "clarify_build_question",
     "compress_messages",
+    "feature_split_node",
+    "feature_gate_node",
     "graph_generate",
     "graph_validate",
     "graph_review_node",

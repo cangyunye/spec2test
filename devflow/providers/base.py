@@ -75,6 +75,9 @@ class TestCase(TypedDict, total=False):
     line_end: int
     code_snippet: str
     covered_edges: list[str]  # 对应的 LogicGraph.edge_id 列表
+    # feature 拆分模式下的归属（单次整单模式为空）
+    feature_id: str
+    feature_name: str
 
 
 class TestRun(TypedDict):
@@ -95,6 +98,8 @@ class TestReport(TypedDict, total=False):
     self_check: list[str] | None
     # 注入的业务检查清单来源（checklist 库 rel_dir 列表，空 = 未加载）
     checklist_refs: list[str]
+    # feature 拆分模式：合并后的权威章节结构（GlobalState.Feature 的 dict 形态）
+    features: list[dict[str, Any]]
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -186,6 +191,8 @@ class TestGenProvider(CodeProvider, ABC):
         requirement: dict[str, Any] | None = None,
         feedback: str | None = None,
         checklists: list[dict[str, str]] | None = None,
+        feature: dict[str, Any] | None = None,
+        skill_paths: list[str] | None = None,
     ) -> TestReport:
         """生成针对 target_symbols 的测试并运行，返回完整测试报告。
 
@@ -193,4 +200,8 @@ class TestGenProvider(CodeProvider, ABC):
         feedback:    人工验收驳回的意见，重新设计用例时需针对性修正
         checklists:  路由确认后加载的业务检查清单 [{rel_dir, name, content}]，
                      非空时用例设计必须逐条核对覆盖（None = 库未命中）
+        feature:     feature 拆分模式下的当前功能点（GlobalState.Feature 形态）；
+                     None = 单次整单模式
+        skill_paths: 技能执行器模式下要完整读取遵守的 SKILL.md 绝对路径列表；
+                     None/[] = 不走技能，按 prompt 注入执行
         """

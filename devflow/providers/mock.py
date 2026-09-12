@@ -167,6 +167,8 @@ class MockTestGen(TestGenProvider):
         requirement: dict[str, Any] | None = None,
         feedback: str | None = None,
         checklists: list[dict[str, str]] | None = None,
+        feature: dict[str, Any] | None = None,
+        skill_paths: list[str] | None = None,
     ) -> TestReport:
         edge_ids: list[str] = []
         if logic_graph:
@@ -187,6 +189,11 @@ class MockTestGen(TestGenProvider):
                         f"    assert {sym.split('.')[-1]}({i}) == {i + 1}\n"
                     ),
                     "covered_edges": edge_ids[i : i + 1] if edge_ids else [],
+                    **(
+                        {"feature_id": feature.get("feature_id", ""),
+                         "feature_name": feature.get("name", "")}
+                        if feature else {}
+                    ),
                 }
             )
         total = len(cases) or 1
@@ -200,10 +207,17 @@ class MockTestGen(TestGenProvider):
             "logs": f"mock pytest finished: {passed} passed, {failed} failed",
         }
         return {
-            "session_id": _new_sess("test", session_id),
+            "session_id": (
+                _new_sess(f"test-{feature.get('feature_id')}", session_id) if feature
+                else _new_sess("test", session_id)
+            ),
             "test_cases": cases,
             "run": run,
             "target_symbols": target_symbols,
-            "overview": "Mock 演示模式：用例为模板数据，接入真实 LLM 后按系统化设计策略产出。",
+            "overview": (
+                f"Mock 演示模式：功能点 {feature.get('feature_id')} {feature.get('name', '')} 的模板用例。"
+                if feature else
+                "Mock 演示模式：用例为模板数据，接入真实 LLM 后按系统化设计策略产出。"
+            ),
             "self_check": [],
         }

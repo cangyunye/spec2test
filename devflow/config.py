@@ -247,6 +247,32 @@ class Settings:
         self.OPENCODE_BASE_URL: str = os.getenv("OPENCODE_BASE_URL", "http://localhost:8080")
         self.OPENCODE_API_TOKEN: str = os.getenv("OPENCODE_API_TOKEN", "")
 
+        # ── OpenCode CLI（opencode run 子进程，测试设计技能执行器）──
+        self.OPENCODE_BIN: str = os.getenv("OPENCODE_BIN", "opencode")
+        # 技能派发使用的 agent 名（需在目标项目 opencode 配置里存在）
+        self.OPENCODE_AGENT: str = os.getenv("OPENCODE_AGENT", "test-designer")
+        # opencode run 单次调用超时；附加 CLI 参数（按空白切分，如 --auto）
+        self.OPENCODE_RUN_TIMEOUT_SEC: int = int(os.getenv("OPENCODE_RUN_TIMEOUT_SEC", "900"))
+        self.OPENCODE_EXTRA_ARGS: list[str] = os.getenv("OPENCODE_EXTRA_ARGS", "").split()
+
+        # ── 测试设计 feature 化（可选流程，默认单次整单）──
+        # feature | single：single 保持一次性整单设计（模型可靠时的默认）；
+        # feature 走「拆分 → 逐 feature 生成 → 单元评审 → 合并」，供精细控制
+        # 会话上下文 / 按功能点派发子代理时选用
+        self.TEST_DESIGN_MODE: str = os.getenv("TEST_DESIGN_MODE", "single")
+        self.TEST_DESIGN_MAX_FEATURES: int = int(os.getenv("TEST_DESIGN_MAX_FEATURES", "8"))
+        self.TEST_DESIGN_CONCURRENCY: int = int(os.getenv("TEST_DESIGN_CONCURRENCY", "3"))
+        # 每 feature 校验不过时的最大回炉轮数
+        self.TEST_DESIGN_REVIEW_ROUNDS: int = int(os.getenv("TEST_DESIGN_REVIEW_ROUNDS", "2"))
+        # 技能执行器（可选）：默认关闭；开启后逐 feature 派发时显式传 SKILL.md
+        # 绝对路径并要求执行器先完整读取
+        self.TEST_DESIGN_USE_SKILLS: bool = os.getenv(
+            "TEST_DESIGN_USE_SKILLS", "0"
+        ).strip().lower() not in ("0", "false", "no", "off")
+        self.TEST_DESIGN_SKILL_DIR: Path = Path(
+            os.getenv("TEST_DESIGN_SKILL_DIR", str(Path(__file__).resolve().parent.parent / ".agents" / "skills"))
+        )
+
         # ── 执行闭环（diff 落盘 + 真实测试执行）────────────
         self.APPLY_CODE_ENABLED: bool = os.getenv(
             "APPLY_CODE_ENABLED", "1"

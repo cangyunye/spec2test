@@ -87,6 +87,7 @@ from .nodes import (
     route_after_test_run,
 )
 from .nodes.checklist_route import checklist_route_gate, checklist_route_match
+from .nodes.feature_split import feature_gate_node, feature_split_node
 from .providers import Providers, get_providers
 from .resilience import dead_letter_record
 from .schemas import empty_requirement
@@ -490,6 +491,8 @@ def build_graph_with_providers(providers: Providers | None = None):
     workflow.add_node("apply_code", make_apply_code_node())
     workflow.add_node("checklist_route_match", checklist_route_match)
     workflow.add_node("checklist_route_gate", checklist_route_gate)
+    workflow.add_node("feature_split", feature_split_node)
+    workflow.add_node("feature_gate", feature_gate_node)
     workflow.add_node("test_gen", make_test_gen_node(p))
     workflow.add_node("test_run", make_test_run_node())
     workflow.add_node("review", review_node)
@@ -604,7 +607,11 @@ def build_graph_with_providers(providers: Providers | None = None):
 
     # 清单路由：match（LLM 匹配，结果落 state）→ gate（有候选才 interrupt 确认）→ 测试设计
     workflow.add_edge("checklist_route_match", "checklist_route_gate")
-    workflow.add_edge("checklist_route_gate", "test_gen")
+    # feature 拆分（TEST_DESIGN_MODE=feature 才产出 features；single 模式直通）→
+    # 拆分问题门禁（无 open_questions 自动放行）→ 测试设计
+    workflow.add_edge("checklist_route_gate", "feature_split")
+    workflow.add_edge("feature_split", "feature_gate")
+    workflow.add_edge("feature_gate", "test_gen")
 
     # 测试设计完成后一律交给 test_run 做真实执行判定
     workflow.add_conditional_edges(
@@ -680,6 +687,8 @@ def initial_state() -> dict[str, Any]:
         "checklist_routed": False,
         "adopted_cases": None,
         "distill_dismissed": False,
+        "features": [],
+        "feature_questions": [],
         "last_error": None,
         "last_error_code": None,
         "last_error_retryable": False,

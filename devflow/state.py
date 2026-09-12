@@ -143,6 +143,23 @@ class LogicGraph(TypedDict, total=False):
     tasks: list[JourneyTask]
 
 
+class Feature(TypedDict, total=False):
+    """测试设计 feature 拆分项（feature_split 节点产出）。
+
+    每条验收标准/边界场景必须归属到某个 feature；无归属的由拆分覆盖自检
+    归入 F0「综合与集成」功能点，不允许凭空丢失。
+    """
+
+    feature_id: str             # F1, F2...（F0 保留给综合与集成）
+    name: str
+    description: str
+    target_modules: list[str]
+    acceptance_criteria: list[str]
+    edge_cases: list[str]
+    node_ids: list[str]         # 对应 LogicNode.node_id（代码模式聚类产物）
+    is_modified: bool
+
+
 class OpenCodeSessions(TypedDict, total=False):
     search: Optional[str]
     code_gen: Optional[str]
@@ -180,6 +197,8 @@ class GlobalState(TypedDict, total=False):
     checklist_routed: bool                   # 本会话已做过路由（用例回炉重生成时不重复弹门禁）
     adopted_cases: Optional[list[str]]       # 用户在测试卡勾选采纳的用例（采纳 = 评审通过）；None = 未做采纳
     distill_dismissed: bool                  # 用户对「沉淀建议卡」点了暂不（本会话不再提示）
+    features: list[Feature]                  # feature 拆分结果（feature_split 节点产出；空 = 未拆分/单次整单）
+    feature_questions: list[dict[str, Any]]  # 拆分阶段待确认问题（feature_gate 门禁承接用）
 
     # ── 3. 子系统会话映射 ──────────────────────────────
     opencode_sessions: OpenCodeSessions

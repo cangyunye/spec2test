@@ -111,7 +111,7 @@ def _clear_run_mark(tid: str) -> None:
 
 # interrupt 门禁节点：停在这些位置 = 等用户决策，重启后不自动跑
 _GATE_NODES = {"requirement_review", "graph_type_select", "graph_review",
-               "checklist_route_gate", "review"}
+               "checklist_route_gate", "feature_gate", "review"}
 
 
 def _gate_pending(graph: Any, tid: str) -> bool:
@@ -247,6 +247,7 @@ class GateDecision(BaseModel):
     comment: str | None = None   # reject 时的修改意见（可选）
     selected: list[str] | None = None  # checklist_route 门禁：确认加载的业务路径
     fields: dict[str, Any] | None = None  # requirement_review 门禁：就地修改的字段（点路径 → 值）
+    answers: dict[str, str] | None = None  # feature_questions 门禁：{问题原文: 回答}
 
 
 class ActiveProviderBody(BaseModel):
@@ -706,6 +707,9 @@ def _build_export_md(vals: dict[str, Any]) -> str:
     if report:
         run = report.get("run") or {}
         cases = report.get("test_cases") or []
+        report_features = [
+            f for f in (report.get("features") or []) if isinstance(f, dict)
+        ]
         lines += ["", "## 测试用例文档", ""]
 
         # ── 总文档：概述 + 公共口径（方法论来自 doc-based/functional testcase-generator skills）──
@@ -719,20 +723,63 @@ def _build_export_md(vals: dict[str, Any]) -> str:
             "",
         ]
 
-        # ── 分文档：按所属模块分组的用例清单 ──
-        groups: dict[str, list[dict[str, Any]]] = {}
-        for c in cases:
-            groups.setdefault(str(c.get("target") or "通用"), []).append(c)
-        for gi, (mod, mod_cases) in enumerate(groups.items(), start=1):
-            lines += [f"### 2.{gi} {mod}", "",
-                      "| 标识 | 层级 | 优先级 | 类型 | 标题 | 前置 | 步骤 | 预期 | 依据 |",
-                      "|---|---|---|---|---|---|---|---|---|"]
-            for c in mod_cases:
-                cells = [str(c.get(k, "") or "").replace("|", "\\|").replace("\n", " ")
-                         for k in ("case_id", "tier", "priority", "case_type", "title",
-                                   "precondition", "steps", "expected", "rationale")]
-                lines.append("| " + " | ".join(cells) + " |")
-            lines.append("")
+        if report_features:
+            # ── feature 拆分模式：按功能点分章节（report.features 是权威结构）──
+            from devflow.feature_split import render_test_design_plan
+
+            lines += [
+                "## 测试设计计划（test-design-plan）", "",
+                render_test_design_plan(report_features, vals.get("requirement") or {}),
+                "",
+            ]
+            for gi, feat in enumerate(report_features, start=1):
+                fid = str(feat.get("feature_id") or f"F{gi}")
+                fname = str(feat.get("name") or fid)
+                feat_cases = [c for c in cases if str(c.get("feature_id") or "") == fid]
+                lines += [f"### 3.{gi} {fid} {fname}", ""]
+                if feat.get("description"):
+                    lines += [str(feat["description"]), ""]
+                if feat.get("target_modules"):
+                    lines += [f"模块：{'、'.join(str(m) for m in feat['target_modules'])}", ""]
+                if not feat_cases:
+                    lines += ["（本功能点无用例——见质量自检中的遗留缺口）", ""]
+                    continue
+                lines += [
+                    "| 标识 | 层级 | 优先级 | 类型 | 标题 | 前置 | 步骤 | 预期 | 依据 |",
+                    "|---|---|---|---|---|---|---|---|---|",
+                ]
+                for c in feat_cases:
+                    cells = [str(c.get(k, "") or "").replace("|", "\\|").replace("\n", " ")
+                             for k in ("case_id", "tier", "priority", "case_type", "title",
+                                       "precondition", "steps", "expected", "rationale")]
+                    lines.append("| " + " | ".join(cells) + " |")
+                lines.append("")
+            known_fids = {str(f.get("feature_id") or "") for f in report_features}
+            orphans = [c for c in cases if str(c.get("feature_id") or "") not in known_fids]
+            if orphans:
+                lines += ["### 3.x 未归属用例（异常，应回炉）", "",
+                          "| 标识 | 优先级 | 类型 | 标题 |",
+                          "|---|---|---|---|"]
+                for c in orphans:
+                    cells = [str(c.get(k, "") or "").replace("|", "\\|").replace("\n", " ")
+                             for k in ("case_id", "priority", "case_type", "title")]
+                    lines.append("| " + " | ".join(cells) + " |")
+                lines.append("")
+        else:
+            # ── 单次整单模式：按所属模块分组（原有结构）──
+            groups: dict[str, list[dict[str, Any]]] = {}
+            for c in cases:
+                groups.setdefault(str(c.get("target") or "通用"), []).append(c)
+            for gi, (mod, mod_cases) in enumerate(groups.items(), start=1):
+                lines += [f"### 2.{gi} {mod}", "",
+                          "| 标识 | 层级 | 优先级 | 类型 | 标题 | 前置 | 步骤 | 预期 | 依据 |",
+                          "|---|---|---|---|---|---|---|---|---|"]
+                for c in mod_cases:
+                    cells = [str(c.get(k, "") or "").replace("|", "\\|").replace("\n", " ")
+                             for k in ("case_id", "tier", "priority", "case_type", "title",
+                                       "precondition", "steps", "expected", "rationale")]
+                    lines.append("| " + " | ".join(cells) + " |")
+                lines.append("")
 
         # ── 质量自检结论 ──
         checks = report.get("self_check") or []
@@ -994,15 +1041,18 @@ async def events_stream(tid: str, after: int = 0) -> StreamingResponse:
 
 
 def _gate_resume(
-    decision: str, comment: str = "", selected: str = "", fields: dict[str, Any] | None = None
+    decision: str, comment: str = "", selected: str = "",
+    fields: dict[str, Any] | None = None, answers: dict[str, str] | None = None,
 ) -> Command:
     """门禁决策 → Command(resume=...)。
 
     无附加信息时 resume 传裸字符串（兼容旧门禁）；带 comment/selected（清单
-    路由勾选）/fields（需求确认就地修改）时传结构化 dict，由各门禁节点自行解析。
+    路由勾选）/fields（需求确认就地修改）/answers（拆分问题回答）时传结构化
+    dict，由各门禁节点自行解析。
     """
     sel_list = [s.strip() for s in selected.split(",") if s.strip()] if selected else None
-    if comment or sel_list or fields:
+    ans_map = {str(k): str(v) for k, v in (answers or {}).items() if str(v).strip()} or None
+    if comment or sel_list or fields or ans_map:
         payload: dict[str, Any] = {"decision": decision}
         if comment:
             payload["comment"] = comment
@@ -1010,6 +1060,8 @@ def _gate_resume(
             payload["selected"] = sel_list
         if fields:
             payload["fields"] = fields
+        if ans_map:
+            payload["answers"] = ans_map
         return Command(resume=payload)
     return Command(resume=decision)
 
@@ -1033,7 +1085,8 @@ async def decide_gate(tid: str, body: GateDecision) -> dict[str, Any]:
     if not _thread_exists(tid):
         raise HTTPException(404, f"会话不存在: {tid}")
     input_msg: Any = _gate_resume(
-        body.decision, body.comment or "", ",".join(body.selected or []), body.fields
+        body.decision, body.comment or "", ",".join(body.selected or []), body.fields,
+        body.answers,
     )
     result = await start_run(tid, input_msg)
     if not result.get("accepted"):

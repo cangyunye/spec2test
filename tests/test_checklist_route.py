@@ -233,7 +233,10 @@ class TestWiring:
         assert {"checklist_route_match", "checklist_route_gate"} <= nodes
         edges = {(e.source, e.target) for e in graph.get_graph().edges}
         assert ("checklist_route_match", "checklist_route_gate") in edges
-        assert ("checklist_route_gate", "test_gen") in edges
+        # 门禁后先进 feature 拆分（single 模式节点内直通），再到测试设计
+        assert ("checklist_route_gate", "feature_split") in edges
+        assert ("feature_split", "feature_gate") in edges
+        assert ("feature_gate", "test_gen") in edges
 
     def test_gate_resume_dict(self):
         from web.server import _gate_resume
