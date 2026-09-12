@@ -338,8 +338,10 @@ def test_init_library_creates_example(tmp_path):
 def test_init_library_seeds_general(tmp_path):
     init_library(tmp_path)
     rels = {n["rel_dir"]: n for n in library_view(tmp_path)}
-    assert {"api", "frontend", "sql", "shell"} <= set(rels)
+    assert {"api", "frontend", "sql", "shell", "skill", "agent", "ci", "unittest"} <= set(rels)
     assert rels["api"]["item_count"] == 24
+    assert rels["skill"]["item_count"] == 15
+    assert rels["unittest"]["item_count"] == 15
     assert [c["rel_dir"] for c in rels["frontend"]["children"]] == [
         "frontend/auth", "frontend/layout", "frontend/usability",
     ]
