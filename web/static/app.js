@@ -38,6 +38,54 @@ function h(tag, cls, text) {
   if (text !== undefined) el.textContent = text;
   return el;
 }
+/* 轻量 markdown 渲染：先 esc() 转义原文，再只注入自己生成的受控标签，防 XSS */
+function mdInline(s) {
+  let out = esc(s);
+  out = out.replace(/`([^`]+)`/g, '<code class="md-code">$1</code>');
+  out = out.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  out = out.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+  return out;
+}
+function mdBlock(md) {
+  const frag = document.createDocumentFragment();
+  const lines = String(md ?? "").replace(/\r\n?/g, "\n").split("\n");
+  const isHead = (l) => /^\s{0,3}#{1,6}\s+/.test(l);
+  const isUl = (l) => /^\s*[-*+]\s+/.test(l);
+  const isOl = (l) => /^\s*\d+[.)]\s+/.test(l);
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line.trim()) { i += 1; continue; }
+    let m;
+    if ((m = line.match(/^\s{0,3}(#{1,6})\s+(.*)$/))) {
+      const el = h("h4", "md-h");
+      el.innerHTML = mdInline(m[2].replace(/\s+#+\s*$/, ""));
+      frag.appendChild(el); i += 1; continue;
+    }
+    if (isUl(line)) {
+      const ul = h("ul", "md-list");
+      while (i < lines.length && (m = lines[i].match(/^\s*[-*+]\s+(.*)$/))) {
+        const li = h("li"); li.innerHTML = mdInline(m[1]); ul.appendChild(li); i += 1;
+      }
+      frag.appendChild(ul); continue;
+    }
+    if (isOl(line)) {
+      const ol = h("ol", "md-list");
+      while (i < lines.length && (m = lines[i].match(/^\s*\d+[.)]\s+(.*)$/))) {
+        const li = h("li"); li.innerHTML = mdInline(m[1]); ol.appendChild(li); i += 1;
+      }
+      frag.appendChild(ol); continue;
+    }
+    const p = h("div", "md-p");
+    const buf = [];
+    while (i < lines.length && lines[i].trim() && !isHead(lines[i]) && !isUl(lines[i]) && !isOl(lines[i])) {
+      buf.push(lines[i]); i += 1;
+    }
+    p.innerHTML = buf.map(mdInline).join("<br>");
+    frag.appendChild(p);
+  }
+  return frag;
+}
 function fmtDur(ms) { return (ms / 1000).toFixed(1) + "s"; }
 function stageName(s) {
   return ({
@@ -554,8 +602,18 @@ function renderTestCard(report) {
   // 测试概述（总-分结构的总文档；方法论来自 doc-based/functional testcase-generator skills）
   if (report.overview || (report.self_check || []).length) {
     const ov = h("div", "card-note t-overview");
-    if (report.overview) ov.appendChild(h("div", null, "📋 " + report.overview));
-    (report.self_check || []).forEach((s) => ov.appendChild(h("div", null, "✓ " + s)));
+    if (report.overview) {
+      const row = h("div", "t-ov-row");
+      row.appendChild(h("span", "t-ov-mark", "📋"));
+      row.appendChild(mdBlock(report.overview));
+      ov.appendChild(row);
+    }
+    (report.self_check || []).forEach((s) => {
+      const row = h("div", "t-ov-row");
+      row.appendChild(h("span", "t-ov-mark", "✓"));
+      row.appendChild(mdBlock(s));
+      ov.appendChild(row);
+    });
     // 本卡用例若注入了业务检查清单，标注来源（checklist 库 rel_dir）
     (report.checklist_refs || []).forEach((r) => {
       if (r) ov.appendChild(h("div", "t-clref mono", "☰ 业务清单：" + r));

@@ -378,6 +378,18 @@ textarea::placeholder, input::placeholder { color: var(--ink-4); }
 /* 测试概述 + 质量自检（总-分结构总文档摘要） */
 .t-overview { color: var(--ink-2); line-height: 1.7; padding-top: 2px; }
 .t-overview div { overflow-wrap: anywhere; }
+.t-overview .t-ov-row { display: flex; gap: 6px; align-items: flex-start; }
+.t-overview .t-ov-mark { flex: none; line-height: 1.7; }
+.t-overview .md-h { margin: 6px 0 2px; font-size: 12.5px; font-weight: 600; color: var(--ink); }
+.t-overview .md-p { margin: 0 0 2px; }
+.t-overview .md-p:last-child { margin-bottom: 0; }
+.t-overview .md-list { margin: 2px 0; padding-left: 18px; }
+.t-overview .md-list li { margin: 1px 0; }
+.md-code {
+  font: 500 11px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+  background: var(--hl); border: 1px solid var(--border); border-radius: 4px;
+  padding: 0 4px; color: var(--ink);
+}
 
 /* 逻辑图 */
 .graph-vp {
