@@ -988,6 +988,53 @@ body.libpage { overflow: hidden; display: flex; flex-direction: column; }
   .lib-side { border-right: none; border-bottom: 1px solid var(--border); max-height: 42vh; }
 }
 
+/* ═══════════════════════════════════════════════════════════════
+   主界面清单库浏览抽屉（右侧向左展开）+ 详情阅读模态
+   z 序：阅读模态 93 > 抽屉 92 > 抽屉遮罩 91 > 门禁等弹窗 90
+   （清单路由空态卡里也要能打开抽屉浏览，故需盖过门禁层）
+   ═══════════════════════════════════════════════════════════════ */
+.lib-scrim {
+  position: fixed; inset: 0; z-index: 91;
+  background: color-mix(in srgb, var(--bg) 45%, transparent);
+  backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px);
+  animation: fadein .18s ease;
+}
+.lib-drawer {
+  position: fixed; top: 0; right: 0; bottom: 0; z-index: 92;
+  width: min(380px, 94vw); display: flex; flex-direction: column;
+  background: var(--surface); border-left: 1px solid var(--border-2);
+  box-shadow: var(--shadow);
+  animation: libdrawer-in .24s cubic-bezier(.2, .9, .3, 1);
+}
+@keyframes libdrawer-in { from { transform: translateX(80px); opacity: 0; } }
+.lib-drawer-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 12px 14px; border-bottom: 1px solid var(--border);
+}
+.lib-drawer-head b { font-size: 13px; }
+.lib-drawer-tools { padding: 12px 14px 0; }
+.lib-drawer-body {
+  flex: 1; min-height: 0; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 10px 14px 14px;
+}
+.lib-drawer-foot {
+  display: flex; align-items: baseline; gap: 12px;
+  padding: 10px 14px 12px; border-top: 1px solid var(--border);
+}
+.lib-drawer-root { flex: 1; font-size: 10.5px; color: var(--ink-3); overflow-wrap: anywhere; }
+.lib-drawer-foot .lib-open-link, .gate-foot .lib-open-link { margin-top: 0; flex: none; }
+.lib-reader-overlay { z-index: 93; }
+
+/* 阅读模态复用 /library 的 .lib-article 体系：去掉独立页的宽度与间距预设 */
+.gate-body .lib-article { max-width: none; margin: 0; }
+/* usage 是手写 markdown：mdBlock 输出在库场景下的基础排版（.t-overview 同款规格） */
+.lib-usage .md-h { margin: 8px 0 4px; font-size: 12.5px; font-weight: 600; color: var(--ink); }
+.lib-usage .md-p { margin: 0 0 4px; }
+.lib-usage .md-p:last-child { margin-bottom: 0; }
+.lib-usage .md-list { margin: 2px 0; padding-left: 18px; }
+.lib-usage .md-list li { margin: 1px 0; }
+
 /* ── 拆分确认门禁卡（feature_questions）──────────────────────── */
 .fq-feats { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 .fq-feat { display: flex; align-items: baseline; gap: 6px; font-size: 12.5px; color: var(--ink); }

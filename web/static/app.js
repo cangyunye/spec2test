@@ -20,6 +20,7 @@ const S = {
   adoptSel: new Set(),      // 测试卡勾选采纳的用例 id（采纳 = 评审通过）
   pendingDistill: null,     // 评审通过后要弹的沉淀建议卡：null=不弹，数组=预勾选的采纳集
   distillPromptEl: null,    // 已插出的沉淀建议卡 DOM（防重复）
+  lib: { root: "", tree: [], exists: true, search: "" }, // 清单库浏览抽屉数据（/api/library 全量缓存）
 };
 
 /* 是否提供项目代码：true=代码模式（检索/生成）；false=仅需求模式（直接出端到端用例） */
@@ -1472,54 +1473,158 @@ function gateChecklistEmptyBody(p) {
     "有现成的业务检查清单（内部 wiki 页面、验收清单、历史用例文档）？上传后 AI 会按库规范归纳入库，确认后即可注入本单用例设计。"));
   const actions = h("div", "cl-empty-actions");
   actions.appendChild(miniBtn("📤 上传清单文档入库", () => openImportModal("gate"), "支持 .md / .txt / .docx"));
-  actions.appendChild(miniBtn("☰ 查看清单库", () => openLibraryTree(), "浏览当前清单库"));
+  actions.appendChild(miniBtn("☰ 查看清单库", () => openLibraryDrawer(), "浏览当前清单库"));
   note.appendChild(actions);
   wrap.appendChild(note);
   wrap.appendChild(h("p", "cl-hint", "跳过也能继续：本轮按常规流程设计用例，跑完后仍可在测试卡上沉淀。"));
   return wrap;
 }
 
-/* 清单库浏览：业务 → 子业务、条目数、路由描述（只读） */
-async function openLibraryTree() {
-  if (!S.tid) return;
-  const body = $("libraryBody");
+/* 清单库浏览抽屉（右侧向左展开）：标题导航 + 关键词检索，点标题进详情阅读模态。
+   数据源为非会话接口 /api/library，每次打开重取（沉淀/入库后即是新内容）；
+   不要求会话存在——无会话时按 project_root 空 = 全局库浏览。 */
+async function openLibraryDrawer() {
+  $("libScrim").classList.remove("hidden");
+  $("libDrawer").classList.remove("hidden");
+  S.lib.search = "";
+  $("libDrawerSearch").value = "";
+  const body = $("libDrawerBody");
   body.innerHTML = "";
   body.appendChild(h("div", "cl-empty", "加载中…"));
-  $("libraryModal").classList.remove("hidden");
+  $("libDrawerRoot").textContent = "";
+  const projectRoot = String((S.req || {}).project_root || "").trim();
   try {
-    const projectRoot = String((S.req || {}).project_root || "").trim();
     const data = await api(`/api/library?project_root=${encodeURIComponent(projectRoot)}`);
-    body.innerHTML = "";
-    const tree = data.tree || [];
-    if (!tree.length) {
-      body.appendChild(h("div", "cl-empty",
-        "清单库还是空的。可在清单路由卡上传文档入库，或跑完用例后在测试卡上沉淀。"));
-    }
-    tree.forEach((biz) => {
-      body.appendChild(libRow(biz, 0));
-      (biz.children || []).forEach((sub) => body.appendChild(libRow(sub, 1)));
-    });
-    if (data.root) body.appendChild(h("div", "dl-root mono", "清单库：" + data.root));
-    const link = h("a", "lib-open-link", "在新页面打开完整清单 →");
-    link.href = "/library?library_root=" + encodeURIComponent(data.root || "");
-    link.target = "_blank";
-    link.rel = "noopener";
-    body.appendChild(link);
+    S.lib.root = data.root || "";
+    S.lib.tree = data.tree || [];
+    S.lib.exists = data.exists !== false;
+    renderLibDrawer();
   } catch (err) {
     body.innerHTML = "";
     body.appendChild(h("div", "cl-empty", "加载失败：" + err.message));
   }
 }
 
-function libRow(node, depth) {
-  const row = h("div", "lib-row" + (depth ? " sub" : ""));
-  const head = h("div", "lib-head");
-  head.appendChild(h("b", null, node.name || node.rel_dir));
-  head.appendChild(h("span", "cl-dir mono", node.rel_dir));
-  head.appendChild(h("span", "lib-count", node.has_checklist ? `${node.item_count} 条` : "无 checklist"));
-  row.appendChild(head);
-  if (node.description) row.appendChild(h("span", "cl-desc", node.description));
-  return row;
+function closeLibDrawer() {
+  $("libDrawer").classList.add("hidden");
+  $("libScrim").classList.add("hidden");
+  $("libraryModal").classList.add("hidden");
+}
+
+/* 关键词命中：业务名 / 目录 / 描述 / 关键词 / 检查点文本 */
+function libNodeMatches(node, q) {
+  if (!q) return true;
+  const blob = [node.name, node.rel_dir, node.description, ...(node.keywords || []),
+    ...(node.sections || []).flatMap((sec) => (sec.items || []).map((it) => it.text)),
+  ].join(" ").toLowerCase();
+  return blob.includes(q);
+}
+
+function renderLibDrawer() {
+  const body = $("libDrawerBody");
+  body.innerHTML = "";
+  const q = String(S.lib.search || "").trim().toLowerCase();
+  if (!S.lib.tree.length) {
+    body.appendChild(h("div", "cl-empty", S.lib.exists === false
+      ? `路径不存在：${S.lib.root}`
+      : "清单库还是空的。可在清单路由卡上传文档入库，或跑完用例后在测试卡上沉淀。"));
+  } else {
+    let shown = 0;
+    S.lib.tree.forEach((biz) => {
+      if (libNodeMatches(biz, q)) { body.appendChild(libDrawerRow(biz, 0)); shown += 1; }
+      (biz.children || []).forEach((sub) => {
+        if (!libNodeMatches(sub, q)) return;
+        body.appendChild(libDrawerRow(sub, 1));
+        shown += 1;
+      });
+    });
+    if (q && !shown) body.appendChild(h("div", "cl-empty", "没有匹配的业务或检查点，换个关键词试试。"));
+  }
+  const total = S.lib.tree.reduce((a, n) =>
+    a + (n.item_count || 0) + (n.children || []).reduce((b, c) => b + (c.item_count || 0), 0), 0);
+  $("libDrawerRoot").textContent = `库根：${S.lib.root || "—"}`
+    + (S.lib.tree.length ? ` · ${S.lib.tree.length} 业务 · ${total} 条` : "");
+}
+
+function libDrawerRow(node, depth) {
+  const btn = h("button", "lib-nav-row" + (depth ? " sub" : ""));
+  btn.type = "button";
+  btn.appendChild(h("span", "lib-nav-name", node.name || node.rel_dir));
+  btn.appendChild(h("span", "cl-dir mono", node.rel_dir));
+  btn.appendChild(h("span", "lib-nav-count", node.has_checklist ? `${node.item_count} 条` : "无清单"));
+  btn.onclick = () => openLibReader(node.rel_dir);
+  return btn;
+}
+
+/* 详情阅读模态：scenario 路由标签 + checklist 分节条目（P0-P2 徽标），
+   usage / 描述走 mdBlock / mdInline 轻量 markdown 渲染（先转义再注入受控标签）。 */
+function openLibReader(rel) {
+  const node = (S.lib.tree || []).flatMap((b) => [b, ...(b.children || [])]).find((n) => n.rel_dir === rel);
+  if (!node) return;
+  $("libReaderTitle").textContent = node.name || node.rel_dir;
+  $("libReaderSub").textContent = node.has_checklist
+    ? `${node.rel_dir} · ${node.item_count} 条检查点`
+    : `${node.rel_dir} · 无 checklist（仅路由标签）`;
+  const body = $("libraryBody");
+  body.innerHTML = "";
+  body.appendChild(libReaderArticle(node));
+  $("libReaderFullLink").href = "/library?library_root=" + encodeURIComponent(S.lib.root || "");
+  $("libraryModal").classList.remove("hidden");
+}
+
+function libReaderArticle(node) {
+  const art = h("article", "lib-article");
+  const head = h("header", "lib-art-head");
+  const title = h("div", "lib-art-title");
+  title.appendChild(h("span", "cl-dir mono", node.rel_dir));
+  if (node.updated) title.appendChild(h("span", "lib-badge mono", "updated " + node.updated));
+  head.appendChild(title);
+  if (node.description) head.appendChild(h("p", "lib-desc", node.description));
+  if (node.keywords?.length) {
+    const kw = h("div", "lib-kw");
+    node.keywords.forEach((k) => kw.appendChild(h("span", "lib-kw-chip mono", k)));
+    head.appendChild(kw);
+  }
+  if (node.references?.length) {
+    const refs = h("div", "lib-refs");
+    node.references.forEach((r) =>
+      refs.appendChild(h("span", "lib-ref mono", `↳ ${r.path}${r.desc ? " · " + r.desc : ""}`)));
+    head.appendChild(refs);
+  }
+  if (node.usage) {
+    const usage = h("section", "lib-usage");
+    usage.appendChild(h("h3", "lib-sec-title", "使用场景"));
+    // 沉淀/导入产出的 usage 首行固定是「## 使用场景」，与分节标题重复，剥离之
+    usage.appendChild(mdBlock(String(node.usage).replace(/^\s*#{1,6}\s*使用场景\s*(\n|$)/, "")));
+    head.appendChild(usage);
+  }
+  if (node.sources?.length) head.appendChild(h("div", "lib-meta mono", "溯源：" + node.sources.join("、")));
+  art.appendChild(head);
+  if (!node.has_checklist) {
+    art.appendChild(h("div", "cl-empty", "该目录暂无 checklist.md（仅路由标签 scenario.md）。"));
+    return art;
+  }
+  (node.sections || []).forEach((sec) => art.appendChild(libReaderSection(sec)));
+  return art;
+}
+
+function libReaderSection(sec) {
+  const wrap = h("section", "lib-sec");
+  const head = h("h2", "lib-sec-title");
+  head.appendChild(h("span", null, sec.category || "未分节"));
+  head.appendChild(h("span", "lib-sec-count", `${(sec.items || []).length} 条`));
+  wrap.appendChild(head);
+  const ul = h("ul", "lib-items");
+  (sec.items || []).forEach((it) => {
+    const li = h("li", "lib-item");
+    li.appendChild(h("span", "lib-pri-badge " + (it.priority || "other").toLowerCase(), it.priority || "—"));
+    const txt = h("span", "lib-item-text");
+    txt.innerHTML = mdInline(it.text || "");
+    li.appendChild(txt);
+    ul.appendChild(li);
+  });
+  wrap.appendChild(ul);
+  return wrap;
 }
 
 /* 图种类选择卡：候选 + 推荐/推断标记，点卡片即选定并继续制图 */
@@ -3104,12 +3209,21 @@ function boot() {
   $("btnManualGen").onclick = genManual;
   $("btnManualBack").onclick = () => manualShowForm(true);
   $("btnManualCommit").onclick = commitManual;
+  // 清单库浏览抽屉 + 详情阅读模态
+  $("btnLibrary").onclick = openLibraryDrawer;
+  $("btnLibDrawerClose").onclick = closeLibDrawer;
+  $("libScrim").onclick = closeLibDrawer;
+  $("libDrawerSearch").addEventListener("input", () => {
+    S.lib.search = $("libDrawerSearch").value;
+    renderLibDrawer();
+  });
   $("btnLibraryClose").onclick = () => $("libraryModal").classList.add("hidden");
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
     if (!$("importModal").classList.contains("hidden")) { closeImportModal(); return; }
     if (!$("manualModal").classList.contains("hidden")) { closeManualModal(); return; }
     if (!$("libraryModal").classList.contains("hidden")) { $("libraryModal").classList.add("hidden"); return; }
+    if (!$("libDrawer").classList.contains("hidden")) { closeLibDrawer(); return; }
     if (!$("gateModal").classList.contains("hidden")) closeGateToPeek();
   });
 

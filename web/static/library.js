@@ -319,7 +319,8 @@ function renderNode(node, isSub) {
   if (node.usage) {
     const usage = h("section", "lib-usage");
     usage.appendChild(h("h3", "lib-sec-title", "使用场景"));
-    usage.appendChild(mdBlock(node.usage));
+    // 沉淀/导入产出的 usage 首行固定是「## 使用场景」，与分节标题重复，剥离之
+    usage.appendChild(mdBlock(String(node.usage).replace(/^\s*#{1,6}\s*使用场景\s*(\n|$)/, "")));
     head.appendChild(usage);
   }
   if (node.sources?.length) {
