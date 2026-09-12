@@ -199,7 +199,8 @@ def _config(thread_id: str, checkpoint_id: str | None = None) -> dict[str, Any]:
 
 
 def list_steps(graph: Any, tid: str) -> list[dict[str, Any]]:
-    """回退锚点清单（新→旧）。每条 = 一次节点落盘：{checkpoint_id, node, label, ts, next}。
+    """回退锚点清单（新→旧）。每条 = 一次节点落盘：
+    {checkpoint_id, node, label, ts, next, message_ids}。
 
     langgraph 1.x 的 checkpoint metadata 不含 writes，产出节点改由父链推导：
     检查点 C 的产出节点 = 其父检查点的 next[0]（父执行完毕才产生 C）。
@@ -217,6 +218,12 @@ def list_steps(graph: Any, tid: str) -> list[dict[str, Any]]:
             "label": NODE_LABELS.get(node, node),
             "ts": getattr(snap, "created_at", None) or "",
             "next": list(snap.next or []),
+            # 该检查点热记忆窗口内的消息 id：前端据此把对话气泡锚到步骤
+            # （「最早包含该 id 的锚点」= 这条消息刚出现的时点）
+            "message_ids": [
+                str(m.id) for m in ((snap.values or {}).get("messages") or [])
+                if getattr(m, "id", None)
+            ],
         })
     return out
 

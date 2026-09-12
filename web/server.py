@@ -469,14 +469,21 @@ def checklist_candidates(tid: str) -> dict[str, Any]:
 
 
 def _serialize_state(values: Any) -> dict[str, Any]:
-    """checkpoint values → JSON-safe dict（messages 转 {type, content}）。"""
+    """checkpoint values → JSON-safe dict（messages 转 {id, type, content}）。
+
+    带上消息 id：前端把对话气泡锚到回退步骤（最早包含该 id 的检查点）。
+    """
     if not isinstance(values, dict):
         return {"raw": str(values)}
     out: dict[str, Any] = {}
     for k, v in values.items():
         if k == "messages" and isinstance(v, list):
             out[k] = [
-                {"type": getattr(m, "type", "message"), "content": str(getattr(m, "content", ""))}
+                {
+                    "id": getattr(m, "id", None),
+                    "type": getattr(m, "type", "message"),
+                    "content": str(getattr(m, "content", "")),
+                }
                 for m in v
             ]
         elif isinstance(v, dict):

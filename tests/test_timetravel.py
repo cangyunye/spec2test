@@ -104,6 +104,31 @@ def test_list_steps_returns_anchor_per_node():
     assert "clarify_extract" in nodes and "graph_generate" in nodes
     for s in steps:
         assert s["checkpoint_id"] and s["label"] and s["node"]
+        assert isinstance(s["message_ids"], list)
+
+
+def test_list_steps_message_ids_map_bubbles_to_anchors():
+    """消息 → 步骤的可回退定位：最早包含某条消息的锚点 = 它刚出现的时点。
+
+    前端据此把气泡下方「回到此处」映射到「这条消息发出前的存档」。
+    """
+    graph = build_graph()
+    tid = _new_thread(graph, "开发一个桌面计算器，支持四则运算与除零报错提示")
+    cfg = {"configurable": {"thread_id": tid}}
+    vals = graph.get_state(cfg).values
+    steps = list_steps(graph, tid)
+
+    ids = {m.id for m in vals["messages"] if getattr(m, "id", None)}
+    assert ids, "checkpoint 里的消息应带 id（add_messages 分配）"
+    covered = set().union(*(set(s["message_ids"]) for s in steps))
+    assert ids <= covered, "每条当前消息都应至少被一个锚点覆盖"
+
+    human_id = next(m.id for m in vals["messages"] if getattr(m, "type", "") == "human")
+    containing = [s for s in steps if human_id in s["message_ids"]]  # 新→旧
+    assert containing, "用户消息应能在锚点中找到"
+    # 最早（列表最末）包含它的锚点 = 本轮 compress_messages；往前一步即「发出前」
+    assert containing[-1]["node"] == "compress_messages"
+    assert containing[-1] is steps[-1], "首条消息之前没有更早存档（前端据此走回填兜底）"
 
 
 def test_revert_to_graph_type_select_clears_graph_and_reruns():

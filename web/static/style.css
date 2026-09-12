@@ -809,17 +809,22 @@ table.t-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .sess-run { font-size: 10.5px; color: var(--ink-2); animation: sess-pulse 1.3s ease-in-out infinite; }
 @keyframes sess-pulse { 50% { opacity: .4; } }
 
-/* 用户消息 hover：编辑重发 */
-.msg.me { position: relative; }
-.msg-edit {
-  position: absolute; right: 0; top: -22px;
-  display: none; align-items: center;
-  height: 22px; padding: 0 8px; border-radius: 6px;
-  border: 1px solid var(--border); background: var(--surface); color: var(--ink-3);
-  font: 500 10.5px/1 ui-monospace, "SF Mono", Menlo, monospace; cursor: pointer;
+/* 消息气泡下方操作行：编辑重发 / 回到此处（常显，长内容也不必往上翻找） */
+.msg-actions {
+  display: flex; gap: 6px; margin-top: 5px;
+  opacity: .65; transition: opacity .15s;
 }
-.msg.me:hover .msg-edit { display: inline-flex; }
-.msg-edit:hover { color: var(--ink); border-color: var(--border-2); background: var(--hl); }
+.msg.me .msg-actions { justify-content: flex-end; }
+.msg.ai .msg-actions { justify-content: flex-start; }
+.msg:hover .msg-actions { opacity: 1; }
+.msg-act {
+  display: inline-flex; align-items: center;
+  height: 22px; padding: 0 8px; border-radius: 6px;
+  border: 1px solid transparent; background: transparent; color: var(--ink-3);
+  font: 500 10.5px/1 ui-monospace, "SF Mono", Menlo, monospace; cursor: pointer;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.msg-act:hover { color: var(--ink); border-color: var(--border-2); background: var(--hl); }
 
 /* 步骤分隔线 hover：从此重来 */
 .divider .revert-dot {
@@ -830,17 +835,6 @@ table.t-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 }
 .divider:hover .revert-dot { display: inline-flex; }
 .divider .revert-dot:hover { color: var(--ink); border-color: var(--border-2); background: var(--hl); }
-
-/* 步骤轨迹卡（会话恢复后的回退入口，默认折叠） */
-.card.trail .trail-list { display: none; flex-direction: column; gap: 2px; padding: 6px 15px 13px; }
-.card.trail.open .trail-list { display: flex; }
-.trail-row {
-  display: flex; align-items: center; gap: 10px;
-  padding: 5px 8px; border-radius: 7px; cursor: default;
-}
-.trail-row:hover { background: var(--hl); }
-.trail-row .trail-label { flex: 1; font-size: 12.5px; color: var(--ink-2); }
-.trail-row .trail-ts { font-size: 10.5px; color: var(--ink-4); }
 
 /* 回退确认弹窗 */
 .rv-anchor {

@@ -151,6 +151,16 @@ def test_history_lists_node_anchors(client):
     for s in steps:
         assert s["checkpoint_id"] and s["label"]
         assert s["node"] in NODE_LABELS, f"锚点必须是真实节点，不能是 input/update 检查点: {s}"
+        assert isinstance(s["message_ids"], list)
+
+
+def test_snapshot_messages_carry_ids(client):
+    """快照消息带 id：前端把每条气泡锚到回退步骤的凭据。"""
+    tid = _create_session(client)
+    _drive_to_review_gate(client, tid)
+    msgs = client.get(f"/api/sessions/{tid}").json()["values"]["messages"]
+    assert msgs, "应有对话消息"
+    assert all(m.get("id") for m in msgs), f"每条消息都应带 id: {msgs}"
 
 
 def test_revert_with_field_edits_reruns_downstream(client):

@@ -160,11 +160,22 @@ def _gate_event(raw: Any) -> dict[str, Any]:
     return {"type": "gate", "gate": ptype or "review", "payload": payload}
 
 def _serialize_messages(val: list[Any]) -> list[dict[str, Any]]:
-    """BaseMessage 列表 → 可 JSON 序列化的 {type, content}。"""
+    """BaseMessage 列表 → 可 JSON 序列化的 {id, type, content}。
+
+    id 用于前端把对话气泡锚到回退步骤（最早包含该 id 的检查点）。
+    """
     out = []
     for m in val:
         if isinstance(m, dict):
-            out.append({"type": m.get("type", "message"), "content": str(m.get("content", ""))})
+            out.append({
+                "id": m.get("id"),
+                "type": m.get("type", "message"),
+                "content": str(m.get("content", "")),
+            })
             continue
-        out.append({"type": getattr(m, "type", "message"), "content": str(getattr(m, "content", ""))})
+        out.append({
+            "id": getattr(m, "id", None),
+            "type": getattr(m, "type", "message"),
+            "content": str(getattr(m, "content", "")),
+        })
     return out

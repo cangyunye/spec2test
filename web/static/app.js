@@ -13,7 +13,9 @@ const S = {
   autoScroll: true, live: new Map(), theme: document.documentElement.dataset.theme || "dark",
   mermaidReady: false,
   lastSeq: 0,        // 事件游标：断线重连/换会话回来按此补齐丢失进度
+  req: {},           // 当前会话 requirement（含 project_root，清单库跳转用）
   history: [],       // 回退锚点（GET /history，新→旧）
+  msgIds: new Set(), // 已渲染的消息 id：compress 截断会整批重发保留消息，据此去重
   pendingEdit: null, // 「编辑重发」流程中：回退完成后放回输入框的原文
   adoptSel: new Set(),      // 测试卡勾选采纳的用例 id（采纳 = 评审通过）
   pendingDistill: null,     // 评审通过后要弹的沉淀建议卡：null=不弹，数组=预勾选的采纳集
@@ -248,21 +250,39 @@ $("feed")?.addEventListener("scroll", () => {
   S.autoScroll = f.scrollHeight - f.scrollTop - f.clientHeight < 90;
 });
 
-function addUserMsg(text) {
+function addUserMsg(text, msgId) {
   const m = h("div", "msg me");
+  if (msgId) m.dataset.msgId = msgId;
   m.appendChild(h("span", "who", "YOU"));
   m.appendChild(h("div", "bubble", text));
-  const edit = h("button", "msg-edit", "✎ 编辑重发");
-  edit.title = "回退到本条消息发出前，修改后重新执行";
-  edit.onclick = (e) => { e.stopPropagation(); editAndResend(m, text); };
-  m.appendChild(edit);
+  attachMsgActions(m, text, true);
   feedAppend(m);
 }
-function addAiMsg(text, label) {
+function addAiMsg(text, label, msgId) {
   const m = h("div", "msg ai");
+  if (msgId) m.dataset.msgId = msgId;
   m.appendChild(h("span", "who", label ? `AI · ${label}` : "AI"));
   m.appendChild(h("div", "bubble", text));
+  attachMsgActions(m, text, false);
   feedAppend(m);
+}
+/* 气泡下方操作行（常显，长内容也不必往上翻找）：
+   用户 → 编辑重发（回退+原文回填）/ 回到此处；AI → 回到此处（该回复作废重生成） */
+function attachMsgActions(m, text, isUser) {
+  const row = h("div", "msg-actions");
+  if (isUser) {
+    const edit = h("button", "msg-act", "✎ 编辑重发");
+    edit.title = "回退到这条消息发出前，并把原文放回输入框供修改后重发";
+    edit.onclick = (e) => { e.stopPropagation(); editAndResend(m, text); };
+    row.appendChild(edit);
+  }
+  const rev = h("button", "msg-act", "⟲ 回到此处");
+  rev.title = isUser
+    ? "回退到这条消息发出前（不改内容），其后的产出作废并重跑"
+    : "回退到这条回复之前并重新执行，该回复会重新生成";
+  rev.onclick = (e) => { e.stopPropagation(); revertToMessage(m, isUser); };
+  row.appendChild(rev);
+  m.appendChild(row);
 }
 function addDivider(label, sub, info) {
   const d = h("div", "divider" + (info ? " info" : ""));
@@ -1072,8 +1092,12 @@ function onEvent(e) {
       (e.messages || []).forEach((m) => {
         const c = String(m.content || "").trim();
         if (!c) return;
-        if (m.type === "human") addUserMsg(c);
-        else addAiMsg(c);
+        if (m.id) {
+          if (S.msgIds.has(m.id)) return;  // 截断时整批重发保留消息：按 id 去重
+          S.msgIds.add(m.id);
+        }
+        if (m.type === "human") addUserMsg(c, m.id);
+        else addAiMsg(c, null, m.id);
       });
       break;
     case "question":
@@ -2132,6 +2156,9 @@ async function openSession(tid) {
   try {
     const snap = await api(`/api/sessions/${tid}`);
     resetFeed();
+    // 先清掉上一状态的弹窗：回退/切会话后新状态可能没有挂起门禁，旧弹窗不能残留
+    $("gateModal").classList.add("hidden");
+    $("gatePill").classList.add("hidden");
     S.tid = tid;
     localStorage.setItem("df-last-tid", tid);
     updateCfgBtn();
@@ -2142,19 +2169,21 @@ async function openSession(tid) {
     S.distillPromptEl = null;
     S.lastSeq = Number(snap.last_seq || 0);
     const vals = snap.values || {};
+    S.req = vals.requirement || {};
+    // 先取回退锚点：气泡下方的「回到此处」要用锚点数据把消息定位到步骤
+    await loadHistory();
     // 回放对话
     (vals.messages || []).forEach((m) => {
       const c = String(m.content || "").trim();
       if (!c) return;
-      if (m.type === "human") addUserMsg(c); else addAiMsg(c);
+      if (m.id) S.msgIds.add(m.id);
+      if (m.type === "human") addUserMsg(c, m.id); else addAiMsg(c, null, m.id);
     });
-    // 回放产物（先拉步骤轨迹，产物卡上的回退按钮要用锚点数据）
-    await loadHistory();
+    // 回放产物
     if (vals.code_context?.length) renderContextCard(vals.code_context);
     if (vals.logic_graph) renderGraphCard(vals.logic_graph);
     if (vals.code_changes?.length) renderChangesCard(vals.code_changes);
     if (vals.test_report) renderTestCard(vals.test_report);
-    renderStepTrail();
     // 阶段（先定模式再画步骤条，仅需求模式跳过检索/生成两步）
     S.noCode = reqNoCode(vals.requirement);
     S.stage = snap.stage || "clarify";
@@ -2269,25 +2298,45 @@ function attachRevertBtn(d) {
   d.appendChild(btn);
 }
 
-/* 步骤轨迹卡：会话恢复后各步骤的回退入口（折叠，点标题展开） */
-function renderStepTrail() {
-  if (!S.history.length) return;
-  const { card } = cardShell(`STEP TRAIL · 步骤轨迹 · ${S.history.length} 步（点步骤可回退重跑）`);
-  card.classList.add("trail");
-  card.onclick = (e) => {
-    if (e.target.closest(".trail-row")) return;
-    card.classList.toggle("open");
-  };
-  const list = h("div", "trail-list");
-  [...S.history].reverse().forEach((s) => {
-    const row = h("div", "trail-row");
-    row.appendChild(h("span", "trail-label", s.label || s.node));
-    if (s.ts) row.appendChild(h("span", "trail-ts mono", new Date(s.ts).toLocaleTimeString()));
-    row.appendChild(miniBtn("⟲", () => openRevertModal(s), "回退到此步并重跑下游"));
-    list.appendChild(row);
-  });
-  card.appendChild(list);
-  feedAppend(card);
+/* 消息 → 回退目标：找到最早包含这条消息的锚点，再往前一步 =
+   这条消息发出前的存档（回退后该消息及其之后作废、重新执行）。
+   锚点是节点级存档，history 新→旧；「最早包含」= 从旧往新第一个命中的下标。 */
+function revertTargetForMessage(msgId) {
+  if (!msgId) return null;
+  for (let i = S.history.length - 1; i >= 0; i--) {
+    if (!(S.history[i].message_ids || []).includes(msgId)) continue;
+    return S.history[i + 1] || null;  // +1 = 时间上更早一步；没有则无存档可回
+  }
+  return null;
+}
+
+/* 兜底：本轮实时发出的用户气泡还没有服务端 id（消息写入 checkpoint 才有），
+   按「第 k 条用户消息 ↔ 第 k 个 compress_messages 锚点」的位置关系定位。 */
+function ordinalUserTarget(msgEl) {
+  const idx = [...document.querySelectorAll("#feed .msg.me")].indexOf(msgEl);
+  if (idx < 0) return null;
+  const compressAnchors = [...S.history].filter((s) => s.node === "compress_messages").reverse();
+  const turn = compressAnchors[idx];
+  if (!turn) return null;
+  const i = S.history.findIndex((s) => s.checkpoint_id === turn.checkpoint_id);
+  return S.history[i + 1] || null;
+}
+
+function messageRevertTarget(m) {
+  return revertTargetForMessage(m?.dataset?.msgId) || ordinalUserTarget(m);
+}
+
+/* 气泡下方的「⟲ 回到此处」 */
+function revertToMessage(m, isUser) {
+  if (S.running) { toast("流程推进中", "等当前步骤暂停后再回退", "err"); return; }
+  const target = messageRevertTarget(m);
+  if (!target) {
+    toast("这条消息之前没有可回退的存档",
+      isUser ? "可用「编辑重发」把内容放回输入框继续" : "请在更靠后的对话位置回退",
+      "err");
+    return;
+  }
+  openRevertModal(target, isUser ? {} : { notice: "这条回复将作废并重新生成。" });
 }
 
 function openRevertForNode(node) {
@@ -2377,25 +2426,20 @@ async function submitRevert() {
   }
 }
 
-/* 「编辑重发」：第 k 条用户消息 ↔ 第 k 次开跑（compress_messages）锚点；
-   回退到其前一个存档 = 这条消息发出前的状态，原文放回输入框修改后重发。 */
+/* 「编辑重发」：回退到这条消息发出前，并把原文放回输入框供修改后重发。 */
 function editAndResend(msgEl, text) {
-  if (S.running || S.gate) {
-    toast("流程推进中", "等当前流程暂停后再编辑历史消息", "err");
+  if (S.running) {  // 门禁挂起 = 图已暂停，允许编辑；只有推进中才拦
+    toast("流程推进中", "等当前步骤暂停后再编辑历史消息", "err");
     return;
   }
-  const idx = [...document.querySelectorAll("#feed .msg.me")].indexOf(msgEl);
-  const compressAnchors = [...S.history].filter((s) => s.node === "compress_messages").reverse();
-  const turnAnchor = compressAnchors[idx];
-  let pre = null;
-  if (turnAnchor) {
-    const i = S.history.findIndex((s) => s.checkpoint_id === turnAnchor.checkpoint_id);
-    pre = S.history[i + 1] || null;  // 历史新→旧；+1 = 时间上更早一步
-  }
-  if (!pre) {
+  const backToComposer = () => {
     $("chatInput").value = text;
     autoresize(); updateComposer();
     $("chatInput").focus();
+  };
+  const pre = messageRevertTarget(msgEl);
+  if (!pre) {
+    backToComposer();
     toast("已放回输入框", "这条消息之前没有存档点；修改后直接发送即可");
     return;
   }
@@ -2528,6 +2572,7 @@ function resetFeed() {
   feed.appendChild(inner);
   S.autoScroll = true;
   liveClearAll();
+  S.msgIds = new Set();
   S.stage = "clarify";
   S.noCode = false;
   setStep(0, false);
