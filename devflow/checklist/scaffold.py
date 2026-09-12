@@ -789,7 +789,8 @@ def init_library(
     """初始化库：README + _template 模板；with_example 附 payment 示例（含退款子业务）；
     with_general 附内置通用领域清单（api / frontend 三子业务 / sql / shell）。
 
-    已存在的文件与业务一律跳过，绝不覆盖用户修改。
+    README / _template / 内置通用业务已存在时跳过，不覆盖用户修改；
+    payment 示例为演示内容，重跑会重写。
     """
     root = root or resolve_root()
     root.mkdir(parents=True, exist_ok=True)
