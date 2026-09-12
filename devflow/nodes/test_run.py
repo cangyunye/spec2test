@@ -33,8 +33,9 @@ _MAX_FAILURE_LINES = 5
 def _build_patches(changes: list[dict[str, Any]]) -> tuple[list[code_apply.FilePatch], list[str]]:
     """把 code_changes 转成 FilePatch 列表。
 
-    安全规则：content_after 整文件直写仅允许用于「新建」文件（防止 mock 内容覆盖真实源码）；
-    修改/删除必须走 diff。返回 (patches, problems)，problems 非空表示有变更无法构造补丁。
+    安全规则：content_after 整文件直写仅允许两类（防止 mock 内容覆盖真实源码）——
+    1. 新建文件；2. 带 in_place 标志的变更（pi 等就地写入型 Provider，落盘=幂等回写现状）。
+    其余修改/删除必须走 diff。返回 (patches, problems)，problems 非空表示有变更无法构造补丁。
     """
     patches: list[code_apply.FilePatch] = []
     problems: list[str] = []
@@ -46,7 +47,13 @@ def _build_patches(changes: list[dict[str, Any]]) -> tuple[list[code_apply.FileP
         action = str(ch.get("action") or "update")
         content_after = ch.get("content_after")
         diff_text = ch.get("diff") or ch.get("diff_unified") or ""
+        in_place = bool(ch.get("in_place"))
         if action in ("create", "created") and content_after:
+            patches.append(code_apply.patch_from_content(fp, str(content_after)))
+            continue
+        if action == "update" and in_place and content_after:
+            # 就地写入型 Provider（pi）：文件已是目标状态，diff 基线是 HEAD 而非当前磁盘，
+            # 重放必然上下文失配 → 用 content_after 直写（幂等），diff 仅留作展示
             patches.append(code_apply.patch_from_content(fp, str(content_after)))
             continue
         if not diff_text.strip():

@@ -74,6 +74,45 @@ class TestApplyCodeNode:
         assert out["last_error_retryable"] is True
 
     @pytest.mark.asyncio
+    async def test_in_place_update_writes_content_after(self, tmp_path):
+        """pi 场景：Provider 已就地改文件，diff 基线是 HEAD 而非当前磁盘。
+        in_place + content_after → 整文件直写（幂等），陈旧 diff 不参与匹配。"""
+        f = tmp_path / "calc.py"
+        f.write_text("power = added\n", encoding="utf-8")  # pi 已改后的磁盘现状
+        stale_diff = "--- a/calc.py\n+++ b/calc.py\n@@ -1,1 +1,2 @@\n-old line\n+power = added\n"
+        node = make_apply_code_node()
+        state = {
+            **_req(str(tmp_path)),
+            "code_changes": [
+                {"file_path": "calc.py", "action": "update",
+                 "diff_unified": stale_diff, "content_after": "power = added\n",
+                 "in_place": True},
+            ],
+        }
+        out = await node.async_version(state)  # type: ignore[arg-type]
+        ca = out["code_apply"]
+        assert ca["applied"] is True
+        assert f.read_text(encoding="utf-8") == "power = added\n"
+        assert out["last_error_code"] is None
+
+    @pytest.mark.asyncio
+    async def test_in_place_without_content_after_falls_back_to_diff(self, tmp_path):
+        """in_place 但无 content_after：回落走 diff（行为与无标志一致）。"""
+        f = tmp_path / "x.py"
+        f.write_text("v = 1\n", encoding="utf-8")
+        node = make_apply_code_node()
+        state = {
+            **_req(str(tmp_path)),
+            "code_changes": [
+                {"file_path": "x.py", "action": "update", "in_place": True,
+                 "diff": "--- a/x.py\n+++ b/x.py\n@@ -1,1 +1,1 @@\n-v = 1\n+v = 2\n"},
+            ],
+        }
+        out = await node.async_version(state)  # type: ignore[arg-type]
+        assert out["code_apply"]["applied"] is True
+        assert f.read_text(encoding="utf-8") == "v = 2\n"
+
+    @pytest.mark.asyncio
     async def test_diff_mismatch_is_retryable(self, tmp_path):
         (tmp_path / "x.py").write_text("real = 1\n", encoding="utf-8")
         node = make_apply_code_node()

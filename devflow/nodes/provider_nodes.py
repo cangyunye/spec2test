@@ -321,7 +321,8 @@ def make_code_gen_node(providers: Providers | None = None):
             )
 
         # 把 Provider 返回的 changes 映射到 GlobalState.code_changes 格式
-        # content_after 一并携带（apply_code 节点仅对新建文件使用整文件直写）
+        # content_after 一并携带；in_place（pi 等就地写入型 Provider）透传给
+        # apply_code —— 丢失会让落盘退回 diff 重放，对已改文件必然上下文失配
         code_changes: list[dict[str, Any]] = []
         for ch in result["changes"]:
             code_changes.append(
@@ -330,6 +331,7 @@ def make_code_gen_node(providers: Providers | None = None):
                     "action": ch.get("action", "update"),
                     "diff": ch.get("diff_unified", ""),
                     "content_after": ch.get("content_after"),
+                    "in_place": bool(ch.get("in_place")),
                     "lint_passed": result["lint_passed"],
                     "test_passed": None,  # test_run 节点回填
                 }

@@ -51,6 +51,7 @@ class CodeChange(TypedDict, total=False):
     action: Literal["create", "update", "delete"]
     diff_unified: str  # unified diff 字符串
     content_after: str | None
+    in_place: bool  # Provider 已就地写入目标项目（如 pi）：apply_code 可整文件直写，免 diff 上下文匹配
 
 
 class LintIssue(TypedDict):

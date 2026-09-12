@@ -365,7 +365,15 @@ class PiEditProvider(PiProviderBase, CodeEditProvider):
                 diff = await self._git(project_root, "diff", "HEAD", "--", path)
                 content = self._read_file(project_root, path)
             changes.append(
-                {"file_path": path, "action": action, "diff_unified": diff, "content_after": content}
+                {
+                    "file_path": path,
+                    "action": action,
+                    "diff_unified": diff,
+                    "content_after": content,
+                    # pi 直接就地写入目标项目：diff 只是 HEAD→现状的展示产物，
+                    # 标记后 apply_code 走 content_after 整文件直写（重放 diff 必然上下文失配）
+                    "in_place": True,
+                }
             )
         return changes
 
