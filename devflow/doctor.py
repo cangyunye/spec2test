@@ -2,9 +2,9 @@
 
 职责：
   1) 检测 .env 是否存在、LLM Key 是否仍是占位符
-  2) 探测 mock 以外的服务后端（OpenCode / CodeGraph / Archify），复用 providers.check
-  3) 多选询问缺失项是否安装：GitHub Releases 检测最新版本并自动下载安装
-     （codegraph）；网络超时/失败 → 打印自行安装指引并跳过该步骤，绝不阻塞
+  2) 探测 mock 以外的服务后端（OpenCode / Pi / CodeGraph / Archify），复用 providers.check
+  3) 多选询问缺失项是否安装：codegraph 走 GitHub Releases 自动下载；pi 走
+     npm 全局安装；其余给自行安装指引。网络超时/失败 → 打印指引并跳过，绝不阻塞
   4) 根据已安装服务写好 .env（只填默认/占位值，不覆盖用户自定义配置）
   5) 输出收尾指引：用户自行填 LLM Key → check-providers / check-llm 测试 → 启动服务
 
@@ -41,12 +41,15 @@ from .providers.check import (
     probe_archify,
     probe_codegraph,
     probe_opencode,
+    probe_pi,
 )
+from .providers.pi import PI_NPM_PACKAGE
 
 # ── GitHub 官方仓库与网络参数 ──────────────────────────────────────
 CODEGRAPH_REPO = "colbymchenry/codegraph"
 OPENCODE_REPO = "sst/opencode"
 NODE_REPO = "nodejs/node"
+PI_REPO = "badlogic/pi-mono"
 
 GITHUB_API_TIMEOUT = httpx.Timeout(8.0, connect=5.0)
 DOWNLOAD_DEADLINE_SEC = 300          # 单文件下载总时长上限，超时转「自行安装」
@@ -291,6 +294,65 @@ def collect_report(project_root: str = ".", *, env_path: Path | None = None) -> 
     }
 
 
+def install_pi(console: Console, *, timeout_sec: int = 300) -> str:
+    """npm 自动安装 pi CLI；npm 缺失 / 安装失败 → 打印手动指引返回 "manual"。
+
+    不像 codegraph 走 GitHub Release 下载：pi 是 npm 全局包，装完后仍需用户
+    交互运行一次 `pi` 完成模型登录（/login），向导只负责把二进制装好。
+    """
+    npm = shutil.which("npm")
+    if npm is None:
+        console.print(
+            "[yellow]![/] 未找到 npm，无法自动安装 pi。请先安装 Node.js ≥ 18，再执行：\n"
+            f"    npm install -g {PI_NPM_PACKAGE}"
+        )
+        return "manual"
+    console.print(f"[cyan]ℹ[/] 正在执行 npm install -g {PI_NPM_PACKAGE}（最长 {timeout_sec}s）…")
+    try:
+        proc = subprocess.run(
+            [npm, "install", "-g", PI_NPM_PACKAGE],
+            capture_output=True, text=True, timeout=timeout_sec,
+        )
+    except subprocess.TimeoutExpired:
+        console.print(
+            f"[yellow]![/] npm 安装超时（>{timeout_sec}s），已跳过。请自行执行：\n"
+            f"    npm install -g {PI_NPM_PACKAGE}"
+        )
+        return "manual"
+    except OSError as e:
+        console.print(f"[yellow]![/] npm 启动失败（{e}）。请自行执行：npm install -g {PI_NPM_PACKAGE}")
+        return "manual"
+    if proc.returncode != 0:
+        tail = [l for l in (proc.stderr or proc.stdout or "").strip().splitlines() if l.strip()]
+        console.print(
+            f"[yellow]![/] npm 安装失败：{tail[-1] if tail else '未知错误'}\n"
+            f"    请自行执行：npm install -g {PI_NPM_PACKAGE}"
+        )
+        return "manual"
+    pi_bin = shutil.which("pi")
+    if pi_bin is None:
+        console.print(
+            "[yellow]![/] 安装完成但 pi 不在 PATH 中（npm 全局 bin 目录可能未入 PATH），"
+            "请检查 `npm bin -g` / `npm config get prefix`"
+        )
+        return "manual"
+    try:
+        ver = subprocess.run(
+            [pi_bin, "--version"], capture_output=True, text=True, timeout=15
+        ).stdout.strip()
+    except Exception:  # noqa: BLE001 - 版本验证尽力而为，不作为安装成败依据
+        ver = ""
+    console.print(
+        f"[green]✓[/] pi 已安装 → [bold]{pi_bin}[/]"
+        + (f"（{ver.splitlines()[0]}）" if ver else "")
+    )
+    console.print(
+        "[cyan]ℹ[/] 首次使用请先在任意目录运行 [bold]pi[/] 完成模型登录（/login 或配置文件）；\n"
+        "    也可在 .env 里用 PI_PROVIDER / PI_MODEL 指定流程使用的模型"
+    )
+    return "installed"
+
+
 def missing_install_items(reports: list[dict[str, Any]]) -> list[InstallItem]:
     """从探测报告生成缺失服务的安装项（二进制缺失才需要装；codegraph 缺索引属于 init 提示）。"""
     by = {r["name"]: r for r in reports}
@@ -314,6 +376,16 @@ def missing_install_items(reports: list[dict[str, Any]]) -> list[InstallItem]:
             install_hint="curl -fsSL https://opencode.ai/install.sh | bash"
                          "  # 或 brew install sst/tap/opencode；装后 opencode serve 启动",
             auto=False, repo=OPENCODE_REPO,
+        ))
+    pi = by.get("pi", {})
+    if not pi.get("bin_ok", False):
+        items.append(InstallItem(
+            key="pi", name="Pi Coding Agent（代码生成/测试后端，npm 包）",
+            missing="pi CLI 未安装",
+            releases_url=f"https://github.com/{PI_REPO}",
+            install_hint=f"npm install -g {PI_NPM_PACKAGE}"
+                         "  # 装后运行 pi 完成模型登录（/login）",
+            auto=True, repo=PI_REPO,
         ))
     ar = by.get("archify", {})
     if not ar.get("ok", False):
@@ -372,6 +444,7 @@ def env_updates_from_probes(
     cg = by.get("codegraph", {})
     codegraph_ready = bool(cg.get("bin_ok") and cg.get("index_ok"))
     archify_ok = bool(by.get("archify", {}).get("ok"))
+    pi_ok = bool(by.get("pi", {}).get("bin_ok"))
 
     def mutable(key: str) -> bool:
         val = (current.get(key) or "").strip()
@@ -389,6 +462,11 @@ def env_updates_from_probes(
         add(updates, "CODE_EDIT_PROVIDER", "opencode", "OpenCode Server 已可用")
         add(updates, "TEST_GEN_PROVIDER", "opencode", "OpenCode Server 已可用")
         add(updates, "CODE_SEARCH_PROVIDER", "opencode", "OpenCode Server 已可用")
+    elif pi_ok:
+        # pi 与 OpenCode 二选一：OpenCode 没配好才建议 pi（避免两套更新打架）。
+        # 检索一格不建议 pi——无代码索引，agent 翻文件式检索又慢又不稳
+        add(updates, "CODE_EDIT_PROVIDER", "pi", "pi CLI 就绪（OpenCode 未配置）")
+        add(updates, "TEST_GEN_PROVIDER", "pi", "pi CLI 就绪（OpenCode 未配置）")
     if codegraph_ready:
         add(updates, "CODE_SEARCH_PROVIDER", "codegraph", "CodeGraph 二进制 + 索引就绪")
     if archify_ok:
@@ -468,6 +546,8 @@ def _reprobe(item: InstallItem, project_root: str) -> dict[str, Any]:
         return probe_codegraph(project_root)
     if item.key == "opencode":
         return asyncio.run(probe_opencode())
+    if item.key == "pi":
+        return probe_pi()
     return probe_archify()
 
 
@@ -513,9 +593,12 @@ def _ask_and_install(console: Console, items: list[InstallItem], input_fn: Calla
         return
     for i in chosen:
         item = items[i]
-        if item.auto:
+        if item.key == "codegraph":
             # install_codegraph 内部已含超时 → 自行安装指引 → 跳过 的降级路径
             install_codegraph(console)
+        elif item.key == "pi":
+            # install_pi 内部已含 npm 缺失 / 超时 / 失败 → 手动指引 的降级路径
+            install_pi(console)
         else:
             _guide_install(console, item, input_fn, project_root)
 
@@ -583,7 +666,7 @@ def run_setup(
 ) -> None:
     """setup 向导主流程：检测 → 多选安装 → 配置 .env → 收尾指引。"""
     input_fn = input_fn or input
-    console.print(Panel.fit("[bold cyan]DevFlow 首次启动自检与引导[/]", border_style="cyan"))
+    console.print(Panel.fit("[bold cyan]CaseCraft 首次启动自检与引导[/]", border_style="cyan"))
     report = collect_report(project_root)
     print_report(console, report)
 

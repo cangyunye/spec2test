@@ -1,4 +1,4 @@
-# DevFlow 全流程演示教程（Web 版）
+# CaseCraft 全流程演示教程（Web 版）
 
 > 本教程由真实浏览器自动化（Playwright）逐步操作生成：每个截图都是一次真实运行中的画面，
 > 需求澄清、制图、用例设计全部由 LLM（deepseek-v4-flash）实跑完成，非 Mock 数据。

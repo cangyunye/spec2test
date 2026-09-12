@@ -1,6 +1,6 @@
 "use strict";
 /* ═══════════════════════════════════════════════════════════════
-   DevFlow Web Shell · 前端交互
+   CaseCraft Web Shell · 前端交互
    聊天流 + 步骤条 + 门禁评审 + 产物卡片（逻辑图/测试表/变更/检索）
    ═══════════════════════════════════════════════════════════════ */
 
@@ -901,8 +901,8 @@ function testToMD(cases, report) {
   }
   return lines.join("\n");
 }
-function exportTestCSV(cases) { download(`devflow-tests-${S.tid || "export"}.csv`, testToCSV(cases), "text/csv;charset=utf-8"); toast("已导出 CSV", `${cases.length} 条测试场景`); }
-function exportTestMD(cases, report) { download(`devflow-tests-${S.tid || "export"}.md`, testToMD(cases, report)); toast("已导出 Markdown", `${cases.length} 条测试场景`); }
+function exportTestCSV(cases) { download(`casecraft-tests-${S.tid || "export"}.csv`, testToCSV(cases), "text/csv;charset=utf-8"); toast("已导出 CSV", `${cases.length} 条测试场景`); }
+function exportTestMD(cases, report) { download(`casecraft-tests-${S.tid || "export"}.md`, testToMD(cases, report)); toast("已导出 Markdown", `${cases.length} 条测试场景`); }
 
 function copyText(text, okMsg) {
   const done = () => toast("已复制", okMsg);
@@ -924,12 +924,12 @@ function renderExportBar() {
   bar.appendChild(h("span", "t", "把本会话全部产物（需求 / 逻辑图 / 变更 / 测试场景）打包带走："));
   bar.appendChild(miniBtn("↓ Markdown 汇总", async () => {
     const resp = await fetch(`/api/sessions/${S.tid}/export?format=md`);
-    download(`devflow-${S.tid}.md`, await resp.text(), "text/markdown;charset=utf-8");
+    download(`casecraft-${S.tid}.md`, await resp.text(), "text/markdown;charset=utf-8");
     toast("已导出", "Markdown 汇总");
   }));
   bar.appendChild(miniBtn("↓ JSON", async () => {
     const resp = await fetch(`/api/sessions/${S.tid}/export?format=json`);
-    download(`devflow-${S.tid}.json`, JSON.stringify(await resp.json(), null, 2), "application/json");
+    download(`casecraft-${S.tid}.json`, JSON.stringify(await resp.json(), null, 2), "application/json");
     toast("已导出", "结构化 JSON");
   }));
   if (S.report) bar.appendChild(miniBtn("↓ 测试 CSV", () => exportTestCSV((S.report.test_cases || []).map(normCase))));
@@ -2947,7 +2947,7 @@ function showEmptyState() {
   d.id = "feedEmpty";
   d.appendChild(h("div", "fe-mark"));
   d.appendChild(h("h2", null, "从一段需求，到一组测试场景"));
-  d.appendChild(h("p", null, "DevFlow 会澄清需求、生成可机读逻辑图与测试场景；提供项目代码时还会检索代码、生成代码并真实执行测试，不提供代码则直接基于需求设计端到端测试用例。关键节点由你把关。在下方输入框描述需求即可开始。"));
+  d.appendChild(h("p", null, "CaseCraft 会澄清需求、生成可机读逻辑图与测试场景；提供项目代码时还会检索代码、生成代码并真实执行测试，不提供代码则直接基于需求设计端到端测试用例。关键节点由你把关。在下方输入框描述需求即可开始。"));
   const ol = h("ol", "fe-steps");
   [["01", "输入需求，回答 AI 追问"], ["02", "评审逻辑图，通过或驳回"], ["03", "验收产物，导出测试场景"]]
     .forEach(([n, t]) => {
