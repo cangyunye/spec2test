@@ -243,11 +243,15 @@ class TestE2ERequirementOnly:
         snapshot = self.graph.get_state(self.config)
         assert "graph_review" in (snapshot.next or [])
 
-        # 2. 制图门 approve（未提供代码）→ 跳过检索/生成，直接到终审 review
+        # 2. 制图门 approve（未提供代码）→ 清单路由门（必弹，空库跳过）→ 终审 review
         list(self.graph.stream(Command(resume="approve"), self.config, stream_mode="updates"))
         snapshot = self.graph.get_state(self.config)
+        assert "checklist_route_gate" in (snapshot.next or []), \
+            f"制图门后应先停在清单路由门，实际 next={snapshot.next}"
+        list(self.graph.stream(Command(resume={"decision": "skip"}), self.config, stream_mode="updates"))
+        snapshot = self.graph.get_state(self.config)
         next_nodes = snapshot.next or []
-        assert "review" in next_nodes, f"仅需求模式 approve 后应到达终审，实际 next={next_nodes}"
+        assert "review" in next_nodes, f"清单门跳过后应到达终审，实际 next={next_nodes}"
 
         # 3. 产物检查：无检索/无代码变更，但测试场景已设计
         vals = snapshot.values
@@ -267,11 +271,12 @@ class TestE2ERequirementOnly:
         assert snapshot.values.get("current_stage") == "done"
 
     def test_review_reject_goes_back_to_test_gen(self):
-        # 1. 跑到制图门并通过（仅需求模式 → 直达终审）
+        # 1. 跑到制图门并通过（清单门必弹，空库跳过；仅需求模式 → 直达终审）
         list(self.graph.stream(_requirement_only_state(), self.config, stream_mode="updates"))
         list(self.graph.stream(Command(resume="confirm"), self.config, stream_mode="updates"))
         list(self.graph.stream(Command(resume="flowchart"), self.config, stream_mode="updates"))
         list(self.graph.stream(Command(resume="approve"), self.config, stream_mode="updates"))
+        list(self.graph.stream(Command(resume={"decision": "skip"}), self.config, stream_mode="updates"))
         snapshot = self.graph.get_state(self.config)
         assert "review" in (snapshot.next or [])
 

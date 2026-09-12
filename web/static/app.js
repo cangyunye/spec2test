@@ -15,6 +15,9 @@ const S = {
   lastSeq: 0,        // 事件游标：断线重连/换会话回来按此补齐丢失进度
   history: [],       // 回退锚点（GET /history，新→旧）
   pendingEdit: null, // 「编辑重发」流程中：回退完成后放回输入框的原文
+  adoptSel: new Set(),      // 测试卡勾选采纳的用例 id（采纳 = 评审通过）
+  pendingDistill: null,     // 评审通过后要弹的沉淀建议卡：null=不弹，数组=预勾选的采纳集
+  distillPromptEl: null,    // 已插出的沉淀建议卡 DOM（防重复）
 };
 
 /* 是否提供项目代码：true=代码模式（检索/生成）；false=仅需求模式（直接出端到端用例） */
@@ -590,11 +593,26 @@ function renderTestCard(report) {
   filters.appendChild(search);
   card.appendChild(filters);
 
+  // 采纳工具条：逐条勾选采纳，采纳 = 评审通过（终审门禁弹出后可一键提交）
+  const adoptBar = h("div", "t-adopt");
+  const adoptCount = h("span", "t-adopt-count mono", "");
+  const submitReviewBtn = h("button", "mini-btn adopt-submit", "✓ 提交评审");
+  submitReviewBtn.id = "btnSubmitReview";
+  submitReviewBtn.onclick = submitAdoptReview;
+  const adoptAllBtn = miniBtn("全选/清空", () => {
+    if (S.adoptSel.size >= cases.length) cases.forEach((c) => S.adoptSel.delete(c.case_id));
+    else cases.forEach((c) => c.case_id && S.adoptSel.add(c.case_id));
+    renderRows();
+    refreshAdoptUI();
+  }, "全选或清空采纳勾选");
+  adoptBar.append(adoptCount, adoptAllBtn, submitReviewBtn);
+  card.appendChild(adoptBar);
+
   // 表格
   const wrap = h("div", "t-wrap");
   const table = h("table", "t-table");
   table.appendChild(h("thead", null, "")).innerHTML =
-    "<tr><th>标识</th><th>层级</th><th>优先级</th><th>类型</th><th>标题</th><th>所属模块</th><th>前置</th><th>步骤</th><th>预期</th><th>依据</th></tr>";
+    "<tr><th>采纳</th><th>标识</th><th>层级</th><th>优先级</th><th>类型</th><th>标题</th><th>所属模块</th><th>前置</th><th>步骤</th><th>预期</th><th>依据</th></tr>";
   const tbody = h("tbody");
   table.appendChild(tbody);
   wrap.appendChild(table);
@@ -617,12 +635,24 @@ function renderTestCard(report) {
     const shown = cases.filter(pass);
     if (!shown.length) {
       tbody.appendChild(h("tr", null, "")).appendChild(
-        Object.assign(document.createElement("td"), { colSpan: 10, className: "t-empty", textContent: "没有匹配的测试场景" }));
+        Object.assign(document.createElement("td"), { colSpan: 11, className: "t-empty", textContent: "没有匹配的测试场景" }));
       count.textContent = "0 条";
       return;
     }
     shown.forEach((c) => {
       const tr = h("tr");
+      const tdAdopt = h("td");
+      const adopt = h("input", "t-adopt-cb");
+      adopt.type = "checkbox";
+      adopt.title = "勾选采纳（= 评审通过）";
+      adopt.checked = S.adoptSel.has(c.case_id);
+      adopt.onchange = () => {
+        if (adopt.checked) S.adoptSel.add(c.case_id);
+        else S.adoptSel.delete(c.case_id);
+        refreshAdoptUI();
+      };
+      tdAdopt.appendChild(adopt);
+      tr.appendChild(tdAdopt);
       tr.appendChild(h("td", "mono", c.case_id || "—"));
       const tdTier = h("td");
       tdTier.appendChild(h("span", `tier ${c.tier || ""}`, TIER_NAME[c.tier] || c.tier || "—"));
@@ -639,6 +669,7 @@ function renderTestCard(report) {
     count.textContent = `显示 ${shown.length} / ${cases.length} 条 · 通过 ${report.run?.passed ?? "—"} · 失败 ${report.run?.failed ?? "—"}`;
   }
   renderRows();
+  refreshAdoptUI();
 
   // 导出
   actions.appendChild(miniBtn("↓ CSV", () => exportTestCSV(cases), "导出 CSV（Excel 可开）"));
@@ -654,6 +685,77 @@ function renderTestCard(report) {
   S.testCardEl = card;
   renderExportBar();
   return card;
+}
+
+/* 采纳工具条状态：计数 + 提交按钮只在终审门禁待决时可点 */
+function refreshAdoptUI() {
+  const bar = document.querySelector(".t-adopt");
+  if (!bar) return;
+  const total = (S.report?.test_cases || []).filter((c) => c && c.case_id).length;
+  bar.querySelector(".t-adopt-count").textContent = `已采纳 ${S.adoptSel.size} / ${total}`;
+  const btn = bar.querySelector(".adopt-submit");
+  const ready = S.gate === "human_review";
+  btn.disabled = !ready || !S.adoptSel.size;
+  btn.title = ready
+    ? "勾选采纳的用例即视为评审通过，一键提交"
+    : "终审门禁就绪后（测试执行完成）可提交";
+}
+
+/* 提交采纳 = 终审自动通过：服务端校验正停在 human_review 门禁才接受 */
+async function submitAdoptReview() {
+  if (!S.tid || !S.report) return;
+  const adopted = (S.report.test_cases || [])
+    .map((c) => c.case_id).filter((id) => id && S.adoptSel.has(id));
+  if (!adopted.length) { toast("请先勾选要采纳的用例", "采纳即评审通过；要整体驳回请用终审门禁的「驳回」"); return; }
+  if (S.gate !== "human_review") { toast("终审门禁尚未就绪", "等测试执行完成、人工验收卡弹出后即可一键提交"); return; }
+  try {
+    const resp = await api(`/api/sessions/${S.tid}/review/adopt`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ case_ids: adopted }),
+    });
+    $("gateModal").classList.add("hidden");
+    $("gatePill").classList.add("hidden");
+    S.gate = null;
+    refreshAdoptUI();
+    addDivider(`评审通过 · 已采纳 ${resp.adopted.length} 条用例`, "可继续沉淀为业务清单", true);
+    S.pendingDistill = resp.adopted || [];
+    setRunning(true);
+    attachEvents();
+    toast("评审已通过", `采纳 ${resp.adopted.length} 条用例；完成后可沉淀为业务清单`);
+  } catch (err) {
+    toast("提交失败", err.message, "err");
+  }
+}
+
+/* 沉淀建议卡：终审通过后服务端主动询问（AI 归纳 / 手写入库 / 暂不） */
+function addDistillPrompt(adoptedIds) {
+  if (S.distillPromptEl && S.distillPromptEl.isConnected) return;
+  const card = h("div", "card dp-card");
+  const head = h("div", "card-head");
+  head.appendChild(h("span", "card-title", "ASSET · 沉淀建议"));
+  card.appendChild(head);
+  const bodyEl = h("div", "dp-body");
+  const n = (adoptedIds || []).length;
+  bodyEl.appendChild(h("div", null, n
+    ? `本轮已采纳 ${n} 条用例。要把它们归纳为业务检查清单入库吗？入库后下次同类需求会自动路由参照。`
+    : "评审已通过。可以把本轮用例归纳为业务检查清单入库，供日后同类需求参照；也支持手写清单。"));
+  const actions = h("div", "dp-actions");
+  actions.appendChild(miniBtn("✦ AI 归纳入库", () => { removeDistillPrompt(); openDistill(S.report, n ? adoptedIds : null); },
+    n ? "预勾选已采纳的用例，AI 归纳后预览入库" : "AI 归纳全部用例后预览入库"));
+  actions.appendChild(miniBtn("✍ 手写清单入库", () => { removeDistillPrompt(); openManualModal(); }, "按库规范手写，AI 规范化后入库"));
+  actions.appendChild(miniBtn("暂不", async () => {
+    removeDistillPrompt();
+    try { await api(`/api/sessions/${S.tid}/distill/dismiss`, { method: "POST" }); } catch { /* 忽略：仅影响恢复后是否再提示 */ }
+  }, "本会话不再提示"));
+  bodyEl.appendChild(actions);
+  card.appendChild(bodyEl);
+  feedAppend(card);
+  S.distillPromptEl = card;
+}
+
+function removeDistillPrompt() {
+  if (S.distillPromptEl && S.distillPromptEl.isConnected) S.distillPromptEl.remove();
+  S.distillPromptEl = null;
 }
 
 function testToCSV(cases) {
@@ -979,6 +1081,12 @@ function onStreamEnd(e) {
   } else {
     updateComposer();
   }
+  // 终审通过后服务端主动询问沉淀（采纳提交与门禁通过两条路径都汇到这里）
+  if (S.pendingDistill !== null) {
+    const adopted = S.pendingDistill;
+    S.pendingDistill = null;
+    if (S.stage === "done" && S.testCardEl && S.testCardEl.isConnected) addDistillPrompt(adopted);
+  }
 }
 
 /* ── 门禁 ────────────────────────────────────────────── */
@@ -1002,6 +1110,12 @@ function gateSubText(gate) {
     return "选择将决定制图视角与结构化产物形态 · 选定后本次需求内不再重复询问";
   }
   if (gate === "checklist_route") {
+    if (!(S.gatePayload.candidates || []).length) {
+      const n = S.gatePayload.business_count || 0;
+      return n
+        ? `清单库有 ${n} 个业务，但都与本需求不匹配 · 可上传清单文档入库，或跳过直接生成`
+        : "清单库还是空的 · 可上传清单文档入库，或跳过直接生成用例";
+    }
     return "AI 已按需求匹配业务清单 · 取消勾选即不加载 · 确认后清单作为用例设计依据";
   }
   if (gate === "graph_review") {
@@ -1043,12 +1157,20 @@ function openGate(gate, payload) {
     body.appendChild(gateTypeBody(S.gatePayload));
   } else if (gate === "checklist_route") {
     // 清单路由确认：★预选勾选树，「通过」=确认加载所选，「驳回」=跳过注入
-    S.clSelected = new Set(collectSuggested(S.gatePayload.candidates || []));
-    $("btnApprove").textContent = `确认加载（${S.clSelected.size}）`;
-    $("btnReject").textContent = "跳过，不注入清单";
-    $("btnApprove").classList.remove("hidden");
-    $("btnReject").classList.remove("hidden");
-    body.appendChild(gateChecklistBody(S.gatePayload));
+    const cands = S.gatePayload.candidates || [];
+    if (!cands.length) {
+      // 空库 / 无匹配：清单环节不再静默，给出上传入库入口
+      $("btnApprove").textContent = "跳过，直接生成用例";
+      $("btnReject").classList.add("hidden");
+      body.appendChild(gateChecklistEmptyBody(S.gatePayload));
+    } else {
+      S.clSelected = new Set(collectSuggested(cands));
+      $("btnApprove").textContent = `确认加载（${S.clSelected.size}）`;
+      $("btnReject").textContent = "跳过，不注入清单";
+      $("btnApprove").classList.remove("hidden");
+      $("btnReject").classList.remove("hidden");
+      body.appendChild(gateChecklistBody(S.gatePayload));
+    }
   } else {
     $("btnReject").textContent = "驳回";
     $("btnApprove").textContent = "通过";
@@ -1057,11 +1179,16 @@ function openGate(gate, payload) {
     $("btnGatePeek").classList.remove("hidden");
     if (gate === "graph_review") body.appendChild(gateGraphBody(S.gatePayload));
     else body.appendChild(gateReviewBody(S.gatePayload));
+    if (gate === "human_review") {
+      body.appendChild(h("p", "cl-hint",
+        "提示：可先在测试卡逐条勾选「采纳」，再点测试卡上的「✓ 提交评审」一键通过。"));
+    }
   }
 
   $("gateModal").classList.remove("hidden");
   $("gatePill").classList.add("hidden");
   setStep(stepIdxForStage(gate === "graph_type_select" ? "graph" : gate), false);
+  refreshAdoptUI();
   updateComposer();
 }
 
@@ -1178,6 +1305,62 @@ function clCheckbox(node, depth, onChange) {
 function setClSelected(rel, on) {
   if (on) S.clSelected.add(rel);
   else S.clSelected.delete(rel);
+}
+
+/* 清单路由空态（空库/无匹配）：不再静默，给上传入库与库浏览入口 */
+function gateChecklistEmptyBody(p) {
+  const wrap = h("div", "cl-route");
+  if (p.root) wrap.appendChild(h("div", "cl-root mono", `清单库：${p.root}`));
+  const note = h("div", "cl-empty");
+  note.appendChild(h("p", null, (p.business_count || 0)
+    ? `库中有 ${p.business_count} 个业务类型，但都与当前需求不匹配。`
+    : "清单库中还没有业务清单。"));
+  note.appendChild(h("p", null,
+    "有现成的业务检查清单（内部 wiki 页面、验收清单、历史用例文档）？上传后 AI 会按库规范归纳入库，确认后即可注入本单用例设计。"));
+  const actions = h("div", "cl-empty-actions");
+  actions.appendChild(miniBtn("📤 上传清单文档入库", () => openImportModal("gate"), "支持 .md / .txt / .docx"));
+  actions.appendChild(miniBtn("☰ 查看清单库", () => openLibraryTree(), "浏览当前清单库"));
+  note.appendChild(actions);
+  wrap.appendChild(note);
+  wrap.appendChild(h("p", "cl-hint", "跳过也能继续：本轮按常规流程设计用例，跑完后仍可在测试卡上沉淀。"));
+  return wrap;
+}
+
+/* 清单库浏览：业务 → 子业务、条目数、路由描述（只读） */
+async function openLibraryTree() {
+  if (!S.tid) return;
+  const body = $("libraryBody");
+  body.innerHTML = "";
+  body.appendChild(h("div", "cl-empty", "加载中…"));
+  $("libraryModal").classList.remove("hidden");
+  try {
+    const data = await api(`/api/sessions/${S.tid}/checklist-tree`);
+    body.innerHTML = "";
+    const tree = data.tree || [];
+    if (!tree.length) {
+      body.appendChild(h("div", "cl-empty",
+        "清单库还是空的。可在清单路由卡上传文档入库，或跑完用例后在测试卡上沉淀。"));
+    }
+    tree.forEach((biz) => {
+      body.appendChild(libRow(biz, 0));
+      (biz.children || []).forEach((sub) => body.appendChild(libRow(sub, 1)));
+    });
+    if (data.root) body.appendChild(h("div", "dl-root mono", "清单库：" + data.root));
+  } catch (err) {
+    body.innerHTML = "";
+    body.appendChild(h("div", "cl-empty", "加载失败：" + err.message));
+  }
+}
+
+function libRow(node, depth) {
+  const row = h("div", "lib-row" + (depth ? " sub" : ""));
+  const head = h("div", "lib-head");
+  head.appendChild(h("b", null, node.name || node.rel_dir));
+  head.appendChild(h("span", "cl-dir mono", node.rel_dir));
+  head.appendChild(h("span", "lib-count", node.has_checklist ? `${node.item_count} 条` : "无 checklist"));
+  row.appendChild(head);
+  if (node.description) row.appendChild(h("span", "cl-desc", node.description));
+  return row;
 }
 
 /* 图种类选择卡：候选 + 推荐/推断标记，点卡片即选定并继续制图 */
@@ -1333,8 +1516,10 @@ function submitGate(decision, comment) {
   const gate = S.gate;
   const isRoute = gate === "checklist_route";
   const isReqReview = gate === "requirement_review";
-  // 清单路由门禁：approve/reject 映射为 confirm/skip，携带勾选的业务路径
-  const routeDecision = isRoute ? (decision === "approve" ? "confirm" : "skip") : null;
+  // 清单路由门禁：approve/reject 映射为 confirm/skip，携带勾选的业务路径；
+  // 空态（空库/无匹配）卡上「跳过，直接生成用例」也映射为 skip
+  const routeEmpty = isRoute && !(S.gatePayload.candidates || []).length;
+  const routeDecision = isRoute ? (decision === "approve" && !routeEmpty ? "confirm" : "skip") : null;
   const selected = isRoute ? [...(S.clSelected || [])].join(",") : "";
   // 需求确认门禁：approve/reject 映射为 confirm/reject，携带就地修改的字段
   const reqEdits = isReqReview ? (S.rrEdits || {}) : {};
@@ -1343,10 +1528,12 @@ function submitGate(decision, comment) {
   $("gateModal").classList.add("hidden");
   $("gatePill").classList.add("hidden");
   S.gate = null;
+  refreshAdoptUI();
   if (isRoute) {
     const n = routeDecision === "confirm" ? (S.clSelected || []).length : 0;
     addDivider(
-      routeDecision === "confirm" ? `清单已确认 · 注入 ${n} 项` : "已跳过清单注入",
+      routeDecision === "confirm" ? `清单已确认 · 注入 ${n} 项`
+        : routeEmpty ? "清单库暂无匹配 · 已跳过注入" : "已跳过清单注入",
       null, true,
     );
   } else if (isReqReview) {
@@ -1359,6 +1546,10 @@ function submitGate(decision, comment) {
       addDivider("需求未确认 · 退回补充", comment ? `「${comment.slice(0, 40)}」` : null, true);
     }
   } else {
+    if (gate === "human_review" && decision === "approve") {
+      // 终审通过（未走采纳提交）：之后也弹沉淀建议（无预勾选 = 全部用例）
+      S.pendingDistill = [];
+    }
     addDivider(decision === "approve" ? "评审通过 · 继续推进" : "已驳回 · 意见回传",
       comment ? `「${comment.slice(0, 40)}${comment.length > 40 ? "…" : ""}」` : null, true);
   }
@@ -1385,16 +1576,70 @@ function submitGate(decision, comment) {
 
 const REL_DIR_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*(\/[A-Za-z0-9][A-Za-z0-9_-]*)*$/;
 
-async function openDistill(report) {
+/* 业务类型选择区（沉淀 / 文档导入 / 手写清单三种弹窗共用）：
+   已有业务下拉（含子业务/条目数）或新建（英文目录 / 中文名 / 路由描述） */
+function bizSectionEl(tree, rootLabel) {
+  const bizSec = h("div", "dl-sec");
+  bizSec.appendChild(h("h4", null, "业务类型（清单将登记到该目录）"));
+  const sel = h("select", "dl-select");
+  sel.appendChild(new Option("— 选择已有业务 —", ""));
+  (tree || []).forEach((biz) => {
+    sel.appendChild(new Option(`${biz.rel_dir} · ${biz.name}${biz.item_count ? `（${biz.item_count} 条）` : "（空）"}`, biz.rel_dir));
+    (biz.children || []).forEach((sub) => {
+      sel.appendChild(new Option(`  ↳ ${sub.rel_dir} · ${sub.name}${sub.item_count ? `（${sub.item_count} 条）` : "（空）"}`, sub.rel_dir));
+    });
+  });
+  sel.appendChild(new Option("＋ 新建业务类型…", "__new__"));
+  bizSec.appendChild(sel);
+  const newWrap = h("div", "dl-new hidden");
+  const dirIn = h("input", "dl-input mono");
+  dirIn.placeholder = "英文目录名，如 refund 或 payment/chargeback";
+  const nameIn = h("input", "dl-input");
+  nameIn.placeholder = "业务中文名，如 退款子业务";
+  const descIn = h("input", "dl-input");
+  descIn.placeholder = "一句话路由描述：什么需求应路由到此（AI 也会辅助归纳）";
+  newWrap.append(dirIn, nameIn, descIn);
+  sel.onchange = () => newWrap.classList.toggle("hidden", sel.value !== "__new__");
+  bizSec.appendChild(newWrap);
+  if (rootLabel) bizSec.appendChild(h("div", "dl-root mono", "清单库：" + rootLabel));
+  return { bizSec, sel };
+}
+
+/* 从弹窗表单收集业务归属：{business} 或 {err} */
+function collectBusiness(tree, formEl) {
+  const sel = formEl.querySelector(".dl-select");
+  if (sel.value === "__new__") {
+    const [dirIn, nameIn, descIn] = formEl.querySelectorAll(".dl-new .dl-input");
+    const rel = dirIn.value.trim();
+    if (!REL_DIR_RE.test(rel)) {
+      return { err: "业务目录名非法：限英文/数字/连字符，可用 / 表示子业务（如 refund 或 payment/chargeback）" };
+    }
+    return { business: { rel_dir: rel, name: nameIn.value.trim(), description: descIn.value.trim() } };
+  }
+  if (sel.value) {
+    const meta = (tree || []).flatMap((b) => [b, ...(b.children || [])]).find((x) => x.rel_dir === sel.value);
+    return { business: { rel_dir: sel.value, name: meta?.name || "" } };
+  }
+  return { err: "请先选择业务类型，或新建一个" };
+}
+
+async function fetchChecklistTree() {
+  const treeData = { root: "", tree: [] };
+  try {
+    const data = await api(`/api/sessions/${S.tid}/checklist-tree`);
+    treeData.tree = data.tree || [];
+    treeData.root = data.root || "";
+  } catch { /* 库树拉取失败不阻塞：仍可新建业务 */ }
+  return treeData;
+}
+
+async function openDistill(report, preselectIds = null) {
   const cases = (report.test_cases || []).filter((c) => c && c.case_id);
   if (!cases.length || !S.tid) return;
-  S.distill = { report, cases, preview: null, formEl: null, prevEl: null };
-  let treeData = { root: "", tree: [] };
-  try {
-    treeData = await api(`/api/sessions/${S.tid}/checklist-tree`);
-  } catch { /* 库树拉取失败不阻塞：仍可新建业务 */ }
-  S.distill.tree = treeData.tree || [];
-  S.distill.root = treeData.root || "";
+  S.distill = { report, cases, preview: null, formEl: null, prevEl: null, preselect: preselectIds };
+  const treeData = await fetchChecklistTree();
+  S.distill.tree = treeData.tree;
+  S.distill.root = treeData.root;
   buildDistillBody();
   $("distillModal").classList.remove("hidden");
 }
@@ -1431,35 +1676,16 @@ function distillFormEl() {
   const wrap = h("div", "dl-form");
 
   // ── 业务类型 ──
-  const bizSec = h("div", "dl-sec");
-  bizSec.appendChild(h("h4", null, "业务类型（清单将登记到该目录）"));
-  const sel = h("select", "dl-select");
-  sel.appendChild(new Option("— 选择已有业务 —", ""));
-  d.tree.forEach((biz) => {
-    sel.appendChild(new Option(`${biz.rel_dir} · ${biz.name}${biz.item_count ? `（${biz.item_count} 条）` : "（空）"}`, biz.rel_dir));
-    (biz.children || []).forEach((sub) => {
-      sel.appendChild(new Option(`  ↳ ${sub.rel_dir} · ${sub.name}${sub.item_count ? `（${sub.item_count} 条）` : "（空）"}`, sub.rel_dir));
-    });
-  });
-  sel.appendChild(new Option("＋ 新建业务类型…", "__new__"));
-  bizSec.appendChild(sel);
-  const newWrap = h("div", "dl-new hidden");
-  const dirIn = h("input", "dl-input mono");
-  dirIn.placeholder = "英文目录名，如 refund 或 payment/chargeback";
-  const nameIn = h("input", "dl-input");
-  nameIn.placeholder = "业务中文名，如 退款子业务";
-  const descIn = h("input", "dl-input");
-  descIn.placeholder = "一句话路由描述：什么需求应路由到此（AI 也会辅助归纳）";
-  newWrap.append(dirIn, nameIn, descIn);
-  sel.onchange = () => newWrap.classList.toggle("hidden", sel.value !== "__new__");
-  bizSec.appendChild(newWrap);
-  if (d.root) bizSec.appendChild(h("div", "dl-root mono", "清单库：" + d.root));
+  const { bizSec } = bizSectionEl(d.tree, d.root);
   wrap.appendChild(bizSec);
 
-  // ── 用例勾选 ──
+  // ── 用例勾选（有采纳集时只预勾选采纳的用例）──
+  const pre = Array.isArray(d.preselect) ? d.preselect : null;
   const caseSec = h("div", "dl-sec");
   const caseHead = h("div", "dl-case-head");
-  caseHead.appendChild(h("h4", null, `有效用例（${d.cases.length}）`));
+  caseHead.appendChild(h("h4", null, pre
+    ? `有效用例（${d.cases.length} · 已预勾选采纳的 ${pre.length} 条）`
+    : `有效用例（${d.cases.length}）`));
   const allBtn = miniBtn("全选/清空", () => {
     const boxes = caseList.querySelectorAll("input");
     const target = ![...boxes].every((b) => b.checked);
@@ -1472,7 +1698,7 @@ function distillFormEl() {
     const row = h("label", "dl-case");
     const cb = h("input");
     cb.type = "checkbox";
-    cb.checked = true;
+    cb.checked = !pre || pre.includes(c.case_id);
     cb.value = c.case_id;
     row.appendChild(cb);
     row.appendChild(h("span", "mono", c.case_id));
@@ -1487,25 +1713,11 @@ function distillFormEl() {
 
 function collectDistillRequest() {
   const d = S.distill;
-  const form = d.formEl;
-  const sel = form.querySelector(".dl-select");
-  let business;
-  if (sel.value === "__new__") {
-    const [dirIn, nameIn, descIn] = form.querySelectorAll(".dl-new .dl-input");
-    const rel = dirIn.value.trim();
-    if (!REL_DIR_RE.test(rel)) {
-      return { err: "业务目录名非法：限英文/数字/连字符，可用 / 表示子业务（如 refund 或 payment/chargeback）" };
-    }
-    business = { rel_dir: rel, name: nameIn.value.trim(), description: descIn.value.trim() };
-  } else if (sel.value) {
-    const meta = d.tree.flatMap((b) => [b, ...(b.children || [])]).find((x) => x.rel_dir === sel.value);
-    business = { rel_dir: sel.value, name: meta?.name || "" };
-  } else {
-    return { err: "请先选择业务类型，或新建一个" };
-  }
-  const caseIds = [...form.querySelectorAll(".dl-cases input:checked")].map((b) => b.value);
+  const biz = collectBusiness(d.tree, d.formEl);
+  if (biz.err) return biz;
+  const caseIds = [...d.formEl.querySelectorAll(".dl-cases input:checked")].map((b) => b.value);
   if (!caseIds.length) return { err: "至少勾选一条有效用例" };
-  return { business, case_ids: caseIds };
+  return { business: biz.business, case_ids: caseIds };
 }
 
 async function genDistill() {
@@ -1521,7 +1733,7 @@ async function genDistill() {
       body: JSON.stringify(req),
     });
     S.distill.preview = preview;
-    renderDistillPreview(preview);
+    renderDistillPreviewInto(S.distill.prevEl, preview);
     distillShowForm(false);
   } catch (err) {
     $("distillHint").textContent = "归纳失败：" + err.message;
@@ -1531,14 +1743,16 @@ async function genDistill() {
   }
 }
 
-function renderDistillPreview(p) {
-  const d = S.distill;
-  d.prevEl.innerHTML = "";
+/* 双栏预览（scenario.md / checklist.md）：沉淀、导入、手写三种弹窗共用 */
+function renderDistillPreviewInto(el, p) {
+  el.innerHTML = "";
   const head = h("div", "dl-pv-head");
   head.appendChild(h("span", "dl-mode", p.mode === "merge" ? "合并模式（保留已有条目并去重）" : "新建模式"));
-  head.appendChild(h("span", "mono", `${p.rel_dir} · ${p.case_count} 条用例`));
-  d.prevEl.appendChild(head);
-  if (p.merge_notes) d.prevEl.appendChild(h("div", "dl-notes", "合并说明：" + p.merge_notes));
+  head.appendChild(h("span", "mono", p.case_count
+    ? `${p.rel_dir} · ${p.case_count} 条用例`
+    : `${p.rel_dir}`));
+  el.appendChild(head);
+  if (p.merge_notes) el.appendChild(h("div", "dl-notes", "合并说明：" + p.merge_notes));
   const grid = h("div", "dl-pv-grid");
   [["scenario.md（路由标签）", p.scenario_md], ["checklist.md（检查清单）", p.checklist_md]].forEach(([title, md]) => {
     const box = h("div", "dl-pv-box");
@@ -1547,7 +1761,18 @@ function renderDistillPreview(p) {
     box.appendChild(pre);
     grid.appendChild(box);
   });
-  d.prevEl.appendChild(grid);
+  el.appendChild(grid);
+}
+
+async function commitPreview(modalHintId, preview) {
+  await api(`/api/sessions/${S.tid}/checklist/commit`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      rel_dir: preview.rel_dir,
+      scenario_md: preview.scenario_md,
+      checklist_md: preview.checklist_md,
+    }),
+  });
 }
 
 async function commitDistill() {
@@ -1556,18 +1781,244 @@ async function commitDistill() {
   const btn = $("btnDistillCommit");
   btn.disabled = true;
   try {
-    await api(`/api/sessions/${S.tid}/checklist/commit`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        rel_dir: d.preview.rel_dir,
-        scenario_md: d.preview.scenario_md,
-        checklist_md: d.preview.checklist_md,
-      }),
-    });
+    await commitPreview("distillHint", d.preview);
     toast("已登记到清单库", `${d.preview.rel_dir}/checklist.md（下次生成自动路由可用）`);
     closeDistill();
   } catch (err) {
     $("distillHint").textContent = "写入失败：" + err.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/* ── 上传清单文档入库（wiki / 验收清单 / 用例文档 → 按库规范归纳）── */
+
+async function openImportModal(from) {
+  if (!S.tid) return;
+  const treeData = await fetchChecklistTree();
+  S.import = { from, preview: null, formEl: null, prevEl: null, file: null,
+    tree: treeData.tree, root: treeData.root };
+  buildImportBody();
+  $("importModal").classList.remove("hidden");
+}
+
+function closeImportModal() {
+  $("importModal").classList.add("hidden");
+  S.import = null;
+}
+
+function buildImportBody() {
+  const d = S.import;
+  const body = $("importBody");
+  body.innerHTML = "";
+  d.formEl = importFormEl();
+  d.prevEl = h("div");
+  d.prevEl.classList.add("hidden");
+  body.append(d.formEl, d.prevEl);
+  importShowForm(true);
+}
+
+function importShowForm(form) {
+  const d = S.import;
+  d.formEl.classList.toggle("hidden", !form);
+  d.prevEl.classList.toggle("hidden", form);
+  $("btnImportGen").classList.toggle("hidden", !form);
+  $("btnImportBack").classList.toggle("hidden", form);
+  $("btnImportCommit").classList.toggle("hidden", form || !d.preview);
+  $("importHint").textContent = "";
+}
+
+function importFormEl() {
+  const d = S.import;
+  const wrap = h("div", "dl-form");
+  const { bizSec } = bizSectionEl(d.tree, d.root);
+  wrap.appendChild(bizSec);
+
+  // ── 来源文档 ──
+  const fileSec = h("div", "dl-sec");
+  fileSec.appendChild(h("h4", null, "清单来源文档"));
+  const drop = h("div", "im-drop");
+  const fileIn = h("input");
+  fileIn.type = "file";
+  fileIn.accept = ".md,.txt,.docx";
+  fileIn.hidden = true;
+  const fileName = h("span", "im-file mono", "点击选择或拖入文件（.md / .txt / .docx，≤5MB）");
+  const pick = (f) => { d.file = f; fileName.textContent = `📄 ${f.name}（${Math.ceil(f.size / 1024)}KB）`; };
+  drop.append(fileName, fileIn);
+  drop.onclick = () => fileIn.click();
+  drop.ondragover = (e) => { e.preventDefault(); drop.classList.add("over"); };
+  drop.ondragleave = () => drop.classList.remove("over");
+  drop.ondrop = (e) => {
+    e.preventDefault(); drop.classList.remove("over");
+    if (e.dataTransfer.files.length) pick(e.dataTransfer.files[0]);
+  };
+  fileIn.onchange = () => { if (fileIn.files.length) pick(fileIn.files[0]); };
+  fileSec.appendChild(drop);
+  wrap.appendChild(fileSec);
+  wrap.appendChild(h("p", "cl-hint",
+    "AI 只提取文档中「可作为测试检查点」的业务规则，按库规范（8 分节 + 优先级）归纳；预览确认后才写库。"));
+  return wrap;
+}
+
+async function genImport() {
+  const d = S.import;
+  const biz = collectBusiness(d.tree, d.formEl);
+  if (biz.err) { $("importHint").textContent = biz.err; return; }
+  if (!d.file) { $("importHint").textContent = "请先选择清单来源文档"; return; }
+  const btn = $("btnImportGen");
+  btn.disabled = true;
+  btn.textContent = "✦ 解析中…";
+  $("importHint").textContent = "";
+  try {
+    const fd = new FormData();
+    fd.append("file", d.file);
+    fd.append("rel_dir", biz.business.rel_dir);
+    fd.append("name", biz.business.name || "");
+    fd.append("description", biz.business.description || "");
+    const preview = await api(`/api/sessions/${S.tid}/checklist/import`, { method: "POST", body: fd });
+    d.preview = preview;
+    renderDistillPreviewInto(d.prevEl, preview);
+    importShowForm(false);
+  } catch (err) {
+    $("importHint").textContent = "解析失败：" + err.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "✦ 解析预览";
+  }
+}
+
+async function commitImport() {
+  const d = S.import;
+  if (!d?.preview) return;
+  const btn = $("btnImportCommit");
+  btn.disabled = true;
+  try {
+    await commitPreview("importHint", d.preview);
+    toast("清单文档已入库", `${d.preview.rel_dir}/checklist.md（溯源 import:${d.file?.name || ""}）`);
+    const rel = d.preview.rel_dir;
+    const from = d.from;
+    closeImportModal();
+    if (from === "gate" && S.gate === "checklist_route") await mergeImportIntoGate(rel);
+  } catch (err) {
+    $("importHint").textContent = "写入失败：" + err.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/* 门禁里导入成功后：把新业务并入路由候选树并预选，用户确认即注入本单 */
+async function mergeImportIntoGate(preselectRel) {
+  try {
+    const data = await api(`/api/sessions/${S.tid}/checklist-tree`);
+    const mark = (n) => ({ ...n, suggested: n.rel_dir === preselectRel, children: undefined });
+    const tree = data.tree || [];
+    const existing = S.gatePayload.candidates || [];
+    const existRels = new Set(existing.map((c) => c.rel_dir));
+    const imported = tree.find((b) => b.rel_dir === preselectRel
+      || (b.children || []).some((s) => s.rel_dir === preselectRel));
+    if (imported && !existRels.has(imported.rel_dir)) {
+      existing.push({
+        rel_dir: imported.rel_dir, name: imported.name, description: imported.description,
+        suggested: true, reason: "刚从文档导入",
+        children: (imported.children || []).map(mark),
+      });
+    }
+    S.gatePayload.candidates = existing;
+    S.gatePayload.status = "matched";
+    openGate("checklist_route", S.gatePayload);
+    toast("已并入当前清单路由", "确认勾选后即可注入本单用例设计");
+  } catch { /* 刷新失败不阻塞：用户仍可跳过 */ }
+}
+
+/* ── 手写 Checklist 入库（AI 规范化 + 去重）──────────── */
+
+async function openManualModal() {
+  if (!S.tid) return;
+  const treeData = await fetchChecklistTree();
+  S.manual = { preview: null, formEl: null, prevEl: null, tree: treeData.tree, root: treeData.root };
+  buildManualBody();
+  $("manualModal").classList.remove("hidden");
+}
+
+function closeManualModal() {
+  $("manualModal").classList.add("hidden");
+  S.manual = null;
+}
+
+function buildManualBody() {
+  const d = S.manual;
+  const body = $("manualBody");
+  body.innerHTML = "";
+  d.formEl = manualFormEl();
+  d.prevEl = h("div");
+  d.prevEl.classList.add("hidden");
+  body.append(d.formEl, d.prevEl);
+  manualShowForm(true);
+}
+
+function manualShowForm(form) {
+  const d = S.manual;
+  d.formEl.classList.toggle("hidden", !form);
+  d.prevEl.classList.toggle("hidden", form);
+  $("btnManualGen").classList.toggle("hidden", !form);
+  $("btnManualBack").classList.toggle("hidden", form);
+  $("btnManualCommit").classList.toggle("hidden", form || !d.preview);
+  $("manualHint").textContent = "";
+}
+
+function manualFormEl() {
+  const d = S.manual;
+  const wrap = h("div", "dl-form");
+  const { bizSec } = bizSectionEl(d.tree, d.root);
+  wrap.appendChild(bizSec);
+  const sec = h("div", "dl-sec");
+  sec.appendChild(h("h4", null, "清单内容（markdown）"));
+  const ta = h("textarea", "dl-input manual-text");
+  ta.rows = 12;
+  ta.placeholder = "## 正向\n- [P0] 正常下单并用可用余额完成支付，订单状态流转为已支付\n\n## 反向\n- [P0] 余额不足时支付被拒绝并给出明确提示，不产生脏订单\n\n## 边界值\n- [P1] 恰好等于订单金额的余额可支付成功\n\n（合法分节：正向/反向/边界值/等价类/状态流转/场景法/安全/性能；条目格式 - [P0/P1/P2] 可验证的一句话检查点）";
+  sec.appendChild(ta);
+  wrap.appendChild(sec);
+  wrap.appendChild(h("p", "cl-hint", "不必严格符合规范：AI 会把内容归一到 8 分节与 P0-P2 优先级，并去除与已有清单重复的条目。"));
+  return wrap;
+}
+
+async function genManual() {
+  const d = S.manual;
+  const biz = collectBusiness(d.tree, d.formEl);
+  if (biz.err) { $("manualHint").textContent = biz.err; return; }
+  const ta = d.formEl.querySelector(".manual-text");
+  if (!ta.value.trim()) { $("manualHint").textContent = "请先写点清单内容"; return; }
+  const btn = $("btnManualGen");
+  btn.disabled = true;
+  btn.textContent = "✦ 规范化中…";
+  $("manualHint").textContent = "";
+  try {
+    const preview = await api(`/api/sessions/${S.tid}/checklist/distill`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source: "manual", text: ta.value, business: biz.business }),
+    });
+    d.preview = preview;
+    renderDistillPreviewInto(d.prevEl, preview);
+    manualShowForm(false);
+  } catch (err) {
+    $("manualHint").textContent = "规范化失败：" + err.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "✦ 规范化预览";
+  }
+}
+
+async function commitManual() {
+  const d = S.manual;
+  if (!d?.preview) return;
+  const btn = $("btnManualCommit");
+  btn.disabled = true;
+  try {
+    await commitPreview("manualHint", d.preview);
+    toast("手写清单已入库", `${d.preview.rel_dir}/checklist.md（下次生成自动路由可用）`);
+    closeManualModal();
+  } catch (err) {
+    $("manualHint").textContent = "写入失败：" + err.message;
   } finally {
     btn.disabled = false;
   }
@@ -1628,6 +2079,9 @@ async function openSession(tid) {
     updateCfgBtn();
     S.gate = null; S.graph = null; S.report = null;
     S.history = [];
+    S.adoptSel = new Set();
+    S.pendingDistill = null;
+    S.distillPromptEl = null;
     S.lastSeq = Number(snap.last_seq || 0);
     const vals = snap.values || {};
     // 回放对话
@@ -1700,6 +2154,10 @@ async function openSession(tid) {
       });
     }
     addDivider(`已恢复会话 ${tid}`, stageName(S.stage), true);
+    // 已完成且未「暂不」的会话：恢复时补一张沉淀建议卡（AI 归纳 / 手写 / 暂不）
+    if (S.stage === "done" && vals.test_report && !vals.distill_dismissed && !(snap.next || []).length) {
+      addDistillPrompt(vals.adopted_cases || []);
+    }
     // 断线/误关浏览器恢复：服务端仍在推进 → 立即接上实时进度（历史由快照回放）
     if (snap.running) {
       setRunning(true);
@@ -2442,8 +2900,22 @@ function boot() {
   $("btnDistillGen").onclick = genDistill;
   $("btnDistillBack").onclick = () => distillShowForm(true);
   $("btnDistillCommit").onclick = commitDistill;
+  // 上传清单文档入库 / 手写清单 / 清单库浏览
+  $("btnImportCancel").onclick = closeImportModal;
+  $("btnImportGen").onclick = genImport;
+  $("btnImportBack").onclick = () => importShowForm(true);
+  $("btnImportCommit").onclick = commitImport;
+  $("btnManualCancel").onclick = closeManualModal;
+  $("btnManualGen").onclick = genManual;
+  $("btnManualBack").onclick = () => manualShowForm(true);
+  $("btnManualCommit").onclick = commitManual;
+  $("btnLibraryClose").onclick = () => $("libraryModal").classList.add("hidden");
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && !$("gateModal").classList.contains("hidden")) closeGateToPeek();
+    if (e.key !== "Escape") return;
+    if (!$("importModal").classList.contains("hidden")) { closeImportModal(); return; }
+    if (!$("manualModal").classList.contains("hidden")) { closeManualModal(); return; }
+    if (!$("libraryModal").classList.contains("hidden")) { $("libraryModal").classList.add("hidden"); return; }
+    if (!$("gateModal").classList.contains("hidden")) closeGateToPeek();
   });
 
   updateComposer();

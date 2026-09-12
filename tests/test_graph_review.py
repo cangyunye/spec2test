@@ -134,10 +134,14 @@ class TestGraphReviewIntegration:
         assert snapshot.values.get("logic_graph") is not None
         assert snapshot.values["logic_graph"].get("graph_type") == "flowchart"
 
-        # 2. approve 制图门 → 应继续并停在终审 review
+        # 2. approve 制图门 → 清单路由门（必弹，空库跳过）→ 停在终审 review
         list(self.graph.stream(Command(resume="approve"), self.config, stream_mode="updates"))
         snapshot = self.graph.get_state(self.config)
-        assert "review" in (snapshot.next or []), f"approve 制图门后应到达终审 review，实际 next={snapshot.next}"
+        assert "checklist_route_gate" in (snapshot.next or []), \
+            f"approve 制图门后应先停在清单路由门，实际 next={snapshot.next}"
+        list(self.graph.stream(Command(resume={"decision": "skip"}), self.config, stream_mode="updates"))
+        snapshot = self.graph.get_state(self.config)
+        assert "review" in (snapshot.next or []), f"清单门跳过后应到达终审 review，实际 next={snapshot.next}"
 
         # 3. 终审 approve → 流程结束
         list(self.graph.stream(Command(resume="approve"), self.config, stream_mode="updates"))

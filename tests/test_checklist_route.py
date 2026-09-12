@@ -79,8 +79,8 @@ class TestMatchNode:
         assert cands[0]["rel_dir"] == "payment"
         assert cands[0]["children"][0]["rel_dir"] == "payment/refund"
 
-    def test_no_match_marks_routed(self, lib, monkeypatch):
-        """LLM 无匹配 → 记 checklist_routed=True，静默放行。"""
+    def test_no_match_records_empty_status(self, lib, monkeypatch):
+        """LLM 无匹配 → 落 status=no_match 且不打 checklist_routed（门禁必弹）。"""
         from devflow.checklist.models import RouteMatch
 
         async def fake_match(text, root):
@@ -89,7 +89,20 @@ class TestMatchNode:
         monkeypatch.setattr(cr, "match_businesses", fake_match)
         monkeypatch.setattr(cr, "resolve_root", lambda pr="": lib)
         out = checklist_route_match(_state(lib))
-        assert out == {"checklist_routed": True, "checklist_route": None}
+        assert not out.get("checklist_routed")  # 门禁仍要打断（给上传入口）
+        route = out["checklist_route"]
+        assert route["candidates"] == []
+        assert route["status"] == "no_match"
+        assert route["business_count"] >= 1  # init_library 示例库至少 1 个业务
+
+    def test_empty_library_no_llm(self, tmp_path, monkeypatch):
+        """空库：status=empty_library、business_count=0，且不调路由 LLM。"""
+        monkeypatch.setenv("DEVFLOW_CHECKLIST_ROOT", str(tmp_path / "no-lib"))
+        out = checklist_route_match(_state(tmp_path))
+        route = out["checklist_route"]
+        assert route["status"] == "empty_library"
+        assert route["business_count"] == 0
+        assert route["candidates"] == []
 
     def test_already_routed_passthrough(self, lib, monkeypatch):
         """回炉重生成路径：checklist_routed=True 时零开销放行（不调 LLM）。"""
@@ -160,6 +173,52 @@ class TestGateNode:
         """已路由（skip 落库后回炉）→ gate 零开销放行。"""
         st = _state(lib) | {"checklist_routed": True}
         assert checklist_route_gate(st) == {}
+
+
+class TestGateNodeEmpty:
+    """空库 / 无匹配：门禁也必弹（上传入口），skip 或确认均可恢复。"""
+
+    @pytest.fixture()
+    def gated_empty(self, lib, monkeypatch):
+        """无匹配但库有内容（status=no_match）推进到 gate 挂起。"""
+        from devflow.checklist.models import RouteMatch
+
+        async def fake_match(text, root):
+            return RouteMatch()
+
+        monkeypatch.setattr(cr, "match_businesses", fake_match)
+        monkeypatch.setattr(cr, "resolve_root", lambda pr="": lib)
+        graph = _mini_graph()
+        config = {"configurable": {"thread_id": f"cr-e-{uuid.uuid4().hex[:8]}"}}
+        list(graph.stream(_state(lib), config, stream_mode="updates"))
+        return graph, config
+
+    def test_empty_still_interrupts(self, gated_empty):
+        graph, config = gated_empty
+        snap = graph.get_state(config)
+        assert snap.next == ("gate",)
+        intr = snap.tasks[0].interrupts[0].value
+        assert intr["type"] == "checklist_route"
+        assert intr["status"] == "no_match"
+        assert intr["business_count"] >= 1
+        assert intr["candidates"] == []
+
+    def test_empty_skip_resumes(self, gated_empty):
+        graph, config = gated_empty
+        list(graph.stream(Command(resume={"decision": "skip"}), config, stream_mode="updates"))
+        vals = graph.get_state(config).values
+        assert vals["checklist_routed"] is True
+        assert vals["checklist_context"] is None
+
+    def test_confirm_with_rel_not_in_candidates(self, gated_empty):
+        """导入后的业务不在匹配候选里也能注入：load_checklists 以磁盘为准。"""
+        graph, config = gated_empty
+        list(graph.stream(
+            Command(resume={"decision": "confirm", "selected": ["payment/refund"]}),
+            config, stream_mode="updates",
+        ))
+        ctx = graph.get_state(config).values["checklist_context"]
+        assert {c["rel_dir"] for c in ctx["checklists"]} == {"payment/refund"}
 
 
 # ═══════════════════════════════════════════════════════════════════

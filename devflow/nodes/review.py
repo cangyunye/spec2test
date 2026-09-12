@@ -94,12 +94,19 @@ def review_node(state: GlobalState) -> dict[str, Any]:
     }
 
     # interrupt 暂停 graph；调用方恢复时传 "approve" / "reject"（或带 comment 的 dict）
-    decision, comment = _parse_decision(interrupt(review_payload))
+    resume = interrupt(review_payload)
+    decision, comment = _parse_decision(resume)
+    # 测试卡「提交评审」：采纳的用例随 approve 回传落 state（采纳 = 评审通过，
+    # 沉淀建议卡与导出都以此为准）；普通门禁通过不带 adopted，保持 None
+    adopted: list[str] | None = None
+    if isinstance(resume, dict) and decision == "approve":
+        adopted = [str(c).strip() for c in (resume.get("adopted") or []) if str(c).strip()] or None
 
     if decision == "approve":
         return {
             "current_stage": "done",
             "review_feedback": None,
+            "adopted_cases": adopted,
             "test_failure": None,
             "last_error": None,
             "last_error_code": None,
@@ -110,12 +117,14 @@ def review_node(state: GlobalState) -> dict[str, Any]:
         return {
             "current_stage": "test",
             "review_feedback": feedback,
+            "adopted_cases": None,  # 用例将重做，旧采纳记录作废
             "last_error": "[review] 用户拒绝验收，回退到测试用例设计",
             "last_error_code": None,
         }
     return {
         "current_stage": "code",
         "review_feedback": feedback,
+        "adopted_cases": None,
         "last_error": "[review] 用户拒绝验收，回退到代码生成",
         "last_error_code": None,
     }

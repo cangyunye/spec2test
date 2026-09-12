@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from langchain_core.messages import HumanMessage
@@ -454,9 +454,14 @@ def checklist_candidates(tid: str) -> dict[str, Any]:
         raise HTTPException(404, f"会话不存在或读取失败: {e}")
     vals = snap.values or {}
     route = vals.get("checklist_route") or {}
+    candidates = route.get("candidates") or []
     return {
         "root": route.get("root", ""),
-        "candidates": route.get("candidates") or [],
+        "candidates": candidates,
+        # matched=有候选 / no_match=库有内容但无匹配 / empty_library=空库；
+        # 旧 checkpoint 无 status 时按候选有无推断
+        "status": route.get("status") or ("matched" if candidates else "empty_library"),
+        "business_count": int(route.get("business_count") or 0),
         "decision": route.get("decision"),
         "selected": route.get("selected") or [],
         "pending": "checklist_route_gate" in list(snap.next or []),
@@ -754,7 +759,9 @@ def checklist_tree_api(tid: str) -> dict[str, Any]:
 class DistillRequest(BaseModel):
     # 用户标记的业务类型：rel_dir 必填（已有业务或新建英文目录名）
     business: dict[str, Any] | None = None
-    case_ids: list[str] = []       # 勾选的有效用例；空 = 全部
+    case_ids: list[str] = []       # 勾选的有效用例；空 = 全部（仅 source=cases 时生效）
+    source: str = "cases"          # cases=会话用例归纳 / manual=手写清单规范化
+    text: str = ""                 # source=manual 时的手写原文（markdown）
 
 
 class DistillCommit(BaseModel):
@@ -772,30 +779,34 @@ def _session_test_cases(tid: str) -> tuple[list[dict[str, Any]], dict[str, Any]]
     return cases, vals.get("requirement") or {}
 
 
-@app.post("/api/sessions/{tid}/checklist/distill")
-async def distill_checklist(tid: str, body: DistillRequest) -> dict[str, Any]:
-    """勾选的有效用例 → LLM 归纳为 scenario.md/checklist.md 预览（不落盘）。
+async def _distill_preview(
+    tid: str,
+    business: dict[str, Any] | None,
+    *,
+    cases: list[dict[str, Any]] | None = None,
+    doc_text: str | None = None,
+    source_label: str = "",
+) -> dict[str, Any]:
+    """归纳预览（不落盘）：cases 走用例归纳，doc_text 走文档/手写规范化。
 
-    目标目录已有 checklist.md 时走 merge（旧清单原文一并交给 LLM 去重合并）。
+    目标目录已有 checklist.md 时走 merge（旧清单原文一并交给 LLM 去重合并），
+    且旧 frontmatter 的 sources 与本次来源累积合并，不丢溯源。
     """
-    if not _thread_exists(tid):
-        raise HTTPException(404, f"会话不存在: {tid}")
-    cases, req = _session_test_cases(tid)
-    if not cases:
-        raise HTTPException(400, "该会话没有可沉淀的测试用例")
-    if body.case_ids:
-        wanted = set(body.case_ids)
-        cases = [c for c in cases if c.get("case_id") in wanted]
-        if not cases:
-            raise HTTPException(400, "勾选的用例 ID 均不存在")
-    business = body.business or {}
-    rel_dir = validate_rel_dir(str(business.get("rel_dir") or ""))
+    from devflow.checklist.distill import (
+        distill_from_cases,
+        distill_from_doc,
+        merge_sources,
+        render_checklist_md,
+        render_scenario_md,
+    )
+    from devflow.checklist.library import resolve_root
+
+    biz = business or {}
+    rel_dir = validate_rel_dir(str(biz.get("rel_dir") or ""))
     if not rel_dir:
         raise HTTPException(400, "业务类型目录名非法（限英文/数字/连字符，可含 / 子业务）")
 
-    from devflow.checklist.distill import distill_from_cases
-    from devflow.checklist.library import load_scenario, resolve_root
-
+    req = build_graph_with_providers().get_state(_config(thread_id=tid)).values.get("requirement") or {}
     root = resolve_root(str(req.get("project_root") or ""))
     existing_scenario = ""
     existing_checklist = ""
@@ -808,26 +819,89 @@ async def distill_checklist(tid: str, body: DistillRequest) -> dict[str, Any]:
 
     biz_input = {
         "rel_dir": rel_dir,
-        "name": str(business.get("name") or ""),
-        "description": str(business.get("description") or ""),
+        "name": str(biz.get("name") or ""),
+        "description": str(biz.get("description") or ""),
     }
     try:
-        out = await distill_from_cases(cases, biz_input, existing_scenario, existing_checklist)
+        if doc_text is not None:
+            out = await distill_from_doc(doc_text, biz_input, existing_scenario, existing_checklist)
+        else:
+            out = await distill_from_cases(cases or [], biz_input, existing_scenario, existing_checklist)
     except Exception as e:
         raise HTTPException(502, f"清单归纳失败：{e}")
 
-    from devflow.checklist.distill import render_checklist_md, render_scenario_md
-
-    scenario_md = render_scenario_md(out)
-    checklist_md = render_checklist_md(out, business=rel_dir, sources=[tid])
+    checklist_md = render_checklist_md(
+        out, business=rel_dir, sources=merge_sources(existing_checklist, source_label)
+    )
     return {
         "mode": mode,
         "rel_dir": rel_dir,
-        "scenario_md": scenario_md,
+        "scenario_md": render_scenario_md(out),
         "checklist_md": checklist_md,
         "merge_notes": out.merge_notes,
-        "case_count": len(cases),
+        "case_count": len(cases or []),
     }
+
+
+@app.post("/api/sessions/{tid}/checklist/distill")
+async def distill_checklist(tid: str, body: DistillRequest) -> dict[str, Any]:
+    """有效用例（或手写原文）→ LLM 归纳为 scenario.md/checklist.md 预览（不落盘）。"""
+    if not _thread_exists(tid):
+        raise HTTPException(404, f"会话不存在: {tid}")
+    if body.source == "manual":
+        if not body.text.strip():
+            raise HTTPException(400, "手写清单内容为空")
+        return await _distill_preview(
+            tid, body.business, doc_text=body.text, source_label=tid
+        )
+    cases, _ = _session_test_cases(tid)
+    if not cases:
+        raise HTTPException(400, "该会话没有可沉淀的测试用例")
+    if body.case_ids:
+        wanted = set(body.case_ids)
+        cases = [c for c in cases if c.get("case_id") in wanted]
+        if not cases:
+            raise HTTPException(400, "勾选的用例 ID 均不存在")
+    return await _distill_preview(tid, body.business, cases=cases, source_label=tid)
+
+
+@app.post("/api/sessions/{tid}/checklist/import")
+async def import_checklist(
+    tid: str,
+    file: UploadFile = File(...),
+    rel_dir: str = Form(""),
+    name: str = Form(""),
+    description: str = Form(""),
+) -> dict[str, Any]:
+    """上传清单文档（wiki 页面 / 验收清单 / 用例文档）→ AI 按库规范归纳入库预览。
+
+    落盘复用 /checklist/commit；溯源记 "import:<文件名>"，与沉淀来源区分。
+    """
+    if not _thread_exists(tid):
+        raise HTTPException(404, f"会话不存在: {tid}")
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix not in (".docx", ".txt", ".md"):
+        raise HTTPException(415, f"不支持的格式 {suffix}（仅 .docx / .txt / .md）")
+    data = await file.read()
+    if len(data) > 5 * 1024 * 1024:
+        raise HTTPException(413, "文件超过 5MB 上限")
+    import tempfile
+
+    fd, tmp_path = tempfile.mkstemp(suffix=suffix)
+    try:
+        with __import__("os").fdopen(fd, "wb") as f:
+            f.write(data)
+        text = read_doc(tmp_path)
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+    if not text.strip():
+        raise HTTPException(400, "文档解析结果为空，无法归纳")
+    return await _distill_preview(
+        tid,
+        {"rel_dir": rel_dir, "name": name, "description": description},
+        doc_text=text,
+        source_label=f"import:{Path(file.filename or 'doc').name}",
+    )
 
 
 @app.post("/api/sessions/{tid}/checklist/commit")
@@ -918,6 +992,45 @@ async def decide_gate(tid: str, body: GateDecision) -> dict[str, Any]:
     if not result.get("accepted"):
         raise HTTPException(409, result.get("reason", "该会话正在推进中"))
     return result
+
+
+class AdoptBody(BaseModel):
+    case_ids: list[str] = []       # 测试卡上勾选采纳的用例（采纳 = 评审通过）
+
+
+@app.post("/api/sessions/{tid}/review/adopt")
+async def adopt_review(tid: str, body: AdoptBody) -> dict[str, Any]:
+    """提交用例采纳 = 终审通过：仅当会话正停在 human_review 门禁时接受。
+
+    组装 resume {"decision": "approve", "adopted": [...]}，review 节点把采纳
+    集落 state.adopted_cases（沉淀建议卡预勾选与导出标记的数据源）。
+    """
+    if not _thread_exists(tid):
+        raise HTTPException(404, f"会话不存在: {tid}")
+    case_ids = [str(c).strip() for c in body.case_ids if str(c).strip()]
+    if not case_ids:
+        raise HTTPException(400, "至少勾选一条要采纳的用例")
+    graph = build_graph_with_providers()
+    snap = graph.get_state(_config(thread_id=tid))
+    has_interrupt = any(getattr(t, "interrupts", None) for t in (snap.tasks or ()))
+    if "review" not in list(snap.next or []) or not has_interrupt:
+        raise HTTPException(409, "终审门禁尚未就绪：请等测试执行完成（门禁弹出）后再提交采纳")
+    result = await start_run(tid, Command(resume={"decision": "approve", "adopted": case_ids}))
+    if not result.get("accepted"):
+        raise HTTPException(409, result.get("reason", "该会话正在推进中"))
+    return {"accepted": True, "adopted": case_ids}
+
+
+@app.post("/api/sessions/{tid}/distill/dismiss")
+def dismiss_distill_prompt(tid: str) -> dict[str, Any]:
+    """沉淀建议卡「暂不」：落 checkpoint，会话恢复后不再提示。"""
+    if not _thread_exists(tid):
+        raise HTTPException(404, f"会话不存在: {tid}")
+    if _session_running(tid):
+        raise HTTPException(409, "该会话正在推进中，请稍后再操作")
+    graph = build_graph_with_providers()
+    graph.update_state(_config(thread_id=tid), {"distill_dismissed": True})
+    return {"dismissed": True}
 
 
 # ═══════════════════════════════════════════════════════════════════

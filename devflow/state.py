@@ -158,9 +158,11 @@ class GlobalState(TypedDict, total=False):
     code_changes: list[CodeChange]           # 阶段三才会有
     test_report: Optional[dict[str, Any]]    # 阶段三才会有
     code_apply: Optional[dict[str, Any]]     # diff 落盘结果 {applied, files, backup_dir, reason}
-    checklist_route: Optional[dict[str, Any]]   # 清单路由结果 {root, candidates, decision?, selected?}；门禁恢复重放数据源
+    checklist_route: Optional[dict[str, Any]]   # 清单路由结果 {root, candidates, status?, business_count?, decision?, selected?}；门禁恢复重放数据源
     checklist_context: Optional[dict[str, Any]]  # 确认后加载的清单 {root, checklists: [{rel_dir, name, content}]}，注入测试设计
     checklist_routed: bool                   # 本会话已做过路由（用例回炉重生成时不重复弹门禁）
+    adopted_cases: Optional[list[str]]       # 用户在测试卡勾选采纳的用例（采纳 = 评审通过）；None = 未做采纳
+    distill_dismissed: bool                  # 用户对「沉淀建议卡」点了暂不（本会话不再提示）
 
     # ── 3. 子系统会话映射 ──────────────────────────────
     opencode_sessions: OpenCodeSessions

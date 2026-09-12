@@ -168,6 +168,68 @@
   </div>
 </div>
 
+<!-- ── 上传清单文档入库模态 ─────────────────────────── -->
+<div id="importModal" class="gate-overlay hidden" role="dialog" aria-modal="true">
+  <div class="gate-panel distill-panel">
+    <header class="gate-head">
+      <span class="gate-tag mono">ASSET · 导入</span>
+      <div class="gate-head-text">
+        <h3>上传清单文档入库</h3>
+        <p id="importSub" class="mono">wiki / 验收清单 / 用例文档 → AI 按库规范归纳（确认后才写入）</p>
+      </div>
+    </header>
+    <div class="gate-body" id="importBody"></div>
+    <footer class="gate-foot">
+      <span id="importHint" class="mono distill-hint"></span>
+      <span class="spacer"></span>
+      <button id="btnImportCancel" class="btn ghost">取消</button>
+      <button id="btnImportBack" class="btn ghost hidden">← 返回调整</button>
+      <button id="btnImportGen" class="btn primary">✦ 解析预览</button>
+      <button id="btnImportCommit" class="btn primary hidden">✓ 确认写入清单库</button>
+    </footer>
+  </div>
+</div>
+
+<!-- ── 手写 Checklist 模态 ─────────────────────────── -->
+<div id="manualModal" class="gate-overlay hidden" role="dialog" aria-modal="true">
+  <div class="gate-panel distill-panel">
+    <header class="gate-head">
+      <span class="gate-tag mono">ASSET · 手写清单</span>
+      <div class="gate-head-text">
+        <h3>手写业务 Checklist 入库</h3>
+        <p id="manualSub" class="mono">按分节书写 → AI 规范化并与已有清单去重（确认后才写入）</p>
+      </div>
+    </header>
+    <div class="gate-body" id="manualBody"></div>
+    <footer class="gate-foot">
+      <span id="manualHint" class="mono distill-hint"></span>
+      <span class="spacer"></span>
+      <button id="btnManualCancel" class="btn ghost">取消</button>
+      <button id="btnManualBack" class="btn ghost hidden">← 返回调整</button>
+      <button id="btnManualGen" class="btn primary">✦ 规范化预览</button>
+      <button id="btnManualCommit" class="btn primary hidden">✓ 确认写入清单库</button>
+    </footer>
+  </div>
+</div>
+
+<!-- ── 清单库浏览模态 ──────────────────────────────── -->
+<div id="libraryModal" class="gate-overlay hidden" role="dialog" aria-modal="true">
+  <div class="gate-panel distill-panel">
+    <header class="gate-head">
+      <span class="gate-tag mono">LIBRARY · 清单库</span>
+      <div class="gate-head-text">
+        <h3>业务 Checklist 库</h3>
+        <p class="mono">业务 → 子业务 · 条目数 · 路由描述</p>
+      </div>
+    </header>
+    <div class="gate-body" id="libraryBody"></div>
+    <footer class="gate-foot">
+      <span class="spacer"></span>
+      <button id="btnLibraryClose" class="btn ghost">关闭</button>
+    </footer>
+  </div>
+</div>
+
 <!-- ── 步骤回退模态（time-travel）────────────────────── -->
 <div id="revertModal" class="gate-overlay hidden" role="dialog" aria-modal="true">
   <div class="gate-panel">

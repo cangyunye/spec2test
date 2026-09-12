@@ -746,6 +746,37 @@ table.t-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 }
 @media (max-width: 860px) { .dl-pv-grid { grid-template-columns: 1fr; } }
 
+/* ── 清单路由空态 / 库浏览 / 上传导入 ─────────────── */
+.cl-empty {
+  border: 1px dashed var(--border-2); border-radius: 10px;
+  padding: 14px 16px; display: flex; flex-direction: column; gap: 8px;
+  font-size: 12.5px; color: var(--ink-2); line-height: 1.6;
+}
+.cl-empty p { margin: 0; }
+.cl-empty-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.lib-row { border: 1px solid var(--border); border-radius: 9px; padding: 8px 12px; }
+.lib-row.sub { margin-left: 22px; padding: 6px 12px; }
+.lib-head { display: flex; align-items: baseline; gap: 8px; }
+.lib-head b { font-size: 13px; }
+.lib-count { margin-left: auto; font-size: 11px; color: var(--ink-3); }
+.im-drop {
+  border: 1.5px dashed var(--border-2); border-radius: 10px;
+  padding: 20px 14px; text-align: center; cursor: pointer;
+  font-size: 12.5px; color: var(--ink-2); transition: border-color .15s, background .15s;
+}
+.im-drop:hover, .im-drop.over { border-color: var(--ink-3); background: var(--hl); }
+.im-file { font-size: 12.5px; }
+.manual-text { width: 100%; resize: vertical; line-height: 1.6; font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace; }
+
+/* ── 测试卡采纳（评审）与沉淀建议卡 ────────────────── */
+.t-adopt { display: flex; align-items: center; gap: 8px; margin: 8px 0 2px; }
+.t-adopt-count { font-size: 11.5px; color: var(--ink-2); }
+.adopt-submit[disabled] { opacity: .45; cursor: not-allowed; }
+.t-adopt-cb { accent-color: var(--ink); cursor: pointer; }
+.dp-card { border-left: 2px solid var(--ink-3); }
+.dp-body { display: flex; flex-direction: column; gap: 10px; font-size: 12.5px; color: var(--ink-2); line-height: 1.6; }
+.dp-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+
 /* ── Toast ────────────────────────────────────────── */
 .toasts { position: fixed; top: 62px; right: 16px; z-index: 99; display: flex; flex-direction: column; gap: 8px; width: 330px; }
 .toast {

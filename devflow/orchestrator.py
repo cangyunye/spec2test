@@ -678,6 +678,8 @@ def initial_state() -> dict[str, Any]:
         "checklist_route": None,
         "checklist_context": None,
         "checklist_routed": False,
+        "adopted_cases": None,
+        "distill_dismissed": False,
         "last_error": None,
         "last_error_code": None,
         "last_error_retryable": False,

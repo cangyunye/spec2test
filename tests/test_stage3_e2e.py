@@ -125,11 +125,15 @@ class TestE2EHappyPath:
         assert vals.get("logic_graph") is not None
         assert len(vals.get("logic_graph", {}).get("nodes", [])) >= 2
 
-        # 3. 制图门 approve → 继续到终审 review
+        # 3. 制图门 approve → 清单路由门（必弹，空库跳过）→ 终审 review
         list(self.graph.stream(Command(resume="approve"), self.config, stream_mode="updates"))
         snapshot = self.graph.get_state(self.config)
+        assert "checklist_route_gate" in (snapshot.next or []), \
+            f"制图门后应先停在清单路由门，实际 next={snapshot.next}"
+        list(self.graph.stream(Command(resume={"decision": "skip"}), self.config, stream_mode="updates"))
+        snapshot = self.graph.get_state(self.config)
         next_nodes = snapshot.next or []
-        assert "review" in next_nodes, f"制图门通过后应到达终审 review，实际 next={next_nodes}"
+        assert "review" in next_nodes, f"清单门跳过后应到达终审 review，实际 next={next_nodes}"
 
         # 4. 检查 state 产物
         vals = snapshot.values
@@ -169,6 +173,8 @@ class TestE2ERejectPath:
         snapshot = self.graph.get_state(self.config)
         assert "graph_review" in (snapshot.next or [])
         list(self.graph.stream(Command(resume="approve"), self.config, stream_mode="updates"))
+        # 清单路由门必弹（空库跳过）
+        list(self.graph.stream(Command(resume={"decision": "skip"}), self.config, stream_mode="updates"))
 
         # 2. 到达终审 review 后 reject
         snapshot = self.graph.get_state(self.config)
@@ -242,8 +248,9 @@ class TestE2EExecutionLoop:
         snapshot = self.graph.get_state(self.config)
         assert "graph_review" in (snapshot.next or [])
 
-        # 2. 制图门通过 → 一路落盘/设计/执行到人工验收
+        # 2. 制图门通过 → 清单路由门（必弹，空库跳过）→ 一路落盘/设计/执行到人工验收
         list(self.graph.stream(Command(resume="approve"), self.config, stream_mode="updates"))
+        list(self.graph.stream(Command(resume={"decision": "skip"}), self.config, stream_mode="updates"))
         vals = self.graph.get_state(self.config).values
 
         # 3. diff 已真实落盘（含备份）
@@ -300,6 +307,8 @@ class TestE2ETestFailLoop:
         list(graph.stream(Command(resume="confirm"), config, stream_mode="updates"))
         list(graph.stream(Command(resume="flowchart"), config, stream_mode="updates"))
         list(graph.stream(Command(resume="approve"), config, stream_mode="updates"))
+        # 清单路由门必弹（空库跳过）
+        list(graph.stream(Command(resume={"decision": "skip"}), config, stream_mode="updates"))
 
         snapshot = graph.get_state(config)
         assert "review" in (snapshot.next or []), "连续失败超限后应停在人工验收"

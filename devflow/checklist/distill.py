@@ -45,6 +45,43 @@ DISTILL_USER_TEMPLATE = """【业务归属】
 请输出归纳结果（JSON）。"""
 
 
+# 文档导入 / 手写清单规范化：来源是既有文档而非本会话用例
+DOC_DISTILL_SYSTEM_PROMPT = DISTILL_SYSTEM_PROMPT + """
+- 来源文档可能是检查清单、测试用例文档、验收标准或 wiki 页面的混合体：
+  只提取「可作为测试检查点」的业务规则与验证点，丢弃操作指引与无关细节；
+  来源已是规范条目的优先保留原文措辞，不做无谓改写。"""
+
+DOC_DISTILL_USER_TEMPLATE = """【业务归属】
+{business}
+
+【已有清单】
+{existing}
+
+【来源文档】
+{doc}
+
+请输出归纳结果（JSON）。"""
+
+
+def _existing_text(existing_scenario_md: str, existing_checklist_md: str) -> str:
+    parts: list[str] = []
+    if existing_scenario_md.strip():
+        parts.append("— scenario.md —\n" + existing_scenario_md)
+    if existing_checklist_md.strip():
+        parts.append("— checklist.md —\n" + existing_checklist_md)
+    return "\n\n".join(parts) if parts else "（无，首次创建）"
+
+
+def _business_desc(business: dict[str, Any]) -> str:
+    return json.dumps(business, ensure_ascii=False) if business else "（未指定，请从输入推断）"
+
+
+def _normalize(out: DistillOutput) -> DistillOutput:
+    for section in out.sections:
+        section.category = normalize_category(section.category)
+    return out
+
+
 def _format_case(case: dict[str, Any]) -> str:
     steps = case.get("steps")
     if isinstance(steps, list):
@@ -71,17 +108,9 @@ async def distill_from_cases(
 
     失败向上抛（Web 端转 4xx/5xx 提示），不静默——沉淀是显式动作，失败要可见。
     """
-    business_desc = json.dumps(business, ensure_ascii=False) if business else "（未指定，请从用例推断）"
-    existing_parts: list[str] = []
-    if existing_scenario_md.strip():
-        existing_parts.append("— scenario.md —\n" + existing_scenario_md)
-    if existing_checklist_md.strip():
-        existing_parts.append("— checklist.md —\n" + existing_checklist_md)
-    existing_text = "\n\n".join(existing_parts) if existing_parts else "（无，首次创建）"
-
     user_prompt = DISTILL_USER_TEMPLATE.format(
-        business=business_desc,
-        existing=existing_text,
+        business=_business_desc(business),
+        existing=_existing_text(existing_scenario_md, existing_checklist_md),
         cases="\n\n".join(_format_case(c) for c in cases),
     )
     raw = await invoke_json(
@@ -90,10 +119,32 @@ async def distill_from_cases(
         response_model=DistillOutput,
         response_type="checklist_distill",
     )
-    out = DistillOutput.model_validate(raw)
-    for section in out.sections:
-        section.category = normalize_category(section.category)
-    return out
+    return _normalize(DistillOutput.model_validate(raw))
+
+
+async def distill_from_doc(
+    doc_text: str,
+    business: dict[str, Any],
+    existing_scenario_md: str = "",
+    existing_checklist_md: str = "",
+) -> DistillOutput:
+    """从外部文档归纳清单（上传的 wiki/清单/用例文档，或用户手写内容的规范化）。
+
+    与 distill_from_cases 同构：同样产出 scenario.md + checklist.md 预览，
+    已有清单时 merge 去重。失败向上抛不静默。
+    """
+    user_prompt = DOC_DISTILL_USER_TEMPLATE.format(
+        business=_business_desc(business),
+        existing=_existing_text(existing_scenario_md, existing_checklist_md),
+        doc=doc_text,
+    )
+    raw = await invoke_json(
+        DOC_DISTILL_SYSTEM_PROMPT,
+        user_prompt,
+        response_model=DistillOutput,
+        response_type="checklist_distill",
+    )
+    return _normalize(DistillOutput.model_validate(raw))
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -157,8 +208,29 @@ def parse_checklist_meta(checklist_md: str) -> dict[str, Any]:
     return meta
 
 
+def merge_sources(existing_checklist_md: str, new_source: str) -> list[str]:
+    """合并溯源列表：既有 sources 保序 + 追加本次来源（去重）。
+
+    既有条目可以是会话 id，也可以是 "import:<文件名>"（文档导入）。
+    修复 merge 模式丢失旧 sources 的问题——溯源要跨次累积。
+    """
+    meta = parse_checklist_meta(existing_checklist_md) if existing_checklist_md.strip() else {}
+    raw = meta.get("sources")
+    out: list[str] = []
+    for s in raw if isinstance(raw, list) else []:
+        s = str(s).strip()
+        if s and s not in out:
+            out.append(s)
+    new_source = str(new_source or "").strip()
+    if new_source and new_source not in out:
+        out.append(new_source)
+    return out
+
+
 __all__ = [
     "distill_from_cases",
+    "distill_from_doc",
+    "merge_sources",
     "parse_checklist_meta",
     "render_checklist_md",
     "render_scenario_md",

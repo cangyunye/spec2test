@@ -818,9 +818,32 @@ def _render_event(event: dict) -> None:
 
 
 def _run_checklist_route_gate(graph, tid: str, snap: dict) -> None:
-    """清单路由确认门禁（CLI）：展示候选树，回车=加载 AI 预选，序号子集或 skip。"""
+    """清单路由确认门禁（CLI）：展示候选树，回车=加载 AI 预选，序号子集或 skip。
+
+    空库 / 无匹配也必弹（status=no_match/empty_library）：提示初始化或去 Web 端
+    上传清单文档，回车即跳过注入继续生成。
+    """
     route = snap.get("checklist_route") or {}
     candidates = route.get("candidates") or []
+    if not candidates:
+        biz_n = int(route.get("business_count") or 0)
+        status = route.get("status") or "empty_library"
+        where = "清单库为空" if status == "empty_library" else f"清单库有 {biz_n} 个业务，但与当前需求无匹配"
+        lines = [
+            f"[bold]{where}。[/]",
+            f"[dim]库根：{route.get('root', '')}[/]",
+            "",
+            "可先运行 [bold]devflow checklist init[/] 初始化示例库，或在 Web 端上传清单文档入库；",
+            "本轮将按常规流程设计用例（不注入业务清单）。",
+        ]
+        console.print(Panel("\n".join(lines), title="业务清单路由", border_style="yellow"))
+        try:
+            console.input("[bold yellow]清单路由[/] (回车=跳过继续) > ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            console.print("\n[dim]已退出（下次可用 devflow resume 继续）[/]")
+            return
+        _resume_from_interrupt(graph, tid, {"decision": "skip"}, gate="checklist_route")
+        return
     lines = ["[bold]已按需求匹配到业务清单，请确认：[/]"]
     flat: dict[str, str] = {}
     for i, biz in enumerate(candidates, 1):

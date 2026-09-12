@@ -7,9 +7,10 @@
 
 流转：
   - 已路由过（checklist_routed）→ 两节点均直接放行（用例回炉重生成不重复弹）
-  - 空库 / 需求无匹配 → match 节点记 checklist_routed=True，静默放行
-  - 有候选 → gate 节点 interrupt：用户勾选确认后加载 checklist.md 写
-    checklist_context，skip 则不注入（与现状等价）
+  - 首次进入必弹确认卡（status=matched 有候选 / no_match 库有内容但无匹配 /
+    empty_library 空库）——清单环节对用户永远可见；无候选时门禁卡提供
+    「上传清单文档入库」等入口，skip 则不注入清单继续生成用例
+  - 有候选 → 用户勾选确认后加载 checklist.md 写 checklist_context
 """
 from __future__ import annotations
 
@@ -19,7 +20,12 @@ from typing import Any
 
 from langgraph.types import interrupt
 
-from ..checklist.library import build_candidates, load_checklists, resolve_root
+from ..checklist.library import (
+    build_candidates,
+    load_checklists,
+    resolve_root,
+    scan_business_types,
+)
 from ..checklist.routing import match_businesses, summarize_requirement
 from ..state import GlobalState
 
@@ -28,17 +34,21 @@ async def _match_async(state: GlobalState) -> dict[str, Any]:
     req = state.get("requirement") or {}
     root = resolve_root(str(req.get("project_root") or ""))
     text = summarize_requirement(req)
+    business_count = len(scan_business_types(root))
     match = await match_businesses(text, root)
-    if not match.businesses:
-        # 空库 / 无匹配：标记已路由，静默放行（不打断用户）
-        return {"checklist_routed": True, "checklist_route": None}
-    candidates = build_candidates(root, match)
+    candidates = build_candidates(root, match) if match.businesses else []
     if not candidates:
-        return {"checklist_routed": True, "checklist_route": None}
+        # 空库 / 无匹配：不再静默放行——门禁卡要给出上传清单文档的入口，
+        # 让清单环节对用户可见（回炉重生成仍由 checklist_routed 放行）
+        status = "empty_library" if business_count == 0 else "no_match"
+    else:
+        status = "matched"
     return {
         "checklist_route": {
             "root": str(root),
             "candidates": [c.model_dump() for c in candidates],
+            "status": status,
+            "business_count": business_count,
         }
     }
 
@@ -64,7 +74,7 @@ def _parse_resume(resume: Any) -> tuple[str, list[str]]:
 
 
 def checklist_route_gate(state: GlobalState) -> dict[str, Any]:
-    """路由确认门禁：候选树（AI 预选）勾选确认后才加载 checklist.md。
+    """路由确认门禁：首次进入必弹（含空库/无匹配，给上传入口）。
 
     恢复重放：本节点从头执行，state.checklist_route 已由 match 节点落盘，
     interrupt() 直接返回 resume 值，不重算路由。
@@ -73,14 +83,19 @@ def checklist_route_gate(state: GlobalState) -> dict[str, Any]:
         return {}
     route = state.get("checklist_route") or {}
     candidates = route.get("candidates") or []
-    if not candidates:
-        return {"checklist_routed": True}
-
+    status = route.get("status") or ("matched" if candidates else "empty_library")
+    summary = {
+        "matched": "已按需求匹配到业务清单，请确认子业务是否正确（取消勾选即不加载）",
+        "no_match": "清单库暂无与需求匹配的业务清单，可上传文档入库或跳过",
+        "empty_library": "清单库还是空的，可上传清单文档入库或跳过",
+    }.get(status, "请确认要注入的业务清单")
     resume = interrupt({
         "type": "checklist_route",
+        "status": status,
+        "business_count": int(route.get("business_count") or 0),
         "candidates": candidates,
         "root": route.get("root", ""),
-        "summary": "已按需求匹配到业务清单，请确认子业务是否正确（取消勾选即不加载）",
+        "summary": summary,
     })
     decision, selected = _parse_resume(resume)
     if decision != "confirm" or not selected:
