@@ -232,6 +232,18 @@ class Settings:
             os.getenv("LLM_CONTEXT_WINDOW_TOKENS", "128000")
         )
 
+        # ── LLM 调用超时（0 = 不限时）─────────────────────
+        # 单次尝试限时（同时作为 ChatOpenAI SDK 的 request_timeout）：结构化 JSON
+        # 生成（制图大 JSON、测试设计）可能远超 60s，超时会触发「切换下一个 provider」；
+        # 慢模型 / 大产出场景建议设 0（完全不限）或调大（如 300）
+        self.LLM_TIMEOUT_PER_ATTEMPT_SEC: float = float(
+            os.getenv("LLM_TIMEOUT_PER_ATTEMPT_SEC", "60")
+        )
+        # 每个 provider 结构化调用的总预算（含全部重试）；耗尽抛 DEADLINE.EXCEEDED
+        self.LLM_DEADLINE_TOTAL_SEC: float = float(
+            os.getenv("LLM_DEADLINE_TOTAL_SEC", "180")
+        )
+
         # ── 需求澄清（SPEC 阶段一）────────────────────────
         # 澄清循环硬上限（达到后仍有缺失 → 终止并记死信）
         self.CLARIFY_MAX_ROUNDS: int = int(os.getenv("CLARIFY_MAX_ROUNDS", "6"))
@@ -272,6 +284,21 @@ class Settings:
         self.TEST_DESIGN_SKILL_DIR: Path = Path(
             os.getenv("TEST_DESIGN_SKILL_DIR", str(Path(__file__).resolve().parent.parent / ".agents" / "skills"))
         )
+
+        # ── Pi Coding Agent（可选代码生成/测试后端；CLI 子进程接入）──
+        # npm 包 @mariozechner/pi-coding-agent；pi 自身需先完成模型登录（交互运行 pi）
+        self.PI_BIN: str = os.getenv("PI_BIN", "pi")
+        # pi --provider / --model（model 支持 provider/id 形式）；留空用 pi 登录的默认模型
+        self.PI_PROVIDER: str = os.getenv("PI_PROVIDER", "")
+        self.PI_MODEL: str = os.getenv("PI_MODEL", "")
+        # pi 会自主读码/改码/跑测试，单次调用天然比 HTTP 慢，超时给足
+        self.PI_TIMEOUT_SEC: int = int(os.getenv("PI_TIMEOUT_SEC", "600"))
+        # 附加 CLI 参数（按空白切分），如项目信任策略 --no-approve、工具白名单 -t read,edit
+        self.PI_EXTRA_ARGS: list[str] = os.getenv("PI_EXTRA_ARGS", "").split()
+
+        # ── Archify 渲染（CODE_GRAPH_RENDER_PROVIDER=archify）────────
+        # archify CLI 子进程单次渲染超时：生成交互式 HTML 较耗时；0 = 不限时
+        self.ARCHIFY_TIMEOUT_SEC: int = int(os.getenv("ARCHIFY_TIMEOUT_SEC", "60"))
 
         # ── 执行闭环（diff 落盘 + 真实测试执行）────────────
         self.APPLY_CODE_ENABLED: bool = os.getenv(

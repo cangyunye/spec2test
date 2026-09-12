@@ -1,4 +1,4 @@
-"""P2 CodeProvider 后端自检：探测 codegraph / archify / opencode 可用性。
+"""P2 CodeProvider 后端自检：探测 codegraph / archify / opencode / pi 可用性。
 
 用法（CLI）：
     devflow check-providers [--project-root <path>]
@@ -7,6 +7,7 @@
   - probe_codegraph(project_root)  → dict
   - probe_archify()                → dict
   - probe_opencode()               → dict
+  - probe_pi()                     → dict
   - check_providers_all(project_root) → list[dict]（统一 {name, ok, detail, ...}）
 
 统一报告字段：
@@ -97,13 +98,33 @@ async def probe_opencode() -> dict[str, Any]:
         }
 
 
+def probe_pi() -> dict[str, Any]:
+    """探测 pi CLI（@mariozechner/pi-coding-agent，shutil.which 轻量检查）。"""
+    bin_path = shutil.which(settings.PI_BIN or "pi")
+    if bin_path is None:
+        return {
+            "name": "pi",
+            "ok": False,
+            "detail": "pi CLI 未找到（npm install -g @mariozechner/pi-coding-agent）",
+            "bin_ok": False,
+        }
+    model = settings.PI_MODEL or "（pi 登录的默认模型，可用 PI_MODEL 指定）"
+    return {
+        "name": "pi",
+        "ok": True,
+        "detail": f"pi: {bin_path}; 模型: {model}",
+        "bin_ok": True,
+    }
+
+
 def check_providers_all(project_root: str = ".") -> list[dict[str, Any]]:
-    """汇总三个后端的探测报告（opencode 为 async，做同步包装）。"""
+    """汇总各后端的探测报告（opencode 为 async，做同步包装）。"""
     import asyncio
 
     reports = [
         probe_codegraph(project_root),
         probe_archify(),
         asyncio.run(probe_opencode()),
+        probe_pi(),
     ]
     return reports

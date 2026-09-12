@@ -61,3 +61,44 @@ async def test_deadline_still_caps_total_time():
     with pytest.raises(Exception):
         await retry_with_backoff(pol)(slow)()
     assert time.monotonic() - t0 < 3
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 0 / None = 不限时（LLM_TIMEOUT_PER_ATTEMPT_SEC=0 的底层语义）
+# ═══════════════════════════════════════════════════════════════════
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tout", [None, 0])
+async def test_timeout_unset_or_zero_means_unlimited(tout):
+    """timeout_per_attempt 为 None 或 0：慢调用完整跑完，不被 wait_for 掐断。
+
+    （0 曾被 min(0, ...) 归一成 wait_for(0) 立即超时——0 必须视为不限时。）
+    """
+    calls = {"n": 0}
+
+    async def slow_but_finishes():
+        calls["n"] += 1
+        await asyncio.sleep(0.4)
+        return "ok"
+
+    pol = RetryPolicy(max_attempts=2, base_backoff=0.01,
+                      timeout_per_attempt=tout, deadline_total=None)
+    t0 = time.monotonic()
+    assert await retry_with_backoff(pol)(slow_but_finishes)() == "ok"
+    assert time.monotonic() - t0 >= 0.4
+    assert calls["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_per_attempt_timeout_works_without_deadline():
+    """只设单次限时、不设 deadline：单次限时独立生效（不再被静默跳过）。"""
+
+    async def slow():
+        await asyncio.sleep(3)
+
+    pol = RetryPolicy(max_attempts=2, base_backoff=0.01,
+                      timeout_per_attempt=0.2, deadline_total=None)
+    t0 = time.monotonic()
+    with pytest.raises(CliTimeoutError):
+        await retry_with_backoff(pol)(slow)()
+    assert time.monotonic() - t0 < 2

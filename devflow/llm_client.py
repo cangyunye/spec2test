@@ -450,7 +450,9 @@ def _get_model(spec: str | LlmProviderSpec):
         )
 
     # 结构化 LlmProviderSpec
-    key = f"provider::{spec['name']}::{spec['base_url']}::{spec['model']}"
+    # SDK 层 request_timeout 与单次限时同源（0 = 不限时）；纳入缓存 key 防配置变更后拿到脏模型
+    sdk_timeout = settings.LLM_TIMEOUT_PER_ATTEMPT_SEC or None
+    key = f"provider::{spec['name']}::{spec['base_url']}::{spec['model']}::{sdk_timeout}"
     if key not in _model_cache:
         kwargs: dict[str, Any] = {}
         # ponytail: DeepSeek V4 默认开 thinking 且拒绝 tool_choice（HTTP 400），
@@ -467,8 +469,9 @@ def _get_model(spec: str | LlmProviderSpec):
             base_url=spec["base_url"],
             api_key=spec["api_key"],
             temperature=spec.get("temperature", 0.1),
-            # 常见超时
-            timeout=60.0,
+            # SDK 层超时：langchain-openai 的 None = 不限（httpx 不掐长生成）；
+            # 限时策略由我们自己的 retry_with_backoff 负责（LLM_TIMEOUT_PER_ATTEMPT_SEC）
+            timeout=sdk_timeout,
             max_retries=0,  # 不在 SDK 层重试，我们自己的 retry_with_backoff 负责
             **kwargs,
         )
@@ -971,13 +974,15 @@ async def _invoke_json_once(
                 return obj.model_dump(mode="json")
             return dict(obj)
 
-        # 同 invoke_text：单次调用限时（结构化输出更大更慢，给 60s），
-        # 避免慢模型把 180s 总 deadline 拖空——超时即失败并轮换下一个 provider。
+        # 同 invoke_text：单次调用限时（结构化输出更大更慢），避免慢模型把总
+        # deadline 拖空——超时即失败并轮换下一个 provider。
+        # 限时可配置（.env LLM_TIMEOUT_PER_ATTEMPT_SEC / LLM_DEADLINE_TOTAL_SEC）：
+        # 制图 / 测试设计等大 JSON 生成天然慢，设 0 = 完全不限时
         pol = RetryPolicy(
             max_attempts=max_retries + 1,
             base_backoff=1.0,
-            deadline_total=180.0,
-            timeout_per_attempt=60.0,
+            deadline_total=settings.LLM_DEADLINE_TOTAL_SEC or None,
+            timeout_per_attempt=settings.LLM_TIMEOUT_PER_ATTEMPT_SEC or None,
         )
         dec = retry_with_backoff(pol, wrap_context=f"llm.structured:{model_spec}")
         do_run = dec(run_structured)

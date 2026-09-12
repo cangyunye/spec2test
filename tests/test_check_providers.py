@@ -96,10 +96,14 @@ class TestCheckProvidersAll:
         monkeypatch.setattr(
             "devflow.providers.check.probe_opencode", fake_probe_opencode
         )
+        monkeypatch.setattr(
+            "devflow.providers.check.probe_pi",
+            lambda: {"name": "pi", "ok": True, "detail": "w"},
+        )
         reports = check_providers_all("/tmp/prj")
-        assert len(reports) == 3
+        assert len(reports) == 4
         names = [r["name"] for r in reports]
-        assert names == ["codegraph", "archify", "opencode"]
+        assert names == ["codegraph", "archify", "opencode", "pi"]
         # 每个报告都有统一字段
         for r in reports:
             assert set(["name", "ok", "detail"]).issubset(r.keys())

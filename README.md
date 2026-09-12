@@ -15,7 +15,26 @@
 - **Web Shell（推荐）**：黑白双主题界面，聊天式单入口、LLM 逐字流式输出、节点级耗时进度、逻辑图缩放 / 平移 / 节点检查器、测试场景表筛选与 CSV / Markdown 导出
 - **CLI 孪生客户端**：同一套图与事件协议，`devflow setup / new / resume / list / export / checklist / check-providers / check-llm`
 - **永不卡死的演示模式**：未配置 API Key 时自动 Mock 兜底，全流程可跑通（输出为演示数据）
-- **可插拔 Provider**：检索 / 制图 / 代码生成 / 测试生成各能力独立选择 codegraph / opencode / llm / mock 后端
+- **可插拔 Provider（执行器可替换）**：检索 / 制图 / 代码生成 / 测试生成各能力独立选择
+  codegraph / opencode / pi / llm / mock 后端；外部 Agent 只承担执行，可随时替换（见下节定位说明）
+
+## 定位：DevFlow 只做编排，执行交给可替换的 Agent
+
+DevFlow 自身只负责**编排**——需求澄清、逻辑图生成、三门禁评审、全局状态权威（Single Source
+of Truth）、断点续跑与产物交付。真正「读代码、改代码、跑测试」这类专业活，交给外部编码
+Agent（OpenCode / Pi 等）执行。这样设计有三个明确意图：
+
+1. **接入专业能力，不自研重造**：外部 Agent 是专业 skill 与「代码检索 → 修改 → lint / 测试
+   修复」轮询的载体——它们在目标项目里自主检索与多轮修复，**循环到产出一个可接受的产物**，
+   再以结构化结果交回 DevFlow。DevFlow 不做代码生成，只负责派发任务与验收结果。
+2. **随时可替换、可迭代**：Provider 抽象把「能力」和「实现」分开，四个能力各自独立选后端。
+   换 Agent（如 OpenCode → Pi）、换版本、换模型都只改 `.env`，编排、门禁、checkpoint
+   与前端全部不动；接入新 Agent 也只需实现同一套 Provider 接口。
+3. **可横向对比不同 Agent 的效果**：同一份需求可以换后端各跑一遍，在相同的门禁流程与产物
+   结构下对比实际产出（用例质量、改动幅度、lint / 测试通过率），为选型提供依据。
+
+不接任何外部 Agent 也能跑：默认主路径是 LLM 直连 + 本地 pytest 真实执行，未配置时自动 Mock
+降级，这是演示与 CI 的基线。
 
 ## 快速开始
 
@@ -26,9 +45,10 @@ python3 -m uvicorn web.server:app --port 8100
 # 打开 http://127.0.0.1:8100，输入框直接描述需求回车即可
 ```
 
-`setup` 向导会检测 `.env` 与外部服务（OpenCode / CodeGraph / Archify），多选引导安装缺失项
-（GitHub Releases 最新版，超时自动降级为手动指引并跳过），按已装服务写好 `.env`，
-最后输出供应商测试与启动指令。配置真实 LLM：`cp .env.example .env` 后填入 DeepSeek /
+`setup` 向导会检测 `.env` 与外部服务（OpenCode / Pi / CodeGraph / Archify），多选引导安装缺失项
+——CodeGraph 从 GitHub Releases 下载（SHA256 校验），Pi 走 `npm install -g
+@mariozechner/pi-coding-agent`（装完先交互运行一次 `pi` 完成模型登录）——网络超时 / 失败
+自动降级为手动指引并跳过；按已装服务写好 `.env`，最后输出供应商测试与启动指令。配置真实 LLM：`cp .env.example .env` 后填入 DeepSeek /
 SiliconFlow 等 OpenAI 兼容服务的 Key（不配置则 Mock 演示模式）。完整步骤与 CLI 用法见
 **[QUICKSTART.md](QUICKSTART.md)**。
 

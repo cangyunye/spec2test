@@ -371,9 +371,10 @@ class TestMissingInstallItems:
             _probe("codegraph", False, bin_ok=False, index_ok=False),
             _probe("archify", False),
             _probe("opencode", False),
+            _probe("pi", False, bin_ok=False),
         ])
-        assert [i.key for i in items] == ["codegraph", "opencode", "node"]
-        assert [i.auto for i in items] == [True, False, False]
+        assert [i.key for i in items] == ["codegraph", "opencode", "pi", "node"]
+        assert [i.auto for i in items] == [True, False, True, False]
         # 发布页都指向 GitHub 官方
         assert all(i.releases_url.startswith("https://github.com/") for i in items)
 
@@ -382,6 +383,7 @@ class TestMissingInstallItems:
             _probe("codegraph", False, bin_ok=True, index_ok=False),
             _probe("archify", True),
             _probe("opencode", True),
+            _probe("pi", True, bin_ok=True),
         ])
         assert items == []  # 缺索引属于 codegraph init 提示，不是「安装二进制」
 

@@ -11,9 +11,11 @@ python3 -m devflow.cli setup
 向导自动完成首启检测与配置，全程可随时回车跳过、绝不阻塞启动：
 
 1. **检测** `.env` 是否存在、LLM Key 是否仍是占位符；
-2. **探测** mock 以外的服务后端（OpenCode / CodeGraph / Archify）；
-3. **多选安装**缺失服务——CodeGraph 自动从 GitHub Releases 检测最新版本并下载安装
-   （SHA256 校验）；网络超时 / 失败时打印官方下载页并跳过该步骤，之后可自行安装；
+2. **探测** mock 以外的服务后端（OpenCode / Pi / CodeGraph / Archify）；
+3. **多选安装**缺失服务——CodeGraph 从 GitHub Releases 检测最新版本并下载安装（SHA256
+   校验）；Pi 走 npm 全局安装（`npm install -g @mariozechner/pi-coding-agent`，装完需先
+   运行一次 `pi` 完成模型登录）；网络超时 / 失败 / npm 缺失时打印官方安装指引并跳过该步骤，
+   之后可自行安装；
 4. **配置 `.env`**：按已安装的服务写入各能力后端选择（只改示例默认值，不覆盖你的自定义配置）；
 5. **收尾指引**：按要求自行填入 LLM 供应商 Key 后，运行测试指令
    （`devflow check-providers` / `devflow check-llm`），再启动服务（见下文）。
@@ -103,6 +105,29 @@ python3 -m devflow.cli check-llm         # LLM 连通性检查
 
 > ⚠️ 仓库历史提交中出现过的测试 Key 已吊销，不可使用，请配置自己的 Key。
 
+### 可选：接入外部编码 Agent（OpenCode / Pi）
+
+DevFlow 只做**编排**（需求澄清、逻辑图、门禁、状态权威、产物交付）；「读代码 / 改代码 /
+跑测试」这类专业活交给外部编码 Agent——它们是专业 skill 与「代码检索 → 修改 → lint / 测试
+修复」轮询的载体，在目标项目里循环到产出可接受的产物，再以结构化结果交回 DevFlow。
+
+- **可替换**：换 Agent（如 OpenCode → Pi）、换版本、换模型只改 `.env` 的 `*_PROVIDER`
+  与 `PI_*` 配置，编排、门禁、checkpoint 与前端都不动；
+- **可对比**：同一份需求换后端各跑一遍，用相同的门禁流程与产物结构比较不同 Agent 的实际
+  效果（用例质量、改动幅度、lint / 测试通过率）；
+- **不接也能跑**：默认主路径是 LLM 直连 + 本地 pytest 真实执行，未配置时 Mock 降级。
+
+```bash
+# 例：检索交给 codegraph，写代码 / 写测试交给 pi
+CODE_SEARCH_PROVIDER=codegraph
+CODE_EDIT_PROVIDER=pi
+TEST_GEN_PROVIDER=pi
+```
+
+各能力可选后端：代码检索 `codegraph | opencode | pi | mock`，代码生成 `opencode | pi | mock`，
+测试生成 `opencode | pi | llm | mock`，制图渲染 `archify | mermaid | mock`。
+未配置后端时全流程仍可跑通（Mock 降级 + LLM 直连）。
+
 ## 5. CLI 用法（与 Web 共享会话数据）
 
 ```bash
@@ -128,4 +153,5 @@ python3 -m devflow.cli check-llm              # LLM 供应商连通性测试
 | 8000 端口被占 | 换端口启动：`--port 8100`（任意空闲端口均可） |
 | 代码检索始终 0 条 / mock | 真实检索需部署 CodeGraph 并在目标项目 `codegraph init` 建索引（见 `.env.example`） |
 | 想彻底重跑某会话 | 左侧会话悬停 ✕ 删除（同时清理 checkpoint），再新建 |
+| 想换 / 对比不同 Agent 的效果 | 改 `.env` 的 `CODE_EDIT_PROVIDER` / `TEST_GEN_PROVIDER`（如 `pi`）后重启，同一需求重跑即可；详见第 4 节末「可选：接入外部编码 Agent」 |
 | 依赖报错 No module named fastapi/uvicorn | `pip install -r requirements.txt`（Web 依赖已含在内） |

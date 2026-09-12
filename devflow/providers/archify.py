@@ -26,6 +26,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from ..config import settings
 from ..errors import (
     CliExitError,
     CliNotFoundError,
@@ -132,12 +133,14 @@ class ArchifyProvider(CodeGraphRenderProvider):
         skills_bin: str | None = None,
         node_bin: str | None = None,
         force_mermaid_fallback: bool = False,
-        timeout_sec: int = 60,
+        timeout_sec: int | None = None,
     ) -> None:
         self.skills_bin = skills_bin or shutil.which("npx") or "npx"
         self.node_bin = node_bin or shutil.which("node") or "node"
         self.force_mermaid_fallback = force_mermaid_fallback
-        self.timeout_sec = timeout_sec
+        # 未显式传时读 ARCHIFY_TIMEOUT_SEC；0 = 不限时（wait_for(timeout=None)）
+        resolved = timeout_sec if timeout_sec is not None else settings.ARCHIFY_TIMEOUT_SEC
+        self.timeout_sec: int | None = resolved or None
 
     # ── 对外 ─────────────────────────────────────────────
     async def render(
@@ -228,7 +231,7 @@ class ArchifyProvider(CodeGraphRenderProvider):
                     proc.kill()
                     raise CliTimeoutError(
                         f"archify CLI 超时（>{self.timeout_sec}s）", cause=e
-                    ) from e
+                    ) from e  # timeout=None 时不限时，本分支不可达
                 except Exception as e:
                     proc.kill()
                     raise wrap_exception(e, context="archify_cli") from e

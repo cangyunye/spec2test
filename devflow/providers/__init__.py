@@ -27,6 +27,7 @@ from .opencode import (
     OpenCodeSearchProvider,
     OpenCodeTestProvider,
 )
+from .pi import PiEditProvider, PiSearchProvider, PiTestProvider
 
 
 @dataclass
@@ -48,9 +49,12 @@ def build_code_search(name: str, **_: Any) -> CodeSearchProvider:
         return CodeGraphProvider(fallback=MockCodeSearch())
     if name == "opencode":
         return OpenCodeSearchProvider()
+    if name == "pi":
+        # pi 无代码索引，agent 翻文件式检索（慢）；优先 codegraph
+        return PiSearchProvider()
     if name == "mock":
         return MockCodeSearch()
-    raise ValueError(f"未知 CODE_SEARCH_PROVIDER={name!r}，可选: codegraph/opencode/mock")
+    raise ValueError(f"未知 CODE_SEARCH_PROVIDER={name!r}，可选: codegraph/opencode/pi/mock")
 
 
 def build_graph_render(name: str, **_: Any) -> CodeGraphRenderProvider:
@@ -66,9 +70,11 @@ def build_graph_render(name: str, **_: Any) -> CodeGraphRenderProvider:
 def build_code_edit(name: str, **_: Any) -> CodeEditProvider:
     if name == "opencode":
         return OpenCodeEditProvider()
+    if name == "pi":
+        return PiEditProvider()
     if name == "mock":
         return MockCodeEdit()
-    raise ValueError(f"未知 CODE_EDIT_PROVIDER={name!r}，可选: opencode/mock")
+    raise ValueError(f"未知 CODE_EDIT_PROVIDER={name!r}，可选: opencode/pi/mock")
 
 
 def build_test_gen(name: str, **_: Any) -> TestGenProvider:
@@ -78,9 +84,11 @@ def build_test_gen(name: str, **_: Any) -> TestGenProvider:
         from .llm_testgen import LlmTestGenProvider
 
         return LlmTestGenProvider()
+    if name == "pi":
+        return PiTestProvider()
     if name == "mock":
         return MockTestGen()
-    raise ValueError(f"未知 TEST_GEN_PROVIDER={name!r}，可选: llm/opencode/mock")
+    raise ValueError(f"未知 TEST_GEN_PROVIDER={name!r}，可选: llm/opencode/pi/mock")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -132,4 +140,7 @@ __all__ = [
     "OpenCodeSearchProvider",
     "OpenCodeEditProvider",
     "OpenCodeTestProvider",
+    "PiSearchProvider",
+    "PiEditProvider",
+    "PiTestProvider",
 ]

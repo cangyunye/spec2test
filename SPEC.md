@@ -887,16 +887,24 @@ code_gen ──lint_ok──▶ apply_code ──▶ test_gen ──▶ test_run
 - 顺带修复：`dead_letters` 此前未在 GlobalState 声明，LangGraph 静默丢弃该键，死信从未真正
   进入 drain 节点；现已声明，死信 JSONL 落盘恢复生效。
 
-### 8.2 真实后端定位（OpenCode / CodeGraph / Archify = 可选增强）
+### 8.2 真实后端定位（OpenCode / Pi / CodeGraph / Archify = 可选增强）
 
-三个外部后端的 Provider 适配层（含熔断、错误码映射、Mock 回退）均已实现，但默认主路径不依赖它们：
+外部后端的 Provider 适配层（含熔断、错误码映射、Mock 回退）均已实现，但默认主路径不依赖它们：
 
 | 能力 | 默认主路径 | 可选增强后端 |
 |---|---|---|
-| 代码检索 | LLM 直连（graph_gen 生成目标锚点）+ 语义兜底 | `CODE_SEARCH_PROVIDER=codegraph`（需本地安装并 `codegraph init`） |
+| 代码检索 | LLM 直连（graph_gen 生成目标锚点）+ 语义兜底 | `CODE_SEARCH_PROVIDER=codegraph`（需本地安装并 `codegraph init`）；`pi`（无索引，agent 翻文件式检索，慢） |
 | 制图渲染 | Mermaid 文本（Web 端渲染） | `CODE_GRAPH_RENDER_PROVIDER=archify`（需 node ≥ 18） |
-| 代码生成 | LLM 直连产出 diff + lint 回修 | `CODE_EDIT_PROVIDER=opencode`（需本地 OpenCode Server） |
-| 测试生成/执行 | llm_testgen 场景设计 + 本地 pytest 真实执行 | `TEST_GEN_PROVIDER=opencode`（远程执行） |
+| 代码生成 | LLM 直连产出 diff + lint 回修 | `CODE_EDIT_PROVIDER=opencode`（需本地 OpenCode Server）或 `pi`（pi CLI 子进程） |
+| 测试生成/执行 | llm_testgen 场景设计 + 本地 pytest 真实执行 | `TEST_GEN_PROVIDER=opencode`（远程执行）或 `pi`（CLI 内写用例并执行） |
+
+> **定位说明（给用户的边界声明）**：DevFlow 只做**编排**——需求澄清、逻辑图、三门禁评审、
+> 全局状态权威（Single Source of Truth）、断点续跑与产物交付；OpenCode / Pi 等外部 Agent 是
+> **可替换的执行器**，用来接入专业 skill 与「代码检索 → 修改 → lint / 测试修复」轮询，直到
+> 产出可接受的产物再以结构化结果回传（子会话内部状态不回传，见 2.5）。因此：
+> ① 换 Agent / 换版本 / 换模型只影响 Provider 配置，编排、门禁与 checkpoint 不变，新 Agent
+> 只需实现同一套 Provider 接口即可接入；② 同一份需求可换后端各跑一遍，在相同门禁与产物
+> 结构下横向对比不同 Agent 的实际效果，为选型提供依据。
 
 对接真实后端前先跑 `devflow check-providers` 自检；每次真实后端验证结论以 `tests/` 下报告文档为准。
 未配置任何后端时全流程可用（Mock 降级 + LLM 直连），这是演示与 CI 的基线。

@@ -35,6 +35,7 @@ CLI_NOT_FOUND = "CLI.NOT_FOUND"
 CLI_TIMEOUT = "CLI.TIMEOUT"
 CLI_INDEX_MISSING = "CLI.INDEX_MISSING"
 CLI_EXIT_ERROR = "CLI.EXIT_ERROR"
+CLI_AUTH = "CLI.AUTH"               # CLI 鉴权失败（401/无效 key/登录过期）：重试无意义
 
 NODE_CONTEXT = "NODE.CONTEXT"
 CIRCUIT_OPEN = "CIRCUIT.OPEN"
@@ -211,6 +212,20 @@ class CliExitError(DevFlowError):
         if stderr_tail:
             extra["stderr_tail"] = stderr_tail
         super().__init__(CLI_EXIT_ERROR, message, retryable=True, extra=extra, **kw)
+
+
+class CliAuthError(CliExitError):
+    """CLI 鉴权失败（401/无效 key/登录过期）——重试无意义，快速失败供上层降级/提示。
+
+    继承 CliExitError 保持 except 兼容；直接以 DevFlowError 初始化以覆写
+    code=CLI.AUTH 与 retryable=False（resilience 以实例属性为准）。
+    """
+
+    def __init__(self, message: str, *, stderr_tail: str | None = None, **kw: Any) -> None:
+        extra = dict(kw.pop("extra", None) or {})
+        if stderr_tail:
+            extra["stderr_tail"] = stderr_tail
+        DevFlowError.__init__(self, CLI_AUTH, message, retryable=False, extra=extra, **kw)
 
 
 class ExecApplyFailedError(DevFlowError):

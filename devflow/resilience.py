@@ -75,10 +75,16 @@ def retry_with_backoff(
                         raise DeadlineExceededError(pol.deadline_total or 0)
 
                 try:
-                    if pol.timeout_per_attempt is None or deadline_end is None:
+                    # None / 0 = 单次不限时（0 的 falsy 语义与 deadline_total 一致，
+                    # 避免被 min() 归一成 wait_for(0) 立即超时）
+                    if not pol.timeout_per_attempt:
                         return await fn(*args, **kwargs)
-                    # deadline_total 和 timeout_per_attempt 同时存在取更紧的
-                    tout = min(pol.timeout_per_attempt, max(0.1, remain))
+                    # deadline_total 存在时取更紧的；无 deadline 单次限时独立生效
+                    tout = (
+                        pol.timeout_per_attempt
+                        if deadline_end is None
+                        else min(pol.timeout_per_attempt, max(0.1, remain))
+                    )
                     return await asyncio.wait_for(fn(*args, **kwargs), timeout=tout)
                 except DevFlowError as e:
                     err = e
