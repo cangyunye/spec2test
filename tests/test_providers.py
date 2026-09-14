@@ -452,8 +452,10 @@ async def test_opencode_edit_body_spec242(stub_post):
 
 
 def test_opencode_run_args_cli_contract():
-    """测试设计改走 opencode run CLI：argv 组装（agent/session/dir/prompt 末位）。"""
-    p = OpenCodeTestProvider(bin_path="opencode", agent="test-designer", extra_args=["--auto"])
+    """测试设计改走 opencode run CLI：argv 组装（model 留空不传 -m / agent/session/dir/prompt 末位）。"""
+    p = OpenCodeTestProvider(
+        bin_path="opencode", agent="test-designer", model="", extra_args=["--auto"]
+    )
     args = p._build_args("do it", session_id="sess-9", project_root="/tmp/prj")
     assert args == [
         "opencode", "run", "--format", "json",
@@ -463,6 +465,33 @@ def test_opencode_run_args_cli_contract():
         "--dir", "/tmp/prj",
         "do it",
     ]
+
+
+def test_opencode_run_args_model_flag():
+    """OPENCODE_MODEL 显式指定时以 -m 紧跟 --format json 传入（覆盖 opencode 自身默认）。"""
+    p = OpenCodeTestProvider(
+        bin_path="opencode", agent="test-designer", model="opencode-go/deepseek-v4-flash"
+    )
+    args = p._build_args("do it")
+    assert args[:6] == [
+        "opencode", "run", "--format", "json", "-m", "opencode-go/deepseek-v4-flash",
+    ]
+    assert args[-1] == "do it"
+
+
+def test_opencode_run_model_defaults_from_settings(monkeypatch):
+    """构造参数缺省时 model 取 settings.OPENCODE_MODEL；显式传空串可强制关闭 -m。"""
+    from devflow.config import settings
+
+    monkeypatch.setattr(settings, "OPENCODE_MODEL", "x/y")
+    p = OpenCodeTestProvider(bin_path="opencode")
+    assert p.model == "x/y"
+    args = p._build_args("q")
+    assert "-m" in args and args[args.index("-m") + 1] == "x/y"
+
+    p2 = OpenCodeTestProvider(bin_path="opencode", model="")
+    assert p2.model == ""
+    assert "-m" not in p2._build_args("q")
 
 
 def test_opencode_parse_run_output_events_and_fallback():

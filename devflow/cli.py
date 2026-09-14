@@ -6,6 +6,7 @@
   devflow new                             # 新开会话（阶段一：澄清→制图）
   devflow new --full                      # 新开会话（全链路：澄清→制图→检索→生成→测试→验收）
   devflow new --from-doc requirements.docx  # 从 .docx/.txt/.md 文件读取初始需求
+  devflow spec requirements.md            # 一次性自动全流程：无评审·缺口AI脑补·全按推荐，导出 CSV 用例 + 全过程 MD
   devflow resume <thread_id>              # 从已有会话断点继续
   devflow list                            # 列出所有会话
   devflow export <thread_id>              # 导出结构化产物（需求 JSON + 逻辑图 JSON/Mermaid）
@@ -26,6 +27,7 @@ from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
 
+from .auto_run import export_artifacts
 from .config import settings
 from .doc_reader import read_doc
 from .events import events_from_stream
@@ -176,43 +178,7 @@ def _print_stage_report(state: dict[str, Any]) -> None:
     console.print(Panel(table, title="状态摘要", border_style="blue"))
 
 
-def _export_artifacts(state: dict[str, Any], out_dir: Path) -> list[Path]:
-    """导出结构化产物：需求 JSON、逻辑图 JSON/Mermaid、代码变更、测试报告。"""
-    out_dir.mkdir(parents=True, exist_ok=True)
-    written: list[Path] = []
-
-    req = state.get("requirement") or {}
-    if any(bool(req.get(k)) for k in ("project_context", "target_modules", "acceptance_criteria")):
-        p = out_dir / "requirement.json"
-        p.write_text(json.dumps(req, ensure_ascii=False, indent=2), encoding="utf-8")
-        written.append(p)
-
-    graph = state.get("logic_graph")
-    if graph:
-        p = out_dir / "logic_graph.json"
-        p.write_text(json.dumps(graph, ensure_ascii=False, indent=2), encoding="utf-8")
-        written.append(p)
-        p = out_dir / "logic_graph.mmd"
-        p.write_text(graph["mermaid_source"], encoding="utf-8")
-        written.append(p)
-
-    if state.get("code_changes"):
-        p = out_dir / "code_changes.json"
-        p.write_text(json.dumps(state["code_changes"], ensure_ascii=False, indent=2), encoding="utf-8")
-        written.append(p)
-
-    apply_info = state.get("code_apply")
-    if apply_info is not None:
-        p = out_dir / "code_apply.json"
-        p.write_text(json.dumps(apply_info, ensure_ascii=False, indent=2), encoding="utf-8")
-        written.append(p)
-
-    if state.get("test_report"):
-        p = out_dir / "test_report.json"
-        p.write_text(json.dumps(state["test_report"], ensure_ascii=False, indent=2), encoding="utf-8")
-        written.append(p)
-
-    return written
+# _export_artifacts 已迁至 devflow/auto_run.py（spec 导出与 :export 共用），见顶部 import。
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -385,6 +351,61 @@ def cmd_resume(
     _interactive_loop(thread_id, full=full)
 
 
+@app.command("spec")
+def cmd_spec(
+    doc: str = typer.Argument(..., help="需求文档路径（.docx/.txt/.md）"),
+    out: Path = typer.Option(Path("./artifacts"), "--out", "-o", help="产物输出根目录"),
+    thread_id: str = typer.Option(None, "--id", help="自定义 thread_id，不填则自动生成 spec-xxx"),
+    set_fields: list[str] = typer.Option(
+        None, "--set",
+        help="进入 graph 前强制赋值（可多次）：--set req_type=bug_fix --set project_root=/path",
+    ),
+) -> None:
+    """一次性自动全流程：读需求文档 → 无人工评审跑完全链路 → 本地导出用例 CSV + 全过程 MD。
+
+    与交互模式共用同一张全链路图，区别在驱动方式：
+      - 全部门禁自动按推荐应答（图种类/清单路由/feature 问题取推荐项，验收全采纳）；
+      - 需求文档信息不足时由 AI 直接脑补（逐字段标注「AI 脑补的最佳选择」，需求来源标 inferred）；
+      - 全程不写 checklist 库（没有人工用例过滤步骤）。
+
+    产物（./artifacts/<tid>/）：casecraft-tests-<tid>.csv（11 列用例）、
+    casecraft-spec-<tid>.md（全过程报告）、requirement.json / logic_graph.* 等结构化产物。
+    """
+    from .auto_run import run_spec
+
+    try:
+        result = run_spec(
+            doc,
+            out_dir=out,
+            set_fields=set_fields,
+            thread_id=thread_id,
+            console=console,
+        )
+    except (FileNotFoundError, ValueError, ImportError) as e:
+        console.print(f"[red]×[/] 读取文档失败: {e}")
+        raise typer.Exit(code=1)
+
+    req = (result.state.get("requirement") or {})
+    filled = sum(1 for v in (
+        req.get("project_context"),
+        (req.get("io_constraints") or {}).get("input"),
+        (req.get("io_constraints") or {}).get("output"),
+        req.get("edge_cases"),
+        req.get("acceptance_criteria"),
+    ) if v)
+    table = Table.grid(padding=(0, 2))
+    table.add_column(style="bold", width=16)
+    table.add_column()
+    table.add_row("Thread ID", f"[bold]{result.tid}[/]（devflow resume {result.tid} --full 可回看）")
+    table.add_row("结果", "[green]✓ 全流程完成（验收通过）[/]" if result.ok else f"[red]✗ {result.error}[/]")
+    if req:
+        table.add_row("需求字段", f"{filled}/5 项实质内容（脑补 {len(result.journal.filled_fields)} 项，均标 inferred）")
+    table.add_row("产物目录", str(out / result.tid))
+    console.print(Panel(table, title="devflow spec · 运行结束", border_style="green" if result.ok else "red"))
+    if not result.ok:
+        raise typer.Exit(code=1)
+
+
 @app.command("list")
 def cmd_list() -> None:
     """列出所有已持久化的会话（thread_id + 最近阶段）。"""
@@ -419,7 +440,7 @@ def cmd_export(
         raise typer.Exit(code=1)
     graph = build_graph()
     state = graph.get_state(_config(thread_id=thread_id)).values or {}
-    files = _export_artifacts(state, out / thread_id)
+    files = export_artifacts(state, out / thread_id)
     if not files:
         console.print("[yellow]—[/] 此会话暂无可导出的结构化产物")
         return
@@ -722,7 +743,7 @@ def _interactive_loop(tid: str, *, full: bool = False) -> None:
 
         if user_input.lower() in (":e", ":export"):
             out_dir = Path("./artifacts") / tid
-            files = _export_artifacts(snap, out_dir)
+            files = export_artifacts(snap, out_dir)
             if not files:
                 console.print("[yellow]—[/] 暂无可导出产物")
             else:

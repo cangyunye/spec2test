@@ -460,11 +460,14 @@ class OpenCodeTestProvider(TestGenProvider):
         *,
         bin_path: str | None = None,
         agent: str | None = None,
+        model: str | None = None,
         timeout_sec: int | None = None,
         extra_args: list[str] | None = None,
     ) -> None:
         self.bin_path = bin_path or settings.OPENCODE_BIN
         self.agent = agent if agent is not None else settings.OPENCODE_AGENT
+        # 显式指定供应商/模型（-m "provider/model"），空 = 不传，走 opencode 自身默认
+        self.model = model if model is not None else settings.OPENCODE_MODEL
         self.timeout_sec = timeout_sec or settings.OPENCODE_RUN_TIMEOUT_SEC
         self.extra_args = (
             extra_args if extra_args is not None else list(settings.OPENCODE_EXTRA_ARGS)
@@ -473,8 +476,10 @@ class OpenCodeTestProvider(TestGenProvider):
     def _build_args(
         self, prompt: str, *, session_id: str | None = None, project_root: str = ""
     ) -> list[str]:
-        """拼 `opencode run --format json --agent X [--session S] [extra] [--dir R] <prompt>`。"""
+        """拼 `opencode run --format json [-m provider/model] --agent X [--session S] [extra] [--dir R] <prompt>`。"""
         args = [self.bin_path, "run", "--format", "json"]
+        if self.model:
+            args += ["-m", self.model]
         if self.agent:
             args += ["--agent", self.agent]
         if session_id:

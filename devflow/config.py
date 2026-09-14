@@ -263,6 +263,9 @@ class Settings:
         self.OPENCODE_BIN: str = os.getenv("OPENCODE_BIN", "opencode")
         # 技能派发使用的 agent 名（需在目标项目 opencode 配置里存在）
         self.OPENCODE_AGENT: str = os.getenv("OPENCODE_AGENT", "test-designer")
+        # 显式指定供应商/模型（如 opencode-go/deepseek-v4-flash），以 -m 传给 opencode run，
+        # 覆盖 opencode 自身默认；空 = 不传 -m，模型由 opencode 全局默认配置决定
+        self.OPENCODE_MODEL: str = os.getenv("OPENCODE_MODEL", "")
         # opencode run 单次调用超时；附加 CLI 参数（按空白切分，如 --auto）
         self.OPENCODE_RUN_TIMEOUT_SEC: int = int(os.getenv("OPENCODE_RUN_TIMEOUT_SEC", "900"))
         self.OPENCODE_EXTRA_ARGS: list[str] = os.getenv("OPENCODE_EXTRA_ARGS", "").split()

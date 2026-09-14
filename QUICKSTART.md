@@ -128,6 +128,51 @@ TEST_GEN_PROVIDER=pi
 测试生成 `opencode | pi | llm | mock`，制图渲染 `archify | mermaid | mock`。
 未配置后端时全流程仍可跑通（Mock 降级 + LLM 直连）。
 
+### 执行后端与模型选择：serve / opencode 命令行 / pi 命令行
+
+**决定权在 `.env` 的三个 `*_PROVIDER` 变量**。注意 `opencode` 这个值在不同能力下走的
+具体通道不同：
+
+| `.env` 变量 | 值 → 实际通道 | 说明 |
+|---|---|---|
+| `CODE_SEARCH_PROVIDER` | `opencode` → **serve HTTP**（`POST {OPENCODE_BASE_URL}/api/v1/code/search`） | 该端点是 DevFlow 自造协议，官方 `opencode serve` **没有**（请求会落回其网页前端）；有此端点的部署才可用 |
+| `CODE_EDIT_PROVIDER` | `opencode` → **serve HTTP**（`/api/v1/code/generate`） | 同上 |
+| `TEST_GEN_PROVIDER` | `opencode` → **opencode 命令行**（`opencode run --format json [-m $OPENCODE_MODEL] --agent $OPENCODE_AGENT`，不经 serve） | 官方无头入口，开箱可用 |
+| 以上任意 | `pi` → pi CLI 子进程（`pi --provider $PI_PROVIDER --model $PI_MODEL --no-session --print <任务>`） | 模型每次显式指定 |
+
+**供应商与模型是谁说了算**：DevFlow 调 pi / opencode CLI 时都**显式传参**
+（`PI_PROVIDER` / `PI_MODEL` / `OPENCODE_MODEL`），会硬性覆盖你在 agent 交互界面里配置的
+默认供应商/模型——界面配置只影响你手动裸跑 `pi` / `opencode` 时的默认值。两个防呆点：
+
+- `.env` 里 `PI_PROVIDER` / `PI_MODEL` **必配**：pi 内置默认 provider 是 google，不传参
+  会落到它而非你配置的任何 opencode 模型；
+- `OPENCODE_MODEL` 留空 = 不传 `-m`，此时 opencode run 用其全局默认配置的模型。
+
+**判断/自查当前实际走的谁**：
+
+```bash
+grep -E "^(CODE_|TEST_GEN|PI_|OPENCODE_)" .env   # 跑之前：直接看路由与模型配置
+python3 -m devflow.cli check-providers            # 跑之前：探测各后端存活（opencode 一行探的是 serve）
+# 手动复现 DevFlow 的调用并让 agent 回显实际模型：
+pi --provider opencode-go --model "opencode-go/deepseek-v4-flash" \
+   --no-session --no-tools --mode json --print "hi"        # 看 message.provider / message.model
+opencode run --format json -m "opencode-go/deepseek-v4-flash" "hi"   # 事件流含 tokens/cost
+```
+
+运行中看事件流：每个阶段完成都有 provider 事件（`✓ 本阶段由 pi · <model> 完成` /
+`↯ 供应商 xxx 失败 → 切换下一个`）；事后看产物（`test_report.json` 的 `session_id`、
+`devflow spec` MD 报告的决策时间线）。
+
+**opencode 不用 serve 的命令行用法**（与上表 `TEST_GEN_PROVIDER=opencode` 同源）：
+
+```bash
+opencode run -m "opencode-go/deepseek-v4-flash" --dir /path/to/project "任务"  # 指定项目
+opencode run -m "..." --agent test-designer "任务"      # 指定技能 agent
+opencode run --continue "继续"                          # 续跑上一会话
+```
+
+传不存在的模型名会直接报错而非静默回落，`-m` 是硬约束。
+
 ## 5. CLI 用法（与 Web 共享会话数据）
 
 ```bash
@@ -135,6 +180,7 @@ python3 -m devflow.cli setup                  # 首次启动引导（检测 → 
 python3 -m devflow.cli new                    # 新会话（澄清 → 制图）
 python3 -m devflow.cli new --full             # 新会话（全链路到验收）
 python3 -m devflow.cli new --full --from-doc requirements.md   # 从文档读取需求
+python3 -m devflow.cli spec requirements.md   # 一次性自动全流程（无评审，导出 CSV + 过程 MD）
 python3 -m devflow.cli resume <thread_id>     # 断点续跑
 python3 -m devflow.cli list                   # 列出所有会话
 python3 -m devflow.cli export <thread_id>     # 导出产物到 ./artifacts/<thread_id>/
@@ -143,6 +189,24 @@ python3 -m devflow.cli check-llm              # LLM 供应商连通性测试
 ```
 
 会话内命令：`:export` 导出产物、`:reset` 重开、`:quit` 退出。Web 与 CLI 共用 `data/checkpoints.db`，一边创建的会话另一边可以继续。
+
+### 5.1 spec：一次性自动全流程（无人工评审）
+
+一条命令从需求文档直接跑到验收，全程不打断：
+
+```bash
+python3 -m devflow.cli spec requirements.docx --out ./artifacts
+# 可选：--set project_root=/path/to/repo --set existing_code_accessible=true  # 代码模式预填
+#       --id my-thread                                                        # 自定义会话 ID
+```
+
+行为约定（与交互模式共用同一张图，只是驱动方式不同）：
+
+- **全部门禁自动按推荐通过**：图种类取规则推荐、清单路由加载 AI 预选、feature 拆分问题按推荐项执行、验收自动采纳全部用例；
+- **需求文档信息不足时由 AI 脑补**：缺口字段由 LLM 给出最佳推断值，来源标 `inferred`，报告中逐字段标注「AI 脑补的最佳选择」（LLM 全挂走 mock 兜底时另行警示）；
+- **产物落盘 `./artifacts/<thread_id>/`**：`casecraft-tests-<tid>.csv`（11 列用例表，Excel 可直接打开）、`casecraft-spec-<tid>.md`（全过程报告：需求清单+脑补标注、门禁自动决策时间线、逻辑图、用例明细、测试执行结果）、以及 `requirement.json` / `logic_graph.*` 等结构化产物；
+- **不写 checklist 库**：跳过了人工用例过滤步骤，本会话产物不会沉淀进 `.checklist`；
+- 会话照常落 checkpoint，事后可 `devflow resume <thread_id> --full` 回看与继续。
 
 ## 6. 常见问题
 
@@ -155,3 +219,7 @@ python3 -m devflow.cli check-llm              # LLM 供应商连通性测试
 | 想彻底重跑某会话 | 左侧会话悬停 ✕ 删除（同时清理 checkpoint），再新建 |
 | 想换 / 对比不同 Agent 的效果 | 改 `.env` 的 `CODE_EDIT_PROVIDER` / `TEST_GEN_PROVIDER`（如 `pi`）后重启，同一需求重跑即可；详见第 4 节末「可选：接入外部编码 Agent」 |
 | 依赖报错 No module named fastapi/uvicorn | `pip install -r requirements.txt`（Web 依赖已含在内） |
+| pi 提示未登录 / `pi auth check` 显示 not_ready，但我明明配置了 | pi 里 `opencode` 与 `opencode-go` 是**两个独立条目**：`pi auth check --provider opencode` 与 `--provider opencode-go` 分别检测。交互界面 `/login` 配的通常是 `opencode-go`（zen go 网关）。DevFlow 用 `PI_PROVIDER` 显式指定，只要所配条目 ready 即可，另一个条目未配置不影响 |
+| opencode go 套餐的模型到底有没有在被使用？ | 在用，且分两层：LLM 层（澄清/制图/用例/脑补）直连 zen go 端点（`check-llm` 可见各模型连通）；执行层（检索/改码/测试）经 pi 或 opencode 命令行用同一套凭据。自查命令见第 4 节末「执行后端与模型选择」 |
+| 在 agent 界面里配的自定义供应商/模型，会影响 DevFlow 的调用吗？ | 不会。DevFlow 调 pi / opencode CLI 时显式传 `--provider` / `--model`（取自 `.env`），硬性覆盖 agent 默认配置。唯一例外：`PI_PROVIDER` / `PI_MODEL` 清空时不传参，pi 会落到其内置默认（google）——这两行必配 |
+| 不想开 `opencode serve`，命令行能指定供应商和模型吗？ | 能：`opencode run -m "provider/model" "任务"`（官方无头入口），可加 `--dir` 指定项目、`--agent` 指定技能、`--continue` 续跑；传错模型名会直接报错，不会静默回落。DevFlow 的 `TEST_GEN_PROVIDER=opencode` 走的就是这条通道（模型由 `OPENCODE_MODEL` 指定） |

@@ -13,7 +13,8 @@
 - **业务 Checklist 库（.checklist）**：测试设计前按需求路由本地业务清单库，**清单门禁每单必弹**——skill 式渐进披露，只读各 `scenario.md` 的路由标签匹配，确认后加载对应 `checklist.md` 注入用例设计并逐条核对覆盖；空库/无匹配时可直接上传 wiki/验收清单文档由 AI 按规范归纳入库；用例生成后逐条「采纳」即评审通过，采纳后 AI 归纳（或手写）沉淀新清单登记入库，库越用越厚，形成「导入/沉淀 → 路由 → 更准的生成」闭环
 - **三门禁人工把关**：① **需求确认**（制图前）：把需求字段摊开给用户核对，每个字段标注来源（用户原话 / AI 推断），只有存在 AI 推断字段时才打断——可就地修改字段值后确认，或驳回继续补充需求；② **逻辑图评审**；③ **最终验收**。后两处**驳回必须带修改意见**，意见回传给制图 / 代码生成节点做针对性修正
 - **Web Shell（推荐）**：黑白双主题界面，聊天式单入口、LLM 逐字流式输出、节点级耗时进度、逻辑图缩放 / 平移 / 节点检查器、测试场景表筛选与 CSV / Markdown 导出
-- **CLI 孪生客户端**：同一套图与事件协议，`devflow setup / new / resume / list / export / checklist / check-providers / check-llm`
+- **CLI 孪生客户端**：同一套图与事件协议，`devflow setup / new / spec / resume / list / export / checklist / check-providers / check-llm`
+- **spec 一次性自动全流程**：`devflow spec requirements.docx` 一条命令跑完「澄清→制图→检索→生成→测试→验收」——全部门禁自动按推荐通过，需求缺口由 AI 直接脑补（逐字段标注「AI 脑补的最佳选择」，来源标 inferred），本地导出用例 CSV 与全过程 MD 报告；因跳过人工用例过滤，**不写入 checklist 库**
 - **永不卡死的演示模式**：未配置 API Key 时自动 Mock 兜底，全流程可跑通（输出为演示数据）
 - **可插拔 Provider（执行器可替换）**：检索 / 制图 / 代码生成 / 测试生成各能力独立选择
   codegraph / opencode / pi / llm / mock 后端；外部 Agent 只承担执行，可随时替换（见下节定位说明）
@@ -91,6 +92,14 @@ SiliconFlow 等 OpenAI 兼容服务的 Key（不配置则 Mock 演示模式）�
   预览确认后入库（frontmatter `sources` 记 `import:<文件名>`），并可当场勾选注入本单。
 - **采纳 = 评审通过**：测试场景卡逐条勾选「采纳」，终审门禁弹出后点「✓ 提交评审」
   一键通过（`state.adopted_cases` 记录采纳集）；不做采纳则终审门禁照常通过/驳回。
+- **评审期人工补录用例**：终审门禁待决（或流程完成后）可在测试场景卡点「＋ 添加用例」
+  （工具条或表格底部 ghost 行，两者都走同一表单，不做表格内自由行编辑）——按用例规范
+  结构化填写（层级 / 优先级 / 类型 / 标题 / 前置 / 步骤 / 预期 / 数据要求 / 依据），
+  或在表单顶部粘贴场景描述由 AI 提取回填；提交时默认 AI 规范化措辞（失败自动降级原文，
+  不阻塞录入）。用例编号自动接续（`TC-{max+1}`，只追加不重编，`adopted_cases` 按编号
+  引用），标记 `origin=manual`（表格「人工」徽标，可删除；AI 用例不可删），自动勾选
+  采纳；`state.manual_cases` 镜像暂存——评审驳回 AI 重出用例全局重编后自动追加回末尾。
+  CSV / MD 导出新增「来源」列（人工 / AI）。
 - **沉淀**：评审通过后服务端主动询问——AI 归纳（预勾选采纳的用例）/ 手写清单
   （AI 规范化）/ 暂不；也可随时在测试场景卡点「☰ 沉淀」。归纳时标记业务类型
   （选已有或新建），目标目录已有清单自动合并去重，`sources` 跨次累积，预览确认后入库。
@@ -153,4 +162,5 @@ python3 -m devflow.cli check-providers   # 各后端可用性自检
 
 - 仓库历史中出现的测试 Key 已吊销，不可使用；请配置自己的 Key
 - 代码检索 / 代码生成的真实执行依赖 OpenCode 或 CodeGraph 本地部署，默认 mock
+- `*_PROVIDER=opencode` 的检索 / 改码走自造 serve 端点（`/api/v1/code/search|generate`），官方 `opencode serve` 未提供，须用 `pi` 或 `TEST_GEN_PROVIDER=opencode`（opencode run 命令行）；详见 QUICKSTART「执行后端与模型选择」
 - 会话列表不含墙钟时间（checkpoint 未存时间戳），按最近活动排序
