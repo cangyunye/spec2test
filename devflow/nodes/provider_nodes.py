@@ -384,7 +384,8 @@ def make_test_gen_node(providers: Providers | None = None):
     """阶段三：测试生成节点。
 
     读取 state: requirement, logic_graph, code_changes, review_feedback,
-                opencode_sessions.test_gen, features, feature_questions
+                opencode_sessions.test_gen, features, feature_questions,
+                manual_cases
     写入 state: test_report, opencode_sessions.test_gen, retry_count,
                 current_stage + SPEC 5 错误字段
 
@@ -397,8 +398,20 @@ def make_test_gen_node(providers: Providers | None = None):
       state.features 非空（feature 拆分模式）→ map-reduce：逐 feature 并发生成
       （Semaphore 限流）→ 单 feature 确定性评审回炉 → 合并去重重编 case_id；
       全部失败或无 features → 单次整单调用（默认可靠路径，保持兼容）。
+
+    人工补录用例（state.manual_cases）在两条产出路径末尾重新追加：
+      评审驳回重做会全局重编 case_id 并覆盖 test_report，人工用例据此恢复，
+      编号接在新用例之后（首次生成时 manual_cases 为空，本步无操作）。
     """
     p = providers or get_providers()
+
+    def _with_manual(report: dict[str, Any], state: GlobalState) -> dict[str, Any]:
+        from ..feature_split import reappend_manual_cases
+
+        reappend_manual_cases(report, [
+            c for c in (state.get("manual_cases") or []) if isinstance(c, dict)
+        ])
+        return report
 
     async def test_gen_node_async(state: GlobalState) -> dict[str, Any]:
         from ..schemas import has_project_code
@@ -462,7 +475,7 @@ def make_test_gen_node(providers: Providers | None = None):
                 if failed_notes:
                     report["self_check"] = list(report.get("self_check") or []) + failed_notes
                 return {
-                    "test_report": dict(report),
+                    "test_report": _with_manual(dict(report), state),
                     "opencode_sessions": {**sessions, "test_gen": report["session_id"]},
                     "retry_count": retry_map,
                     "last_error": None,
@@ -510,7 +523,7 @@ def make_test_gen_node(providers: Providers | None = None):
         # 测试「执行」由下游 test_run 节点承担真实判定；本节点只产出设计报告。
         # code_changes.test_passed 保持 None，等 test_run 回填。
         return {
-            "test_report": dict(report),
+            "test_report": _with_manual(dict(report), state),
             "opencode_sessions": {**sessions, "test_gen": report["session_id"]},
             "last_error": None,
             "last_error_code": None,

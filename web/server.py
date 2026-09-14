@@ -38,6 +38,7 @@ from devflow.cli import _config, _thread_exists, apply_assignments
 from devflow.checklist.library import validate_rel_dir
 from devflow.config import settings
 from devflow.doc_reader import read_doc
+from devflow.feature_split import next_case_id
 from devflow.doctor import first_run_notice
 from devflow.events import events_from_stream
 from devflow.orchestrator import _get_sqlite_conn, build_graph_with_providers, initial_state
@@ -745,13 +746,14 @@ def _build_export_md(vals: dict[str, Any]) -> str:
                     lines += ["（本功能点无用例——见质量自检中的遗留缺口）", ""]
                     continue
                 lines += [
-                    "| 标识 | 层级 | 优先级 | 类型 | 标题 | 前置 | 步骤 | 预期 | 依据 |",
-                    "|---|---|---|---|---|---|---|---|---|",
+                    "| 标识 | 层级 | 优先级 | 类型 | 标题 | 前置 | 步骤 | 预期 | 依据 | 来源 |",
+                    "|---|---|---|---|---|---|---|---|---|---|",
                 ]
                 for c in feat_cases:
                     cells = [str(c.get(k, "") or "").replace("|", "\\|").replace("\n", " ")
                              for k in ("case_id", "tier", "priority", "case_type", "title",
                                        "precondition", "steps", "expected", "rationale")]
+                    cells.append("人工" if c.get("origin") == "manual" else "AI")
                     lines.append("| " + " | ".join(cells) + " |")
                 lines.append("")
             known_fids = {str(f.get("feature_id") or "") for f in report_features}
@@ -772,12 +774,13 @@ def _build_export_md(vals: dict[str, Any]) -> str:
                 groups.setdefault(str(c.get("target") or "通用"), []).append(c)
             for gi, (mod, mod_cases) in enumerate(groups.items(), start=1):
                 lines += [f"### 2.{gi} {mod}", "",
-                          "| 标识 | 层级 | 优先级 | 类型 | 标题 | 前置 | 步骤 | 预期 | 依据 |",
-                          "|---|---|---|---|---|---|---|---|---|"]
+                          "| 标识 | 层级 | 优先级 | 类型 | 标题 | 前置 | 步骤 | 预期 | 依据 | 来源 |",
+                          "|---|---|---|---|---|---|---|---|---|---|"]
                 for c in mod_cases:
                     cells = [str(c.get(k, "") or "").replace("|", "\\|").replace("\n", " ")
                              for k in ("case_id", "tier", "priority", "case_type", "title",
                                        "precondition", "steps", "expected", "rationale")]
+                    cells.append("人工" if c.get("origin") == "manual" else "AI")
                     lines.append("| " + " | ".join(cells) + " |")
                 lines.append("")
 
@@ -1148,6 +1151,212 @@ def dismiss_distill_prompt(tid: str) -> dict[str, Any]:
     graph = build_graph_with_providers()
     graph.update_state(_config(thread_id=tid), {"distill_dismissed": True})
     return {"dismissed": True}
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 评审期人工补录用例：表单提交 / AI 规范化 / 删除
+# ═══════════════════════════════════════════════════════════════════
+
+
+class ManualCaseBody(BaseModel):
+    """人工补录用例的表单字段（字段 = 用例设计规范的结构化约束）。"""
+
+    tier: str = "functional"
+    priority: str = "P1"
+    case_type: str = "正向"
+    title: str = ""
+    target: str = ""
+    precondition: str = ""
+    steps: str = ""
+    expected: str = ""
+    data_requirement: str = ""
+    rationale: str = ""
+    normalize: bool = True     # 提交前 AI 规范化（默认开；失败自动降级原文入库）
+
+
+class CaseNormalizeBody(BaseModel):
+    """AI 规范化入参：自由描述（提取成用例）与/或已有字段（润色规范）。"""
+
+    text: str = ""
+    fields: ManualCaseBody | None = None
+
+
+_CASE_KEYS = ("tier", "priority", "case_type", "title", "target", "precondition",
+              "steps", "expected", "data_requirement", "rationale")
+
+_NORM_SYSTEM = """你是测试用例设计规范助手。把给定的测试用例整理为规范用例，返回 JSON：
+{"tier":"functional|performance|security","priority":"P0|P1|P2",
+ "case_type":"正向|反向|边界值|等价类|状态流转|场景法|性能|安全",
+ "title":"谁在什么条件下做什么、预期什么结果（一句话）",
+ "target":"所属模块/功能点","precondition":"前置条件（账号/环境/数据状态）",
+ "steps":"分步操作步骤，1. 2. 3. 编号祈使句","expected":"可验收的预期结果",
+ "data_requirement":"测试数据要求（可空）","rationale":"设计依据（验收:<准则>/边界:<场景>/功能:<功能点>）"}
+规则：保留用户原意，只做规范化与措辞补全，不新增场景、不删字段；用户未给的枚举字段按内容推断。"""
+
+
+class _NormOut(BaseModel):
+    tier: str = ""
+    priority: str = ""
+    case_type: str = ""
+    title: str = ""
+    target: str = ""
+    precondition: str = ""
+    steps: str = ""
+    expected: str = ""
+    data_requirement: str = ""
+    rationale: str = ""
+
+
+async def _normalize_case_fields(body: CaseNormalizeBody) -> tuple[dict[str, str], bool]:
+    """AI 规范化：自由描述提取 / 字段润色。返回 (整理后字段, 是否成功)。
+
+    mock 兜底或 LLM 失败都视为未规范化——mock 会编造数据，不能当作用户输入的
+    整理结果；调用方降级用原文（人工补录永不因 AI 失败被阻塞）。
+    """
+    from devflow.llm_client import invoke_json
+
+    parts = []
+    if body.text.strip():
+        parts.append(f"场景描述（据此提取用例）：\n{body.text.strip()}")
+    if body.fields is not None:
+        given = {k: str(getattr(body.fields, k) or "").strip() for k in _CASE_KEYS}
+        parts.append("已有草稿字段（据此润色规范，保留原意）：\n" + json.dumps(
+            {k: v for k, v in given.items() if v}, ensure_ascii=False))
+    if not parts:
+        raise HTTPException(400, "请提供场景描述或至少一个用例字段")
+    meta: dict[str, Any] = {}
+    out = await invoke_json(
+        _NORM_SYSTEM, "\n\n".join(parts),
+        response_model=_NormOut, response_type="case_normalize", meta=meta,
+    )
+    if meta.get("mock"):
+        return {}, False
+    cleaned = {k: str(out.get(k) or "").strip() for k in _CASE_KEYS}
+    cleaned = {k: v for k, v in cleaned.items() if v}
+    return cleaned, bool(cleaned)
+
+
+def _push_bus_event(tid: str, event: dict[str, Any]) -> None:
+    """不驱动图的外部状态变更 → 手工写事件总线（在线订阅端实时收到）。"""
+    bus = _bus(tid)
+    bus.seq += 1
+    bus.buffer.append((bus.seq, event))
+    for sub in list(bus.subscribers):
+        sub.put_nowait((bus.seq, event))
+
+
+def _manual_case_guard(graph: Any, tid: str) -> dict[str, Any]:
+    """补录/删除的时机守卫：停在 review 门禁（interrupt 挂起）或流程已完成。
+
+    与 adopt_review 同款 interrupt 检测；此时 update_state 只改黑板、不推进图。
+    """
+    snap = graph.get_state(_config(thread_id=tid))
+    vals = snap.values or {}
+    has_interrupt = any(getattr(t, "interrupts", None) for t in (snap.tasks or ()))
+    at_review = "review" in list(snap.next or []) and has_interrupt
+    if not at_review and vals.get("current_stage") != "done":
+        raise HTTPException(409, "仅评审门禁待决或流程完成后可操作人工用例")
+    return vals
+
+
+def _rearm_review_interrupt(graph: Any, tid: str) -> None:
+    """update_state 会吞掉挂起 interrupt 的标志位（next 仍停在 review，但
+    tasks.interrupts 被清空）：让 review 节点重入一次，重新 interrupt 等待
+    决策。节点只重算验收摘要（含新增用例数），无副作用。"""
+    snap = graph.get_state(_config(thread_id=tid))
+    has_interrupt = any(getattr(t, "interrupts", None) for t in (snap.tasks or ()))
+    if "review" in list(snap.next or []) and not has_interrupt:
+        list(graph.stream(None, _config(thread_id=tid), stream_mode="updates"))
+
+
+def _apply_case_state(graph: Any, tid: str, patch: dict[str, Any]) -> None:
+    """人工用例变更落库：update_state 写黑板 + 重入门禁（阻塞，调用方放线程池）。"""
+    graph.update_state(_config(thread_id=tid), patch)
+    _rearm_review_interrupt(graph, tid)
+
+
+@app.post("/api/sessions/{tid}/cases/normalize")
+async def normalize_manual_case(tid: str, body: CaseNormalizeBody) -> dict[str, Any]:
+    """AI 规范化用例草稿（不落盘）：表单「从描述生成」与「润色」共用。"""
+    if not _thread_exists(tid):
+        raise HTTPException(404, f"会话不存在: {tid}")
+    fields, ok = await _normalize_case_fields(body)
+    if not ok:
+        return {"fields": body.fields.model_dump(exclude={"normalize"}) if body.fields else {},
+                "normalized": False, "reason": "AI 规范化不可用（mock 兜底或调用失败），已保留原文"}
+    return {"fields": fields, "normalized": True}
+
+
+@app.post("/api/sessions/{tid}/cases")
+async def add_manual_case(tid: str, body: ManualCaseBody) -> dict[str, Any]:
+    """评审期人工补录用例：编号接续追加（TC-{max+1}）+ origin=manual + 镜像暂存。
+
+    可选 AI 规范化（默认开，失败降级原文）；写 checkpoint（update_state，
+    不推进图）并向总线推 test_report 产物事件（在线端原地重渲染测试卡）。
+    """
+    if not _thread_exists(tid):
+        raise HTTPException(404, f"会话不存在: {tid}")
+    for req_field in ("title", "steps", "expected"):
+        if not str(getattr(body, req_field) or "").strip():
+            raise HTTPException(400, f"必填字段缺失：{req_field}（标题/步骤/预期结果）")
+    lock = _tid_lock(tid)
+    if lock.locked():
+        raise HTTPException(409, "该会话正在推进中，请稍后再操作")
+    async with lock:
+        graph = build_graph_with_providers()
+        vals = _manual_case_guard(graph, tid)
+
+        fields = {k: str(getattr(body, k) or "").strip() for k in _CASE_KEYS}
+        normalized = False
+        if body.normalize:
+            try:
+                improved, ok = await _normalize_case_fields(CaseNormalizeBody(fields=body))
+                if ok:
+                    fields.update(improved)
+                    normalized = True
+            except HTTPException:
+                raise
+            except Exception:  # noqa: BLE001 — AI 失败不阻塞补录，原文入库
+                pass
+
+        report = dict(vals.get("test_report") or {})
+        cases = [dict(c) for c in (report.get("test_cases") or []) if isinstance(c, dict)]
+        case = {**fields, "origin": "manual", "case_id": next_case_id(cases)}
+        cases.append(case)
+        report["test_cases"] = cases
+        manual = [dict(c) for c in (vals.get("manual_cases") or []) if isinstance(c, dict)]
+        manual.append(dict(case))
+        await asyncio.to_thread(_apply_case_state, graph, tid,
+                                {"test_report": report, "manual_cases": manual})
+    _push_bus_event(tid, {"type": "artifact", "kind": "test_report", "payload": report})
+    return {"accepted": True, "case": case, "normalized": normalized, "report": report}
+
+
+@app.delete("/api/sessions/{tid}/cases/{case_id}")
+async def delete_manual_case(tid: str, case_id: str) -> dict[str, Any]:
+    """删除人工补录用例（仅 origin=manual 可删）。其余编号不动（留空号保稳定）。"""
+    if not _thread_exists(tid):
+        raise HTTPException(404, f"会话不存在: {tid}")
+    lock = _tid_lock(tid)
+    if lock.locked():
+        raise HTTPException(409, "该会话正在推进中，请稍后再操作")
+    async with lock:
+        graph = build_graph_with_providers()
+        vals = _manual_case_guard(graph, tid)
+        report = dict(vals.get("test_report") or {})
+        cases = [c for c in (report.get("test_cases") or []) if isinstance(c, dict)]
+        target = next((c for c in cases if str(c.get("case_id") or "") == case_id), None)
+        if target is None:
+            raise HTTPException(404, f"用例不存在: {case_id}")
+        if target.get("origin") != "manual":
+            raise HTTPException(400, "仅人工补录用例可删除；AI 用例请在评审门禁驳回时给意见")
+        report["test_cases"] = [c for c in cases if str(c.get("case_id") or "") != case_id]
+        manual = [c for c in (vals.get("manual_cases") or [])
+                  if isinstance(c, dict) and str(c.get("case_id") or "") != case_id]
+        await asyncio.to_thread(_apply_case_state, graph, tid,
+                                {"test_report": report, "manual_cases": manual})
+    _push_bus_event(tid, {"type": "artifact", "kind": "test_report", "payload": report})
+    return {"deleted": case_id, "report": report}
 
 
 # ═══════════════════════════════════════════════════════════════════

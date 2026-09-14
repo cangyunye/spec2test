@@ -196,6 +196,7 @@ class GlobalState(TypedDict, total=False):
     checklist_context: Optional[dict[str, Any]]  # 确认后加载的清单 {root, checklists: [{rel_dir, name, content}]}，注入测试设计
     checklist_routed: bool                   # 本会话已做过路由（用例回炉重生成时不重复弹门禁）
     adopted_cases: Optional[list[str]]       # 用户在测试卡勾选采纳的用例（采纳 = 评审通过）；None = 未做采纳
+    manual_cases: list[dict[str, Any]]       # 评审期人工补录的用例镜像（origin=manual）：AI 重出用例重编编号后据此重新追加
     distill_dismissed: bool                  # 用户对「沉淀建议卡」点了暂不（本会话不再提示）
     features: list[Feature]                  # feature 拆分结果（feature_split 节点产出；空 = 未拆分/单次整单）
     feature_questions: list[dict[str, Any]]  # 拆分阶段待确认问题（feature_gate 门禁承接用）

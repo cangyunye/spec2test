@@ -437,6 +437,46 @@ table.t-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .prio.P0 { color: var(--ink); }
 .t-empty { padding: 20px; text-align: center; color: var(--ink-4); font-size: 12px; }
 
+/* 评审期人工补录用例：标识列「人工」徽标 + 删除 + 表格底部 ghost 行 */
+.manual-badge {
+  display: inline-flex; align-items: center; margin-left: 6px; padding: 1px 7px;
+  border-radius: 999px; font-size: 9.5px; font-weight: 600; white-space: nowrap;
+  border: 1px solid var(--ok-border, rgba(58, 157, 92, .45));
+  color: var(--ok, #3a9d5c); background: var(--ok-bg, rgba(58, 157, 92, .08));
+}
+.manual-del {
+  margin-left: 4px; border: 0; background: transparent; cursor: pointer;
+  color: var(--ink-4); font-size: 12px; line-height: 1; padding: 1px 3px; border-radius: 5px;
+}
+.manual-del:hover { color: var(--err); background: var(--err-bg); }
+.t-addrow td { border-bottom: 0; padding: 6px 10px; text-align: center; }
+.t-addrow:hover td { background: transparent; }
+.t-addrow-btn {
+  border: 1px dashed var(--border-2); border-radius: 8px; background: transparent;
+  color: var(--ink-3); font-size: 11.5px; padding: 5px 14px; cursor: pointer;
+  transition: border-color .15s, color .15s;
+}
+.t-addrow-btn:hover { border-color: var(--ink-3); color: var(--ink); }
+
+/* 补录用例表单（评审期弹窗） */
+.ac-form { display: flex; flex-direction: column; gap: 10px; }
+.ac-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+.ac-field { display: flex; flex-direction: column; gap: 4px; }
+.ac-field > label { font-size: 11.5px; color: var(--ink-3); }
+.ac-input {
+  background: var(--surface-2); color: var(--ink); border: 1px solid var(--border-2);
+  border-radius: 9px; padding: 8px 10px; font-size: 13px; width: 100%;
+  box-sizing: border-box; resize: vertical;
+}
+.ac-input:focus { outline: none; border-color: var(--ink-3); }
+.ac-desc textarea { font-size: 12.5px; }
+.ac-norm {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11.5px; color: var(--ink-2); cursor: pointer; user-select: none;
+}
+.ac-norm input { accent-color: var(--ink); }
+@media (max-width: 720px) { .ac-row { grid-template-columns: 1fr; } }
+
 /* 代码检索 */
 .ctx-list { display: flex; flex-direction: column; gap: 8px; }
 .ctx-item { border: 1px solid var(--border); border-radius: 9px; overflow: hidden; }

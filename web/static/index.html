@@ -260,6 +260,27 @@
   </footer>
 </aside>
 
+<!-- ── 人工补录用例模态（评审期追加，AI 规范化后入库） ── -->
+<div id="addCaseModal" class="gate-overlay hidden" role="dialog" aria-modal="true">
+  <div class="gate-panel distill-panel">
+    <header class="gate-head">
+      <span class="gate-tag mono">CASE · 补录用例</span>
+      <div class="gate-head-text">
+        <h3>人工补录测试用例</h3>
+        <p id="addCaseSub" class="mono">按用例规范填写 → AI 规范化后追加到用例末尾（编号自动接续，标记「人工」）</p>
+      </div>
+    </header>
+    <div class="gate-body" id="addCaseBody"></div>
+    <footer class="gate-foot">
+      <span id="addCaseHint" class="mono distill-hint"></span>
+      <span class="spacer"></span>
+      <button id="btnAddCaseCancel" class="btn ghost">取消</button>
+      <button id="btnAddCaseGen" class="btn ghost">✦ 从描述生成</button>
+      <button id="btnAddCaseSubmit" class="btn primary">✓ 追加用例</button>
+    </footer>
+  </div>
+</div>
+
 <!-- ── 步骤回退模态（time-travel）────────────────────── -->
 <div id="revertModal" class="gate-overlay hidden" role="dialog" aria-modal="true">
   <div class="gate-panel">

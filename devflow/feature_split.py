@@ -556,6 +556,54 @@ def merge_feature_reports(
 
 
 # ═══════════════════════════════════════════════════════════════════
+# 人工补录用例：编号接续 + 重做后重追加
+# ═══════════════════════════════════════════════════════════════════
+
+
+def next_case_id(cases: list[dict[str, Any]]) -> str:
+    """现有用例之后下一个编号（TC-{max+1:03d}）。
+
+    人工补录只追加、不插入重编——adopted_cases 按 case_id 引用，
+    中间插入会让既有编号漂移。
+    """
+    mx = 0
+    for c in cases or []:
+        m = re.match(r"TC-(\d+)$", str((c or {}).get("case_id") or ""))
+        if m:
+            mx = max(mx, int(m.group(1)))
+    return f"TC-{mx + 1:03d}"
+
+
+def reappend_manual_cases(report: dict[str, Any], manual_cases: list[dict[str, Any]]) -> int:
+    """把人工补录用例重新追加进（可能已被 AI 重做的）报告，编号接续。
+
+    评审驳回 → AI 重新出用例时 merge 会全局重编并覆盖 test_report；
+    人工用例以 state.manual_cases 为镜像源，在 test_gen 产出后调用本函数
+    恢复。返回实际追加条数。
+    """
+    if not manual_cases:
+        return 0
+    cases = [c for c in (report.get("test_cases") or []) if isinstance(c, dict)]
+    # 已在报告中的人工用例（同 id）不重复追加
+    existing_ids = {str(c.get("case_id") or "") for c in cases}
+    n = 0
+    for mc in manual_cases:
+        if not isinstance(mc, dict) or not str(mc.get("title") or "").strip():
+            continue
+        if str(mc.get("case_id") or "") in existing_ids:
+            continue
+        case = {k: v for k, v in mc.items() if k != "case_id"}
+        case["case_id"] = next_case_id(cases)
+        case["origin"] = "manual"
+        cases.append(case)
+        existing_ids.add(case["case_id"])
+        n += 1
+    if n:
+        report["test_cases"] = cases
+    return n
+
+
+# ═══════════════════════════════════════════════════════════════════
 # 技能派发：路径解析 + prompt 前缀 + 输出契约
 # ═══════════════════════════════════════════════════════════════════
 

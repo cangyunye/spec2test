@@ -97,6 +97,9 @@ function stageName(s) {
   })[s] || s;
 }
 const TIER_NAME = { functional: "功能", performance: "性能", security: "安全" };
+/* 用例规范枚举（筛选条与「补录用例」表单共用） */
+const CASE_PRIOS = ["P0", "P1", "P2", "P3"];
+const CASE_TYPES = ["正向", "反向", "边界值", "等价类", "状态流转", "场景法", "性能", "安全"];
 
 async function api(url, opts) {
   const resp = await fetch(url, opts);
@@ -588,6 +591,7 @@ const tFilter = { tier: "all", prio: "all", q: "" };
 
 /* 兼容两种 case 形态：LLM 分级场景 / 代码级测试（mock provider） */
 function normCase(c) {
+  const origin = c.origin === "manual" ? "manual" : "ai";
   if (c.title) {
     return {
       case_id: c.case_id || "",
@@ -601,6 +605,7 @@ function normCase(c) {
       expected: c.expected || "",
       data_requirement: c.data_requirement || "",
       rationale: c.rationale || "",
+      origin,
     };
   }
   return {
@@ -615,15 +620,22 @@ function normCase(c) {
     expected: c.expected || "",
     data_requirement: "",
     rationale: c.covered_edges ? `覆盖边：${c.covered_edges.join("、")}` : (c.rationale || ""),
+    origin,
   };
 }
 
 function renderTestCard(report) {
   S.report = report;
   const cases = (report.test_cases || []).map(normCase);
+  // 补录用例入口：终审门禁待决（评审中）或流程完成后（补录仅影响导出物）
+  const canAddCase = S.gate === "human_review" || S.stage === "done";
   const { card, actions } = cardShell(`TEST DESIGN · 测试场景 · ${cases.length}`);
   actions.appendChild(miniBtn("⟲ 重新设计", () => openRevertForNode("checklist_route_gate"),
     "回退到清单确认后的时点，重新设计测试用例"));
+  if (canAddCase) {
+    actions.appendChild(miniBtn("＋ 添加用例", openAddCaseModal,
+      "按用例规范补录一条人工用例：表单填写或描述生成，AI 规范化后追加到末尾（编号接续，标记「人工」）"));
+  }
 
   // 测试概述（总-分结构的总文档；方法论来自 doc-based/functional testcase-generator skills）
   if (report.overview || (report.self_check || []).length) {
@@ -720,8 +732,6 @@ function renderTestCard(report) {
     if (!shown.length) {
       tbody.appendChild(h("tr", null, "")).appendChild(
         Object.assign(document.createElement("td"), { colSpan: 11, className: "t-empty", textContent: "没有匹配的测试场景" }));
-      count.textContent = "0 条";
-      return;
     }
     shown.forEach((c) => {
       const tr = h("tr");
@@ -737,7 +747,16 @@ function renderTestCard(report) {
       };
       tdAdopt.appendChild(adopt);
       tr.appendChild(tdAdopt);
-      tr.appendChild(h("td", "mono", c.case_id || "—"));
+      const tdId = h("td", "mono");
+      tdId.appendChild(document.createTextNode(c.case_id || "—"));
+      if (c.origin === "manual") {
+        tdId.appendChild(h("span", "manual-badge", "人工"));
+        const del = h("button", "manual-del", "×");
+        del.title = "删除此人工用例（其余编号保持不变）";
+        del.onclick = () => deleteManualCase(c.case_id);
+        tdId.appendChild(del);
+      }
+      tr.appendChild(tdId);
       const tdTier = h("td");
       tdTier.appendChild(h("span", `tier ${c.tier || ""}`, TIER_NAME[c.tier] || c.tier || "—"));
       tr.appendChild(tdTier);
@@ -750,6 +769,18 @@ function renderTestCard(report) {
         tr.appendChild(h("td", null, v || "—")));
       tbody.appendChild(tr);
     });
+    if (canAddCase) {
+      // 表格底部 ghost 行：与卡片工具条的「＋ 添加用例」同款入口（仍走表单，不做自由行编辑）
+      const trAdd = h("tr", "t-addrow");
+      const tdAdd = h("td");
+      tdAdd.colSpan = 11;
+      const addBtn = h("button", "t-addrow-btn", "＋ 添加用例");
+      addBtn.title = "按用例规范补录（表单填写或描述生成）";
+      addBtn.onclick = openAddCaseModal;
+      tdAdd.appendChild(addBtn);
+      trAdd.appendChild(tdAdd);
+      tbody.appendChild(trAdd);
+    }
     count.textContent = `显示 ${shown.length} / ${cases.length} 条 · 通过 ${report.run?.passed ?? "—"} · 失败 ${report.run?.failed ?? "—"}`;
   }
   renderRows();
@@ -785,6 +816,11 @@ function refreshAdoptUI() {
     : "终审门禁就绪后（测试执行完成）可提交";
 }
 
+/* 测试卡已渲染则按当前状态原地重画（S.report 缓存当前报告） */
+function refreshTestCard() {
+  if (S.report && S.testCardEl && S.testCardEl.isConnected) renderTestCard(S.report);
+}
+
 /* 提交采纳 = 终审自动通过：服务端校验正停在 human_review 门禁才接受 */
 async function submitAdoptReview() {
   if (!S.tid || !S.report) return;
@@ -801,6 +837,7 @@ async function submitAdoptReview() {
     $("gatePill").classList.add("hidden");
     S.gate = null;
     refreshAdoptUI();
+    refreshTestCard();  // 评审结束：测试卡的「＋ 添加用例」入口随状态显隐
     addDivider(`评审通过 · 已采纳 ${resp.adopted.length} 条用例`, "可继续沉淀为业务清单", true);
     S.pendingDistill = resp.adopted || [];
     setRunning(true);
@@ -808,6 +845,189 @@ async function submitAdoptReview() {
     toast("评审已通过", `采纳 ${resp.adopted.length} 条用例；完成后可沉淀为业务清单`);
   } catch (err) {
     toast("提交失败", err.message, "err");
+  }
+}
+
+/* ── 评审期人工补录用例 ────────────────────────────────
+   入口：测试卡工具条 / 表格底部 ghost 行（评审门禁待决或流程完成后）。
+   三个渠道收敛到同一个表单：手填（结构化字段 = 用例规范约束）+
+   「从描述生成」（AI 把自由文本提取回填表单）。提交时默认 AI 规范化
+   （失败降级原文），服务端编号接续追加（TC-{max+1}）并标记 origin=manual。 */
+
+const AC_FIELDS = [
+  ["title", "标题 *", "input", "谁在什么条件下做什么、预期什么结果（一句话）"],
+  ["target", "所属模块", "input", "例：订单支付"],
+  ["precondition", "前置条件", "input", "账号 / 环境 / 数据状态"],
+  ["steps", "步骤 *", "textarea", "1. …\n2. …\n3. …（祈使句分步描述）"],
+  ["expected", "预期结果 *", "textarea", "可验收的预期结果"],
+  ["data_requirement", "数据要求", "input", "测试数据（可空）"],
+  ["rationale", "设计依据", "input", "验收:<准则> / 边界:<场景> / 功能:<功能点>"],
+];
+
+function openAddCaseModal() {
+  if (!S.tid || !S.report) return;
+  buildAddCaseForm(null);
+  $("addCaseHint").textContent = "";
+  $("addCaseModal").classList.remove("hidden");
+}
+
+function closeAddCaseModal() {
+  $("addCaseModal").classList.add("hidden");
+}
+
+function buildAddCaseForm(prefill) {
+  const body = $("addCaseBody");
+  body.innerHTML = "";
+  const form = h("div", "ac-form");
+  // 场景描述：对话在评审期间不可用，补录用例的想法直接粘这里让 AI 提取
+  const descSec = h("div", "ac-field ac-desc");
+  descSec.appendChild(h("label", null, "场景描述（可选）"));
+  const desc = h("textarea", "ac-input");
+  desc.id = "acDesc";
+  desc.rows = 2;
+  desc.placeholder = "用自然语言描述一个测试场景，点下方「✦ 从描述生成」让 AI 提取成结构化字段…";
+  descSec.appendChild(desc);
+  form.appendChild(descSec);
+  // 枚举行：层级 / 优先级 / 类型
+  const row = h("div", "ac-row");
+  const mkSel = (id, label, opts) => {
+    const f = h("div", "ac-field");
+    f.appendChild(h("label", null, label));
+    const sel = document.createElement("select");
+    sel.id = id;
+    sel.className = "ac-input";
+    opts.forEach(([v, t]) => {
+      const o = document.createElement("option");
+      o.value = v; o.textContent = t;
+      sel.appendChild(o);
+    });
+    f.appendChild(sel);
+    return f;
+  };
+  row.appendChild(mkSel("acTier", "层级", [["functional", "功能"], ["performance", "性能"], ["security", "安全"]]));
+  row.appendChild(mkSel("acPrio", "优先级", CASE_PRIOS.map((p) => [p, p])));
+  row.appendChild(mkSel("acType", "类型", CASE_TYPES.map((t) => [t, t])));
+  form.appendChild(row);
+  // 结构化字段（输入 / 过程 / 输出等 = 用例设计规范的表单化约束）
+  AC_FIELDS.forEach(([key, label, kind, ph]) => {
+    const f = h("div", "ac-field");
+    f.appendChild(h("label", null, label));
+    let el;
+    if (kind === "textarea") { el = h("textarea", "ac-input"); el.rows = key === "steps" ? 3 : 2; }
+    else el = h("input", "ac-input");
+    el.id = "ac" + key[0].toUpperCase() + key.slice(1);
+    el.placeholder = ph;
+    f.appendChild(el);
+    form.appendChild(f);
+  });
+  // AI 规范化开关（默认开）
+  const norm = h("label", "ac-norm");
+  const cb = h("input");
+  cb.type = "checkbox";
+  cb.id = "acNormalize";
+  cb.checked = true;
+  norm.appendChild(cb);
+  norm.appendChild(document.createTextNode(" AI 规范化后追加（按用例规范整理措辞；AI 不可用时原文入库）"));
+  form.appendChild(norm);
+  body.appendChild(form);
+  if (prefill) fillAddCaseForm(prefill);
+}
+
+function fillAddCaseForm(fields) {
+  const set = (id, v) => {
+    const el = $(id);
+    if (el && v !== undefined && String(v ?? "") !== "") el.value = v;
+  };
+  set("acTier", fields.tier);
+  set("acPrio", fields.priority);
+  set("acType", fields.case_type);
+  AC_FIELDS.forEach(([key]) => set("ac" + key[0].toUpperCase() + key.slice(1), fields[key]));
+}
+
+function collectAddCaseFields() {
+  const val = (id) => ($(id) ? $(id).value.trim() : "");
+  return {
+    tier: val("acTier") || "functional",
+    priority: val("acPrio") || "P1",
+    case_type: val("acType") || "正向",
+    title: val("acTitle"),
+    target: val("acTarget"),
+    precondition: val("acPrecondition"),
+    steps: val("acSteps"),
+    expected: val("acExpected"),
+    data_requirement: val("acData_requirement"),
+    rationale: val("acRationale"),
+  };
+}
+
+/* 「✦ 从描述生成」：自由描述提取 / 草稿字段润色，结果回填表单，确认权在用户 */
+async function genAddCase() {
+  const desc = $("acDesc").value.trim();
+  const fields = collectAddCaseFields();
+  if (!desc && !fields.title && !fields.steps && !fields.expected) {
+    $("addCaseHint").textContent = "请先填写场景描述，或至少填标题 / 步骤 / 预期之一";
+    return;
+  }
+  const btn = $("btnAddCaseGen");
+  btn.disabled = true;
+  btn.textContent = "✦ 生成中…";
+  $("addCaseHint").textContent = "";
+  try {
+    const resp = await api(`/api/sessions/${S.tid}/cases/normalize`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: desc, fields }),
+    });
+    if (resp.normalized) {
+      fillAddCaseForm(resp.fields);
+      $("addCaseHint").textContent = "已生成 / 整理，请确认后追加";
+    } else {
+      $("addCaseHint").textContent = resp.reason || "AI 暂不可用，可手填后直接追加";
+    }
+  } catch (err) {
+    $("addCaseHint").textContent = "生成失败：" + err.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "✦ 从描述生成";
+  }
+}
+
+async function submitAddCase() {
+  const fields = collectAddCaseFields();
+  for (const k of ["title", "steps", "expected"]) {
+    if (!fields[k]) { $("addCaseHint").textContent = "必填：标题 / 步骤 / 预期结果"; return; }
+  }
+  const btn = $("btnAddCaseSubmit");
+  btn.disabled = true;
+  btn.textContent = "✓ 追加中…";
+  $("addCaseHint").textContent = "";
+  try {
+    const resp = await api(`/api/sessions/${S.tid}/cases`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...fields, normalize: $("acNormalize").checked }),
+    });
+    closeAddCaseModal();
+    if (resp.case && resp.case.case_id) S.adoptSel.add(resp.case.case_id);  // 主动补录视为认可，可取消
+    renderTestCard(resp.report);  // 原地替换测试卡（新用例 + 「人工」标记）
+    toast(resp.normalized ? "用例已追加（AI 规范化）" : "用例已追加（原文）",
+      `${resp.case.case_id} 已加入用例表末尾并自动勾选采纳`);
+  } catch (err) {
+    $("addCaseHint").textContent = "追加失败：" + err.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "✓ 追加用例";
+  }
+}
+
+async function deleteManualCase(caseId) {
+  if (!S.tid) return;
+  if (!confirm(`删除人工用例 ${caseId}？（其余编号保持不变）`)) return;
+  try {
+    const resp = await api(`/api/sessions/${S.tid}/cases/${encodeURIComponent(caseId)}`, { method: "DELETE" });
+    S.adoptSel.delete(caseId);
+    renderTestCard(resp.report);
+    toast("已删除", `${caseId} 已移除（编号留空，不重排）`);
+  } catch (err) {
+    toast("删除失败", err.message, "err");
   }
 }
 
@@ -843,11 +1063,12 @@ function removeDistillPrompt() {
 }
 
 function testToCSV(cases) {
-  const head = ["标识", "层级", "优先级", "类型", "标题", "所属模块", "前置条件", "步骤", "预期结果", "数据要求", "设计依据"];
+  const head = ["标识", "层级", "优先级", "类型", "标题", "所属模块", "前置条件", "步骤", "预期结果", "数据要求", "设计依据", "来源"];
   const q = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
   const rows = cases.map((c) =>
     [c.case_id, TIER_NAME[c.tier] || c.tier, c.priority, c.case_type, c.title, c.target,
-     c.precondition, c.steps, c.expected, c.data_requirement, c.rationale].map(q).join(","));
+     c.precondition, c.steps, c.expected, c.data_requirement, c.rationale,
+     c.origin === "manual" ? "人工" : "AI"].map(q).join(","));
   return "\uFEFF" + [head.map(q).join(","), ...rows].join("\r\n");
 }
 
@@ -884,11 +1105,12 @@ function testToMD(cases, report) {
   groups.forEach((modCases, mod) => {
     gi += 1;
     lines.push(`### 2.${gi} ${mod}`, "",
-      "| 标识 | 层级 | 优先级 | 类型 | 标题 | 前置 | 步骤 | 预期 | 依据 |",
-      "|---|---|---|---|---|---|---|---|---|");
+      "| 标识 | 层级 | 优先级 | 类型 | 标题 | 前置 | 步骤 | 预期 | 依据 | 来源 |",
+      "|---|---|---|---|---|---|---|---|---|---|");
     modCases.forEach((c) => lines.push(
       "| " + [c.case_id, TIER_NAME[c.tier] || c.tier, c.priority, c.case_type, c.title,
-       c.precondition, c.steps, c.expected, c.rationale].map(cell).join(" | ") + " |"));
+       c.precondition, c.steps, c.expected, c.rationale,
+       c.origin === "manual" ? "人工" : "AI"].map(cell).join(" | ") + " |"));
     lines.push("");
   });
 
@@ -1289,6 +1511,8 @@ function openGate(gate, payload) {
   $("gatePill").classList.add("hidden");
   setStep(stepIdxForStage(gate === "graph_type_select" ? "graph"
     : gate === "feature_questions" ? "test" : gate), false);
+  // 终审门禁就绪：测试卡按当前状态重画，显出「＋ 添加用例」补录入口
+  if (gate === "human_review") refreshTestCard();
   refreshAdoptUI();
   updateComposer();
 }
@@ -2532,6 +2756,9 @@ async function openSession(tid) {
     S.lastSeq = Number(snap.last_seq || 0);
     const vals = snap.values || {};
     S.req = vals.requirement || {};
+    // 先定模式与阶段：产物卡渲染依赖（测试卡的「＋ 添加用例」按阶段显隐）
+    S.noCode = reqNoCode(vals.requirement);
+    S.stage = snap.stage || "clarify";
     // 先取回退锚点：气泡下方的「回到此处」要用锚点数据把消息定位到步骤
     await loadHistory();
     // 回放对话
@@ -2546,9 +2773,7 @@ async function openSession(tid) {
     if (vals.logic_graph) renderGraphCard(vals.logic_graph);
     if (vals.code_changes?.length) renderChangesCard(vals.code_changes);
     if (vals.test_report) renderTestCard(vals.test_report);
-    // 阶段（先定模式再画步骤条，仅需求模式跳过检索/生成两步）
-    S.noCode = reqNoCode(vals.requirement);
-    S.stage = snap.stage || "clarify";
+    // 画步骤条（模式与阶段已在回放前定好）
     setStep(stepIdxForStage(S.stage), false);
     if (S.stage === "done" && !(snap.next || []).length) setStep(7, false);
     // 挂起的门禁
@@ -3374,6 +3599,10 @@ function boot() {
   $("btnManualGen").onclick = genManual;
   $("btnManualBack").onclick = () => manualShowForm(true);
   $("btnManualCommit").onclick = commitManual;
+  // 评审期人工补录用例
+  $("btnAddCaseCancel").onclick = closeAddCaseModal;
+  $("btnAddCaseGen").onclick = genAddCase;
+  $("btnAddCaseSubmit").onclick = submitAddCase;
   // TC-CHECKLIST 浏览抽屉 + 详情阅读模态
   $("btnLibrary").onclick = openLibraryDrawer;
   $("btnLibDrawerClose").onclick = closeLibDrawer;
@@ -3390,6 +3619,7 @@ function boot() {
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
     if (!$("importModal").classList.contains("hidden")) { closeImportModal(); return; }
+    if (!$("addCaseModal").classList.contains("hidden")) { closeAddCaseModal(); return; }
     if (!$("manualModal").classList.contains("hidden")) { closeManualModal(); return; }
     if (!$("libraryModal").classList.contains("hidden")) { $("libraryModal").classList.add("hidden"); return; }
     if (!$("libDrawer").classList.contains("hidden")) { closeLibDrawer(); return; }

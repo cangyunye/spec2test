@@ -622,6 +622,8 @@ class GlobalState(TypedDict):
     logic_graph: Optional[LogicGraph] # 核心逻辑图
     code_changes: list[CodeChange]    # 代码修改记录
     test_report: Optional[dict]       # 测试报告
+    manual_cases: list[dict]          # 评审期人工补录用例镜像（origin=manual）；
+                                      # 驳回重做重编 case_id 后由 test_gen 据此重新追加
     
     # 3. 子系统会话映射
     opencode_sessions: OpenCodeSessions
