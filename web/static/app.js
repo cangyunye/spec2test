@@ -713,6 +713,10 @@ function renderTestCard(report) {
   table.appendChild(tbody);
   wrap.appendChild(table);
   card.appendChild(wrap);
+  // 横向滚动时给吸附的「采纳」列描分隔线，归位后去掉
+  wrap.addEventListener("scroll", () => {
+    wrap.classList.toggle("is-scrolled", wrap.scrollLeft > 0);
+  }, { passive: true });
 
   const count = h("div", "card-note", "");
   card.appendChild(count);
@@ -734,11 +738,12 @@ function renderTestCard(report) {
         Object.assign(document.createElement("td"), { colSpan: 11, className: "t-empty", textContent: "没有匹配的测试场景" }));
     }
     shown.forEach((c) => {
-      const tr = h("tr");
+      const tr = h("tr", "t-row");
       const tdAdopt = h("td");
       const adopt = h("input", "t-adopt-cb");
       adopt.type = "checkbox";
       adopt.title = "勾选采纳（= 评审通过）";
+      adopt.dataset.cid = c.case_id || "";
       adopt.checked = S.adoptSel.has(c.case_id);
       adopt.onchange = () => {
         if (adopt.checked) S.adoptSel.add(c.case_id);
@@ -767,6 +772,11 @@ function renderTestCard(report) {
       tr.appendChild(h("td", "t-title", c.title || "—"));
       [c.target, c.precondition, c.steps, c.expected, c.rationale].forEach((v) =>
         tr.appendChild(h("td", null, v || "—")));
+      // 行点击 = 宽屏查看用例详情；勾选框/删除按钮自己消费点击，不冒泡触发行打开
+      tr.onclick = (e) => {
+        if (e.target.closest("input,button")) return;
+        if (c.case_id) openCaseDetail(c.case_id);
+      };
       tbody.appendChild(tr);
     });
     if (canAddCase) {
@@ -1029,6 +1039,78 @@ async function deleteManualCase(caseId) {
   } catch (err) {
     toast("删除失败", err.message, "err");
   }
+}
+
+/* 用例详情模态：行点击打开，宽屏阅读长文本字段；弹窗内可直接切换采纳 */
+let detailCase = null;
+
+function openCaseDetail(caseId) {
+  if (!S.report) return;
+  const raw = (S.report.test_cases || []).find((x) => x && x.case_id === caseId);
+  if (!raw) return;
+  const c = normCase(raw);
+  detailCase = c;
+  $("caseDetailTitle").textContent = c.title || caseId;
+  $("caseDetailSub").textContent = `${c.case_id}${c.origin === "manual" ? " · 人工补录" : ""}`;
+  const body = $("caseDetailBody");
+  body.innerHTML = "";
+  const form = h("div", "cd-form");
+  // meta 行：层级 / 优先级 / 类型 / 所属模块 / 前置条件
+  const meta = h("div", "cd-meta");
+  const metaItem = (label, node) => {
+    const f = h("div", "cd-meta-item");
+    f.appendChild(h("span", "cd-label", label));
+    f.appendChild(node);
+    return f;
+  };
+  meta.appendChild(metaItem("层级", h("span", `tier ${c.tier || ""}`, TIER_NAME[c.tier] || c.tier || "—")));
+  meta.appendChild(metaItem("优先级", h("span", `prio ${String(c.priority).toUpperCase()}`, String(c.priority || "—").toUpperCase())));
+  meta.appendChild(metaItem("类型", h("span", "cd-val", c.case_type || "—")));
+  meta.appendChild(metaItem("所属模块", h("span", "cd-val", c.target || "—")));
+  meta.appendChild(metaItem("前置条件", h("span", "cd-val", c.precondition || "—")));
+  form.appendChild(meta);
+  // 全文块：步骤 / 预期结果 /（数据要求）/ 设计依据，pre-wrap 完整换行不截断
+  const sec = (label, text) => {
+    const f = h("div", "cd-sec");
+    f.appendChild(h("span", "cd-label", label));
+    f.appendChild(h("div", "cd-text", text || "—"));
+    return f;
+  };
+  form.appendChild(sec("步骤", c.steps));
+  form.appendChild(sec("预期结果", c.expected));
+  if (c.data_requirement) form.appendChild(sec("数据要求", c.data_requirement));
+  form.appendChild(sec("设计依据", c.rationale));
+  body.appendChild(form);
+  syncCaseDetailAdopt();
+  $("caseDetailHint").textContent = "";
+  $("caseDetailModal").classList.remove("hidden");
+}
+
+function closeCaseDetail() {
+  $("caseDetailModal").classList.add("hidden");
+  detailCase = null;
+}
+
+function syncCaseDetailAdopt() {
+  if (!detailCase) return;
+  const on = S.adoptSel.has(detailCase.case_id);
+  const btn = $("btnCaseDetailAdopt");
+  btn.textContent = on ? "✓ 已采纳（点击取消）" : "✓ 采纳此用例";
+  btn.classList.toggle("primary", !on);
+  btn.classList.toggle("ghost", on);
+  btn.disabled = !detailCase.case_id;
+}
+
+function toggleCaseDetailAdopt() {
+  if (!detailCase || !detailCase.case_id) return;
+  const id = detailCase.case_id;
+  if (S.adoptSel.has(id)) S.adoptSel.delete(id);
+  else S.adoptSel.add(id);
+  // 同步表格行内勾选框（不整卡重画，避免重置表格滚动位置）
+  const cb = S.testCardEl && S.testCardEl.querySelector(`.t-adopt-cb[data-cid="${CSS.escape(id)}"]`);
+  if (cb) cb.checked = S.adoptSel.has(id);
+  syncCaseDetailAdopt();
+  refreshAdoptUI();
 }
 
 /* 沉淀建议卡：终审通过后服务端主动询问（AI 归纳 / 手写入库 / 暂不） */
@@ -3603,6 +3685,9 @@ function boot() {
   $("btnAddCaseCancel").onclick = closeAddCaseModal;
   $("btnAddCaseGen").onclick = genAddCase;
   $("btnAddCaseSubmit").onclick = submitAddCase;
+  // 用例详情模态（行点击打开）
+  $("btnCaseDetailClose").onclick = closeCaseDetail;
+  $("btnCaseDetailAdopt").onclick = toggleCaseDetailAdopt;
   // TC-CHECKLIST 浏览抽屉 + 详情阅读模态
   $("btnLibrary").onclick = openLibraryDrawer;
   $("btnLibDrawerClose").onclick = closeLibDrawer;
@@ -3620,6 +3705,7 @@ function boot() {
     if (e.key !== "Escape") return;
     if (!$("importModal").classList.contains("hidden")) { closeImportModal(); return; }
     if (!$("addCaseModal").classList.contains("hidden")) { closeAddCaseModal(); return; }
+    if (!$("caseDetailModal").classList.contains("hidden")) { closeCaseDetail(); return; }
     if (!$("manualModal").classList.contains("hidden")) { closeManualModal(); return; }
     if (!$("libraryModal").classList.contains("hidden")) { $("libraryModal").classList.add("hidden"); return; }
     if (!$("libDrawer").classList.contains("hidden")) { closeLibDrawer(); return; }

@@ -422,10 +422,27 @@ table.t-table { width: 100%; border-collapse: collapse; font-size: 12px; }
   position: sticky; top: 0; background: var(--surface-2); z-index: 2;
   text-align: left; padding: 7px 10px; font: 600 10.5px/1.2 ui-monospace, "SF Mono", Menlo, monospace;
   letter-spacing: .08em; color: var(--ink-3); border-bottom: 1px solid var(--border);
+  white-space: nowrap;
 }
 .t-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; color: var(--ink-2); }
 .t-table td.t-title { color: var(--ink); font-weight: 500; min-width: 160px; }
 .t-table tr:hover td { background: var(--hl); }
+/* 数据行点击打开用例详情模态（ghost 行/空行无 t-row，不响应） */
+.t-table tbody tr.t-row { cursor: pointer; }
+/* 长文本列保底可读宽度：容器装不下时表格超宽，由 .t-wrap 出横向滚动条，避免步骤/预期被压成细条 */
+.t-table th:nth-child(n+7), .t-table td:nth-child(n+7) { min-width: 150px; }
+.t-table th:nth-child(9), .t-table td:nth-child(9) { min-width: 230px; }
+.t-table th:nth-child(10), .t-table td:nth-child(10) { min-width: 210px; }
+.t-table td:nth-child(2) { white-space: nowrap; }
+.t-table td:nth-child(5) { white-space: nowrap; }
+/* 「采纳」列横向吸附：左右拉表格时勾选框始终可见；出现横向滚动后才描分隔线 */
+.t-table th:first-child { left: 0; z-index: 3; }
+.t-table tbody td:first-child:not([colspan]) {
+  position: sticky; left: 0; z-index: 1; background: var(--surface);
+}
+.t-table tr:hover td:first-child:not([colspan]) { background: var(--surface-2); }
+.t-wrap.is-scrolled .t-table th:first-child,
+.t-wrap.is-scrolled .t-table td:first-child:not([colspan]) { box-shadow: inset -1px 0 0 var(--border); }
 .tier {
   display: inline-flex; align-items: center; gap: 5px; padding: 2.5px 8px;
   border-radius: 999px; font-size: 10.5px; white-space: nowrap;
@@ -476,6 +493,23 @@ table.t-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 }
 .ac-norm input { accent-color: var(--ink); }
 @media (max-width: 720px) { .ac-row { grid-template-columns: 1fr; } }
+
+/* 用例详情模态：宽屏阅读长文本字段 */
+.cd-form { display: flex; flex-direction: column; gap: 14px; }
+.cd-meta { display: flex; flex-wrap: wrap; gap: 10px 28px; }
+.cd-meta-item { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.cd-label {
+  flex-shrink: 0; font: 600 10px/1.4 ui-monospace, "SF Mono", Menlo, monospace;
+  letter-spacing: .12em; color: var(--ink-4);
+}
+.cd-val { font-size: 12.5px; color: var(--ink-2); overflow-wrap: anywhere; }
+.cd-sec { display: flex; flex-direction: column; gap: 6px; }
+.cd-text {
+  white-space: pre-wrap; overflow-wrap: break-word; word-break: break-word;
+  font-size: 13px; line-height: 1.7; color: var(--ink);
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 9px; padding: 10px 13px;
+}
 
 /* 代码检索 */
 .ctx-list { display: flex; flex-direction: column; gap: 8px; }

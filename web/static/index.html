@@ -281,6 +281,26 @@
   </div>
 </div>
 
+<!-- ── 用例详情模态（行点击打开，宽屏阅读长文本字段） ── -->
+<div id="caseDetailModal" class="gate-overlay hidden" role="dialog" aria-modal="true">
+  <div class="gate-panel">
+    <header class="gate-head">
+      <span class="gate-tag mono">CASE · 用例详情</span>
+      <div class="gate-head-text">
+        <h3 id="caseDetailTitle">用例详情</h3>
+        <p id="caseDetailSub" class="mono"></p>
+      </div>
+    </header>
+    <div class="gate-body" id="caseDetailBody"></div>
+    <footer class="gate-foot">
+      <span id="caseDetailHint" class="mono distill-hint"></span>
+      <span class="spacer"></span>
+      <button id="btnCaseDetailAdopt" class="btn primary">✓ 采纳此用例</button>
+      <button id="btnCaseDetailClose" class="btn ghost">关闭</button>
+    </footer>
+  </div>
+</div>
+
 <!-- ── 步骤回退模态（time-travel）────────────────────── -->
 <div id="revertModal" class="gate-overlay hidden" role="dialog" aria-modal="true">
   <div class="gate-panel">
