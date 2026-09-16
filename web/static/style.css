@@ -581,6 +581,9 @@ table.t-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .send:hover { opacity: .85; }
 .send:active { transform: scale(.94); }
 .send:disabled { opacity: .25; cursor: not-allowed; }
+/* 运行中：发送键就地变终止键；半途终止态：变继续键 */
+.send.stop { background: var(--err); color: #fff; font-size: 13px; }
+.send.resume { background: var(--ok, #3a9d5c); color: #fff; font-size: 14px; }
 
 /* 配置 chips（composer 上方） */
 .cfg-chips {

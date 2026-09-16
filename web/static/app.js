@@ -20,6 +20,9 @@ const S = {
   adoptSel: new Set(),      // 测试卡勾选采纳的用例 id（采纳 = 评审通过）
   pendingDistill: null,     // 评审通过后要弹的沉淀建议卡：null=不弹，数组=预勾选的采纳集
   distillPromptEl: null,    // 已插出的沉淀建议卡 DOM（防重复）
+  stopped: false,           // 流程被用户终止停在半途（服务端 resumable）：composer 显示「⏵ 继续」
+  stopping: false,          // 已请求终止、等 stopped 事件落地的过渡态
+  stopSeen: false,          // 本轮 run 收到过 stopped 事件（stream_end 时定性用）
   lib: { root: "", tree: [], exists: true, search: "" }, // TC-CHECKLIST 浏览抽屉数据（/api/library 全量缓存）
 };
 
@@ -1255,6 +1258,7 @@ function stopEvents() {
 /* 提交一次推进（用户消息 / 门禁决策）。成功后立即挂事件流。 */
 async function startRun(params) {
   if (!S.tid) return false;
+  S.stopped = false; S.stopping = false; S.stopSeen = false;  // 新 run 启动即脱离终止态
   const isGate = params.op === "gate";
   let fields = null;
   if (params.fields) { try { fields = JSON.parse(params.fields); } catch { fields = null; } }
@@ -1435,6 +1439,10 @@ function onEvent(e) {
       liveClearAll();
       openGate(e.gate, e.payload);
       break;
+    case "stopped":
+      // 用户终止落地：定性留给 stream_end（可能实为门禁挂起的竞争态）
+      S.stopSeen = true;
+      break;
     case "error": {
       const c = classifyError(e.error);
       if (c.info) addDivider("评审驳回 · 自动回退", null, true);
@@ -1458,12 +1466,21 @@ function onStreamEnd(e) {
   flushPendingLive();
   refreshSessions();
   loadHistory();  // 刷新回退锚点（本轮新落盘的步骤变为可回退点）
+  const userStopped = S.stopSeen && !S.gate && S.stage !== "done";
+  S.stopSeen = false;
+  S.stopping = false;
   if (S.gate) {
     const gateStage = S.gate === "graph_review" ? "graph_review"
       : S.gate === "graph_type_select" ? "graph"
       : S.gate === "requirement_review" ? "requirement_review"
       : S.gate === "checklist_route" || S.gate === "feature_questions" ? "test" : "review";
     setStep(stepIdxForStage(gateStage), false);
+    updateComposer();
+  } else if (userStopped) {
+    S.stopped = true;
+    setStep(stepIdxForStage(S.stage), false);
+    addDivider("⏹ 流程已终止", `停在 ${stageName(S.stage)} · 点输入框「⏵」从断点继续`);
+    toast("流程已终止", "进度已保留在断点：可从断点继续，或用「从此重来」换方向");
     updateComposer();
   } else if (S.stage === "done") {
     setStep(7, false);
@@ -2831,6 +2848,7 @@ async function openSession(tid) {
     localStorage.setItem("df-last-tid", tid);
     updateCfgBtn();
     S.gate = null; S.graph = null; S.report = null;
+    S.stopped = false; S.stopping = false; S.stopSeen = false;
     S.history = [];
     S.adoptSel = new Set();
     S.pendingDistill = null;
@@ -2916,11 +2934,17 @@ async function openSession(tid) {
     }
     // 断线/误关浏览器恢复：服务端仍在推进 → 立即接上实时进度（历史由快照回放）
     if (snap.running) {
+      S.stopped = false;
       setRunning(true);
       attachEvents();
       addSysLine("● 流程正在服务端推进，已接上实时进度", "ok");
     } else {
       setRunning(false);
+      if (snap.resumable) {
+        // 此前被用户终止停在半途：恢复「⏵ 继续」态（进度在 checkpoint，未丢）
+        S.stopped = true;
+        addSysLine("⏹ 流程此前被终止，停在半途 — 点输入框「⏵」从断点继续", "warn");
+      }
     }
     refreshSessions();
     closeSidebar();
@@ -3122,9 +3146,16 @@ function updateComposer() {
   const input = $("chatInput");
   const hint = $("composerHint");
   const send = $("btnSend");
+  send.textContent = "↑";
+  send.classList.remove("stop", "resume");
+  send.setAttribute("aria-label", "发送");
   if (S.running) {
-    hint.textContent = "流程推进中…";
-    send.disabled = true;
+    // 提交之后发送键就地变终止键：点击 → stopRun（等当前节点边界生效）
+    hint.textContent = S.stopping ? "正在终止…（等当前节点边界生效）" : "流程推进中 · 点 ■ 终止";
+    send.textContent = "■";
+    send.classList.add("stop");
+    send.setAttribute("aria-label", "终止流程");
+    send.disabled = false;
     input.disabled = true;
   } else if (S.gate) {
     hint.textContent = S.gate === "requirement_review"
@@ -3138,6 +3169,13 @@ function updateComposer() {
       : "人工验收待决策 — 请在验收窗中通过或驳回";
     send.disabled = true;
     input.disabled = true;
+  } else if (S.stopped && S.stage !== "done") {
+    hint.textContent = `流程已终止（停在 ${stageName(S.stage)}）· 点 ⏵ 从断点继续，已输入内容保留`;
+    send.textContent = "⏵";
+    send.classList.add("resume");
+    send.setAttribute("aria-label", "从断点继续");
+    send.disabled = false;
+    input.disabled = false;
   } else if (!S.tid) {
     hint.textContent = "描述需求开始全链路 · Enter 发送 · ⚙ 运行配置 · ⇪ 导入文档";
     send.disabled = !input.value.trim();
@@ -3164,12 +3202,80 @@ function autoresize() {
 function sendChat() {
   const t = $("chatInput");
   const text = t.value.trim();
-  if (!text || S.running || S.gate) return;
+  if (!text || S.running || S.gate || S.stopped) return;
   if (!S.tid) { createAndStart(text); return; }  // 单一入口：无会话时发送 = 创建会话
   t.value = ""; autoresize();
   addUserMsg(text);
   setRunning(true);
   startRun({ op: "message", text });
+}
+
+/* composer 主按钮 / Enter 的统一入口：运行中 = 终止，半途终止态 = 继续，否则发送 */
+function composerAction() {
+  if (S.running) { stopRun(); return; }
+  if (S.stopped && S.stage !== "done") { resumeRun(); return; }
+  sendChat();
+}
+
+/* 终止当前推进：只置服务端停止标志，实际停止由 SSE 的 stopped 事件确认收尾 */
+async function stopRun() {
+  if (!S.tid || S.stopping) return;
+  S.stopping = true;
+  updateComposer();
+  try {
+    const resp = await fetch(`/api/sessions/${S.tid}/stop`, { method: "POST" });
+    if (resp.status === 409) {
+      // run 已自然结束（门禁/完成/错误）：stream_end 走正常收尾，无需终止
+      toast("流程已暂停", "当前没有需要终止的推进");
+      S.stopping = false; updateComposer();
+      return;
+    }
+    if (!resp.ok) {
+      let detail = "";
+      try { detail = (await resp.text()).slice(0, 140); } catch { /* 忽略 */ }
+      toast(`终止失败（HTTP ${resp.status}）`, detail || "服务返回错误", "err");
+      S.stopping = false; updateComposer();
+      return;
+    }
+    // 置位成功：保持运行态显示与 ■ 按钮，等 stopped → stream_end 落地
+  } catch (err) {
+    toast("连接中断", "与服务器的连接失败，请检查服务是否在运行", "err");
+    S.stopping = false; updateComposer();
+  }
+}
+
+/* 从断点继续（用户终止后的续跑）：stream(None) 恢复挂起节点 */
+async function resumeRun() {
+  if (!S.tid || S.running || S.gate) return;
+  S.stopped = false;
+  setRunning(true);
+  try {
+    const resp = await fetch(`/api/sessions/${S.tid}/resume`, { method: "POST" });
+    if (resp.status === 409) {
+      // 可能另一端已续跑/有门禁待决策：接上实时进度对齐（未运行则回放后自动归位）
+      let detail = "";
+      try { detail = (await resp.text()).slice(0, 140); } catch { /* 忽略 */ }
+      toast("无法继续", detail || "服务返回 409", "err");
+      attachEvents();
+      return;
+    }
+    if (!resp.ok) {
+      let detail = "";
+      try { detail = (await resp.text()).slice(0, 140); } catch { /* 忽略 */ }
+      toast(`继续失败（HTTP ${resp.status}）`, detail || "服务返回错误", "err");
+      setRunning(false);
+      S.stopped = S.stage !== "done";
+      updateComposer();
+      return;
+    }
+  } catch (err) {
+    toast("连接中断", "与服务器的连接失败，请检查服务是否在运行", "err");
+    setRunning(false);
+    S.stopped = S.stage !== "done";
+    updateComposer();
+    return;
+  }
+  attachEvents();
 }
 
 async function createAndStart(text) {
@@ -3203,6 +3309,7 @@ function newSession() {
   stopEvents();
   S.tid = null; S.gate = null; S.graph = null; S.report = null; S.stage = "clarify";
   S.history = []; S.lastSeq = 0; S.pendingEdit = null;
+  S.stopped = false; S.stopping = false; S.stopSeen = false;
   localStorage.removeItem("df-last-tid");
   $("gateModal").classList.add("hidden");
   $("gatePill").classList.add("hidden");
@@ -3636,12 +3743,12 @@ function boot() {
     if (ev === "drop" && e.dataTransfer.files[0]) importDoc(e.dataTransfer.files[0]);
   }));
 
-  // 聊天输入（唯一入口）
+  // 聊天输入（唯一入口）：运行中 Enter/按钮 = 终止，半途终止态 = 继续
   $("chatInput").addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && (!e.shiftKey || e.metaKey || e.ctrlKey)) { e.preventDefault(); sendChat(); }
+    if (e.key === "Enter" && (!e.shiftKey || e.metaKey || e.ctrlKey)) { e.preventDefault(); composerAction(); }
   });
   $("chatInput").addEventListener("input", () => { autoresize(); updateComposer(); });
-  $("btnSend").onclick = sendChat;
+  $("btnSend").onclick = composerAction;
 
   // 门禁
   $("btnApprove").onclick = () => submitGate("approve", null);

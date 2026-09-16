@@ -70,6 +70,7 @@ class RunBus:
     subscribers: set = field(default_factory=set)   # 实时订阅者的 asyncio.Queue
     running: bool = False
     task: asyncio.Task | None = None
+    stop_requested: bool = False                    # 用户终止：线程循环在下一个流事件边界生效
 
 
 _buses: dict[str, RunBus] = {}
@@ -132,6 +133,32 @@ def _gate_pending(graph: Any, tid: str) -> bool:
     return False
 
 
+def _paused_midway(graph: Any, tid: str) -> bool:
+    """会话是否停在半途（用户终止后的暂停态）：有挂起任务、无门禁、已有进展。
+
+    协作终止 break 掉 stream 生成器后，checkpoint 的 next 为空但 tasks 残留
+    被打断的挂起任务（实测 stream(None) 会重跑该任务继续推进），所以判据是
+    tasks 而非 next。四种停点据此区分：
+      新鲜会话   tasks=[clarify_extract] 无中断  msgs=0        → 非半途（未开始）
+      对话暂停   tasks=[]                                     → 非半途（等用户发言）
+      门禁挂起   tasks 带 interrupts                          → 非半途（走门禁通道）
+      终止半途   tasks 无中断 + msgs 非空                     → 半途，可 resume
+    半途态下从消息通道再发输入会让 langgraph 从 START 重新规划整轮，
+    必须先走 resume 通道（stream(None) 恢复挂起节点）。
+    """
+    try:
+        snap = graph.get_state(_config(thread_id=tid))
+    except Exception:  # noqa: BLE001 - 状态读取失败不拦操作，交给正常流程暴露问题
+        return False
+    tasks = list(getattr(snap, "tasks", ()) or ())
+    if not tasks:
+        return False
+    for task in tasks:
+        if getattr(task, "interrupts", None):
+            return False  # 停在门禁 = 等决策，走门禁通道，不算半途
+    return bool((snap.values or {}).get("messages"))
+
+
 async def start_run(tid: str, input_msg: Any) -> dict[str, Any]:
     """把一次图推进放到后台执行，事件进 RunBus；立即返回。
 
@@ -143,6 +170,7 @@ async def start_run(tid: str, input_msg: Any) -> dict[str, Any]:
         return {"accepted": False, "reason": "该会话正在推进中"}
     await lock.acquire()
     bus.running = True
+    bus.stop_requested = False  # 新 run 不继承上一轮的终止请求
     bus.buffer.clear()  # seq 继续递增，旧游标依然有效
     graph = build_graph_with_providers()
     bus.task = asyncio.create_task(_run_graph(graph, tid, input_msg, bus, lock))
@@ -155,15 +183,23 @@ async def _run_graph(graph: Any, tid: str, input_msg: Any, bus: RunBus, lock: as
     q: asyncio.Queue = asyncio.Queue()
 
     def run() -> None:
+        stopped = False
         try:
             for event in events_from_stream(
                 graph.stream(input_msg, _config(thread_id=tid),
                              stream_mode=["updates", "messages", "custom"])
             ):
+                if bus.stop_requested:
+                    # 协作式终止：break 关闭 stream 生成器，checkpoint 停在最后
+                    # 一次完整 superstep——与进程崩溃后的重启续跑同构，可 resume。
+                    stopped = True
+                    break
                 q.put_nowait(event)
         except Exception as e:  # noqa: BLE001 — 事件流内任何异常都要落到前端
             q.put_nowait({"type": "error", "error": str(e)})
         finally:
+            if stopped:
+                q.put_nowait({"type": "stopped"})
             q.put_nowait({"type": "stream_end", "stage": "paused"})
 
     thread_task = asyncio.create_task(asyncio.to_thread(run))
@@ -342,12 +378,18 @@ def session_state(tid: str) -> dict[str, Any]:
     except Exception as e:
         raise HTTPException(404, f"会话不存在或读取失败: {e}")
     bus = _bus(tid)
+    snap_tasks = list(getattr(snap, "tasks", ()) or ())
+    gate_wait = any(getattr(t, "interrupts", None) for t in snap_tasks)
+    resumable = (bool(snap_tasks) and not gate_wait
+                 and bool((snap.values or {}).get("messages"))
+                 and not _session_running(tid))
     return {
         "thread_id": tid,
         "stage": (snap.values or {}).get("current_stage", "clarify"),
         "next": list(snap.next or []),
         "values": _serialize_state(snap.values),
         "running": _session_running(tid),
+        "resumable": resumable,  # 停在半途（用户终止的暂停态）：前端恢复「⏵ 继续」
         "last_seq": bus.seq,
     }
 
@@ -1093,7 +1135,44 @@ async def send_message(tid: str, body: SendMessage) -> dict[str, Any]:
         raise HTTPException(404, f"会话不存在: {tid}")
     if _gate_pending(build_graph_with_providers(), tid):
         raise HTTPException(409, "当前有等待确认的门禁，请先在门禁卡片上完成选择，再继续对话")
+    if _paused_midway(build_graph_with_providers(), tid):
+        raise HTTPException(409, "流程已终止在半途：请先点输入框的「⏵ 继续」从断点续跑，再发送消息")
     result = await start_run(tid, {"messages": [HumanMessage(content=body.text)]})
+    if not result.get("accepted"):
+        raise HTTPException(409, result.get("reason", "该会话正在推进中"))
+    return result
+
+
+@app.post("/api/sessions/{tid}/stop")
+async def stop_session(tid: str) -> dict[str, Any]:
+    """用户终止当前推进：协作式，在下一个流事件边界生效，断点留在 checkpoint。
+
+    只置停止标志立即返回，实际停止由 SSE 的 stopped 事件确认。门禁等待期
+    没有 run 在跑，不接受终止（等价能力是门禁驳回）。
+    """
+    if not _thread_exists(tid):
+        raise HTTPException(404, f"会话不存在: {tid}")
+    bus = _bus(tid)
+    if not _session_running(tid):
+        raise HTTPException(409, "当前没有正在推进的流程")
+    bus.stop_requested = True
+    return {"accepted": True, "stopping": True}
+
+
+@app.post("/api/sessions/{tid}/resume")
+async def resume_session(tid: str) -> dict[str, Any]:
+    """从断点继续推进（用户终止后的续跑）：stream(None) 恢复挂起节点。
+
+    与服务重启自动续跑同机制；门禁挂起和未开始/已完成的会话不适用。
+    """
+    if not _thread_exists(tid):
+        raise HTTPException(404, f"会话不存在: {tid}")
+    graph = build_graph_with_providers()
+    if _gate_pending(graph, tid):
+        raise HTTPException(409, "当前有等待确认的门禁，请先在门禁卡片上完成选择，再继续推进")
+    if not _paused_midway(graph, tid):
+        raise HTTPException(409, "流程不在半途：已完成或尚未开始，无需继续")
+    result = await start_run(tid, None)
     if not result.get("accepted"):
         raise HTTPException(409, result.get("reason", "该会话正在推进中"))
     return result
