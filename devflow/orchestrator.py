@@ -239,7 +239,14 @@ def _route_after_validate(state: GlobalState) -> str:
 
 
 def _route_after_build_question(state: GlobalState) -> str:
-    """追问节点写完 Human 侧提示词后：有可重试错就 retry 本节点，否则 END。"""
+    """追问节点写完 Human 侧提示词后：有可重试错就 retry 本节点，否则 END。
+
+    契约：clarify_build_question 在所有返回路径清空 last_error*（其追问自带
+    确定性兜底文案，失败也不留错误标志），因此实际总是 END；retry 分支仅当
+    节点未来真的写出自身可重试错时生效。若节点不清标志，上游 clarify_extract
+    重试耗尽残留的可重试 last_error 会让本路由幻影重试——节点不递增自身
+    retry_count，cap 永不触发，无限循环。
+    """
     return _error_retry_or(state, "clarify_build_question", fallback_label="__end__")
 
 

@@ -614,6 +614,16 @@ def clarify_build_question(state: GlobalState) -> dict[str, Any]:
     return asyncio.run(clarify_build_question_async(state))
 
 
+# 本节点所有返回路径都必须带上：追问自带确定性兜底文案（LLM 失败退回缺失字段
+# 模板），任何路径都不得把错误标志留给 _route_after_build_question——否则上游
+# 残留的可重试 last_error 会触发幻影重试无限循环（节点不递增自身 retry_count）。
+_ERROR_FLAGS_CLEARED = {
+    "last_error": None,
+    "last_error_code": None,
+    "last_error_retryable": False,
+}
+
+
 async def clarify_build_question_async(state: GlobalState) -> dict[str, Any]:
     """异步入口：根据 missing_fields 与 clarify_mode 生成追问，作为 AIMessage 追加到 messages。
 
@@ -627,7 +637,7 @@ async def clarify_build_question_async(state: GlobalState) -> dict[str, Any]:
     mode = state.get("clarify_mode") or "normal"
 
     if not missing:
-        return {}
+        return dict(_ERROR_FLAGS_CLEARED)
 
     if mode in ("brainstorm", "grill"):
         field_key, field_entry = pick_dialog_field(missing)
@@ -688,6 +698,13 @@ async def clarify_build_question_async(state: GlobalState) -> dict[str, Any]:
     return {
         "messages": [AIMessage(content=text)],
         "clarify_mode_prompt": mode_prompt,
+        # 错误标志就地清零（⚠️ 提示上面已按输入态渲染完毕，不受影响）。本节点自带
+        # 确定性兜底文案（LLM 失败退回缺失字段模板），无需图级重试；若不清，上游
+        # clarify_extract 重试耗尽后 fallback="ok" 残留的可重试 last_error 会被
+        # _route_after_build_question 误读为「本节点失败」→ 幻影重试：节点从不递增
+        # 自己的 retry_count，cap 永不触发 → 无限循环（死 provider + 熔断开启下
+        # 实测 2000+ checkpoint 刷屏）。
+        **_ERROR_FLAGS_CLEARED,
     }
 
 

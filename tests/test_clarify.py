@@ -15,7 +15,7 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from devflow.config import settings
-from devflow.errors import CLARIFY_LOOP_EXHAUSTED, LlmRefusedError
+from devflow.errors import CLARIFY_LOOP_EXHAUSTED, DevFlowError, LlmRefusedError
 from devflow.nodes.clarify import (
     clarify_build_question_async,
     clarify_extract_async,
@@ -24,7 +24,7 @@ from devflow.nodes.clarify import (
     pick_dialog_field,
 )
 from devflow.nodes.compress import compress_messages
-from devflow.orchestrator import _route_after_validate
+from devflow.orchestrator import _route_after_build_question, _route_after_validate
 from devflow.schemas import empty_requirement
 
 
@@ -90,10 +90,13 @@ class TestClarifyLoopLimit:
 class TestBuildQuestion:
     @pytest.mark.asyncio
     async def test_c5_no_missing_returns_empty(self):
-        """没有缺失字段 → 不追加消息、不调 LLM。"""
+        """没有缺失字段 → 不追加消息、不调 LLM；顺手清错误标志（防幻影重试）。"""
         state = {"missing_fields": [], "requirement": empty_requirement()}
         out = await clarify_build_question_async(state)  # type: ignore[arg-type]
-        assert out == {}
+        assert "messages" not in out
+        assert out["last_error"] is None
+        assert out["last_error_code"] is None
+        assert out["last_error_retryable"] is False
 
     @pytest.mark.asyncio
     async def test_c6_success_appends_aimessage(self, monkeypatch):
@@ -167,6 +170,63 @@ class TestBuildQuestion:
         content = msgs[0].content
         assert "edge_cases" in content and "io_constraints.input" in content
         assert "LLM.REFUSED" in content  # 降级文本带错误码便于诊断
+
+    @pytest.mark.asyncio
+    async def test_stale_extract_error_cleared_no_phantom_retry(self, monkeypatch):
+        """回归：上游 clarify_extract 重试耗尽残留的可重试 last_error 必须就地清空。
+
+        历史缺陷：build_question 吞掉自己的 LLM 异常（降级模板文案）却不写
+        last_error 也不递增自身 retry_count，路由 _error_retry_or 读到上游残留的
+        可重试错误 → count['clarify_build_question'] 恒 0 ≤ cap → 幻影重试本节点
+        → 节点继续吞错 → 无限循环（死 provider + 熔断开启下实测 2000+ checkpoint
+        对话刷屏）。
+        """
+        async def boom(**kwargs):
+            raise DevFlowError("HTTP.NETWORK", "Connection error", retryable=True)
+
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_text", boom)
+        state = {
+            "missing_fields": ["project_root"],
+            "requirement": empty_requirement(),
+            "last_error": "[clarify_extract:HTTP.NETWORK] Connection error",
+            "last_error_code": "clarify_extract:HTTP.NETWORK",
+            "last_error_retryable": True,
+        }
+        out = await clarify_build_question_async(state)  # type: ignore[arg-type]
+        # 错误标志清零（循环杀手）
+        assert out["last_error"] is None
+        assert out["last_error_code"] is None
+        assert out["last_error_retryable"] is False
+        # ⚠️ 抽取失败提示按输入态照常渲染（用户须知回答没被写入）
+        assert "⚠️ 上一轮回答的需求抽取失败" in out["messages"][0].content
+        assert "clarify_extract:HTTP.NETWORK" in out["messages"][0].content
+        # 合并态过路由：必须 END 而不是 retry（循环杀手断言）
+        merged = {**state, **out}
+        assert _route_after_build_question(merged) == "__end__"
+
+    @pytest.mark.asyncio
+    async def test_stale_error_no_missing_also_cleared(self):
+        """无缺口路径同样清残留错误标志（防任何路径漏出幻影重试）。"""
+        state = {
+            "missing_fields": [],
+            "requirement": empty_requirement(),
+            "last_error_code": "clarify_extract:HTTP.NETWORK",
+            "last_error_retryable": True,
+            "last_error": "x",
+        }
+        out = await clarify_build_question_async(state)  # type: ignore[arg-type]
+        assert "messages" not in out
+        assert out["last_error_code"] is None
+        assert out["last_error_retryable"] is False
+        merged = {**state, **out}
+        assert _route_after_build_question(merged) == "__end__"
+
+    def test_route_contract_retry_only_for_own_error(self):
+        """路由契约：节点写自身可重试错 → retry（历史形态保留）；无错 → END。"""
+        assert _route_after_build_question(
+            {"last_error_code": "LLM.X", "last_error_retryable": True}
+        ) == "retry"
+        assert _route_after_build_question({}) == "__end__"
 
 
 # ═══════════════════════════════════════════════════════════════════
