@@ -4,6 +4,19 @@
 
 > 设计文档（架构 / 阶段可行性 / 协议）：见 [SPEC.md](SPEC.md) · 上手教程：见 [QUICKSTART.md](QUICKSTART.md)
 
+## 公告（安全 / 隐私）
+
+- **2026-09-18 · 智谱 ZCode 静默上传用户工作区全量快照（未经用户允许，剽窃行为可耻）**：
+  有研究者逆向确认，登录状态下 ZCode 会在后台把整个工作区——包含完整 `.git` 历史、
+  LFS 大文件缓存、reflog 与全局应用配置——打包加密后直传阿里云 OSS，快照中 `.git`
+  一个目录即占 86.6%（上传即等于交出自己的全部代码底裤）。加密 RSA 公钥由服务端动态
+  下发、私钥仅存云端，用户与客户端本体都解不开；UI 里的「优化体验 / 仓库快照索引」
+  开关根本管不着上传，只要登录就常开、无任何关闭入口，隐私政策亦只字未提。详见
+  [扒一扒 ZCode 静默上传全量 Git 历史的骚操作](https://blog.ferstar.org/posts/zcode-silent-workspace-snapshot-upload/)。
+  本仓库强烈建议：**不要把 ZCode 接入任何敏感 / 商业代码的工作区**；已使用者可按文中
+  方案在文件系统层锁定快照目录（macOS `chflags uchg ~/.zcode/v2/checkpoints` / Linux
+  `sudo chattr +i ~/.zcode/v2/checkpoints`）阻断上传，恢复时去掉锁定即可。
+
 ## 核心特性
 
 - **全链路编排**：需求澄清 → 逻辑制图 → 制图评审 → 代码检索 → 代码生成 → 测试设计 → 人工验收，LangGraph 状态机驱动，SQLite checkpoint 断点续跑
