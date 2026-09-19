@@ -60,6 +60,10 @@ SiliconFlow 等 OpenAI 兼容服务的 Key（不配置则 Mock 演示模式）�
 直接上传清单文档入库）；确认后把检查清单注入用例设计，用例逐条采纳即评审通过，
 评审通过后可把用例（AI 归纳或手写）沉淀回库。
 
+**清单库独立分发**：库内容同时发布在 `tc-checklist` 孤儿分支（与 main 无共同历史、独立演进，
+树里只有清单库）——`git clone -b tc-checklist --depth 1 <url>` 后把克隆目录直接当
+`DEVFLOW_CHECKLIST_ROOT` 使用；运行库更新后跑 `python scripts/publish_checklist.py --push` 重新发布。
+
 **库根解析优先级**：环境变量 `DEVFLOW_CHECKLIST_ROOT` > `<project_root>/.checklist`（存在时）
 > `data/checklist/`（全局，仅需求模式也能用）。
 

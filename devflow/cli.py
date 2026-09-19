@@ -458,8 +458,8 @@ app.add_typer(checklist_app, name="checklist")
 
 @checklist_app.command("init")
 def checklist_init(
-    root: Path = typer.Option(
-        Path(""), "--root", help="库根目录；缺省按 DEVFLOW_CHECKLIST_ROOT → data/checklist 解析"
+    root: Path | None = typer.Option(
+        None, "--root", help="库根目录；缺省按 DEVFLOW_CHECKLIST_ROOT → data/checklist 解析"
     ),
     no_example: bool = typer.Option(False, "--no-example", help="不生成 payment 示例业务"),
     no_general: bool = typer.Option(
@@ -472,7 +472,7 @@ def checklist_init(
     """
     from .checklist.scaffold import init_library
 
-    target = root if str(root) else None
+    target = root if root is not None else None
     written = init_library(
         target, with_example=not no_example, with_general=not no_general
     )
@@ -483,13 +483,13 @@ def checklist_init(
 
 @checklist_app.command("list")
 def checklist_list(
-    root: Path = typer.Option(Path(""), "--root", help="库根目录；缺省按默认优先级解析"),
+    root: Path | None = typer.Option(None, "--root", help="库根目录；缺省按默认优先级解析"),
 ) -> None:
     """列示库全树：业务 → 子业务（描述 / 关键词 / 条目数）。"""
     from .checklist.library import checklist_tree, resolve_root
 
     # --root 传的是库根本身；缺省时才按优先级自动解析
-    lib_root = Path(str(root)) if str(root) else resolve_root("")
+    lib_root = Path(root) if root is not None else resolve_root("")
     tree = checklist_tree(lib_root)
     if not tree:
         console.print(
@@ -521,12 +521,12 @@ def checklist_list(
 @checklist_app.command("show")
 def checklist_show(
     business: str = typer.Argument(..., help="业务/子业务相对路径，如 payment 或 payment/refund"),
-    root: Path = typer.Option(Path(""), "--root", help="库根目录；缺省按默认优先级解析"),
+    root: Path | None = typer.Option(None, "--root", help="库根目录；缺省按默认优先级解析"),
 ) -> None:
     """查看某业务目录下的 scenario.md 与 checklist.md 原文。"""
     from .checklist.library import CHECKLIST_FILE, SCENARIO_FILE, resolve_root, validate_rel_dir
 
-    lib_root = Path(str(root)) if str(root) else resolve_root("")
+    lib_root = Path(root) if root is not None else resolve_root("")
     rel = validate_rel_dir(business)
     if rel is None:
         console.print(f"[red]×[/] 非法的业务路径: {business!r}")
