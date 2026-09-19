@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from pathlib import Path
 
 import pytest
@@ -145,6 +146,12 @@ async def test_mock_testgen_uses_logic_graph_edges():
 # ═══════════════════════════════════════════════════════════════════
 # CodeGraph Provider
 # ═══════════════════════════════════════════════════════════════════
+# _ensure_env 会校验 bin_path 存在（shutil.which / Path.exists）。这些用例已
+# monkeypatch 掉 create_subprocess_exec，二进制不会真被执行，只需一个各平台都
+# 存在的路径；用当前解释器自身，避免硬编码 POSIX 的 /bin/sh（Windows 上不存在）。
+FAKE_BIN = sys.executable
+
+
 def test_codegraph_field_aliases_normalize():
     """字段别名处理：CodeGraph 不同版本字段名漂移，_normalize_hit 应该兜住。"""
     a = _normalize_hit(
@@ -191,11 +198,7 @@ async def test_codegraph_cli_args_for_symbol_query(monkeypatch, tmp_path: Path):
         return FakeProc(0, b"[]", b"")
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subproc_exec)
-    # bin_path 指向 /nonexistent 但因为我们 monkey patch 掉 create_subprocess_exec，
-    # 实际不会执行；但 shutil.which 在 _ensure_env 会看 bin_path 是否存在，
-    # 所以给一个肯定存在的路径
-    bin_real = Path("/bin/sh")
-    p = CodeGraphProvider(bin_path=str(bin_real))
+    p = CodeGraphProvider(bin_path=FAKE_BIN)
     await p.search(
         str(tmp_path),
         "unused",
@@ -251,7 +254,7 @@ async def test_codegraph_cli_args_for_search_query(monkeypatch, tmp_path: Path):
         return FakeProc(0, b"[]", b"")
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subproc_exec)
-    p = CodeGraphProvider(bin_path="/bin/sh")
+    p = CodeGraphProvider(bin_path=FAKE_BIN)
     out = await p.search(
         str(tmp_path),
         "jwt 登录入口",
