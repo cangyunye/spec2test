@@ -1510,6 +1510,36 @@ const GATE_META = {
   feature_questions: { n: 0, tag: "GATE · 拆分确认", title: "测试拆分完成：确认功能点与待定问题" },
 };
 
+/* 门禁弹窗里的「改上游重来」直达按钮（需求确认门禁自带字段编辑，无需回退入口）。
+   target = 回退锚点节点：其后所有产出作废并按新需求重跑——
+   graph_type_select 锚点保留已选图种类，从制图开始重跑。 */
+const GATE_REEDIT = {
+  graph_type_select: { target: "requirement_review", label: "⟲ 修改需求",
+    title: "回到需求确认刚完成的时点，就地修改需求后重选图种类" },
+  graph_review: { target: "graph_type_select", label: "⟲ 修改需求重制图",
+    title: "回到选定图种类的时点，就地修改需求后重新制图（当前评审与图作废）" },
+  checklist_route: { target: "graph_type_select", label: "⟲ 改需求重制图",
+    title: "需求有变？回到制图前就地改需求，重新制图与测试设计（当前清单确认作废）" },
+  feature_questions: { target: "graph_type_select", label: "⟲ 改需求重跑",
+    title: "需求有变？回到制图前就地改需求，重跑制图、清单与测试设计（当前拆分作废）" },
+  human_review: { target: "graph_type_select", label: "⟲ 改需求重跑",
+    title: "需求有变？回到制图前就地改需求，重跑制图到测试全链路（当前产物作废）" },
+};
+
+/* 从门禁弹窗发起回退：门禁收起到悬浮签（取消回退时仍可回到决策），
+   回退提交成功后 openSession 会按新分支重建、一并清掉门禁态。 */
+function gateReedit() {
+  const t = GATE_REEDIT[S.gate];
+  if (!t) return;
+  const anchor = anchorForNode(t.target);
+  if (!anchor) {
+    toast("该步骤暂无可回退的存档", "流程还没执行到这一步，或存档尚未生成", "err");
+    return;
+  }
+  closeGateToPeek();
+  openRevertModal(anchor);
+}
+
 const GRAPH_TYPE_ICONS = { flowchart: "⎯>", sequence: "⇄", state: "◉", er: "▤", journey: "☺" };
 const GRAPH_TYPE_LABELS = { flowchart: "流程图", sequence: "时序图", state: "状态图", er: "ER 图", journey: "用户旅程图" };
 
@@ -1554,6 +1584,11 @@ function openGate(gate, payload) {
   $("gateCommentWrap").classList.add("hidden");
   $("btnGateSubmit").classList.add("hidden");
   $("btnGatePeek").classList.add("hidden");
+  // 「改上游重来」直达按钮：需求确认门禁自带字段编辑不提供，其余门禁按表配置
+  const reedit = GATE_REEDIT[gate];
+  $("btnGateReedit").textContent = reedit ? reedit.label : "";
+  $("btnGateReedit").title = reedit ? reedit.title : "";
+  $("btnGateReedit").classList.toggle("hidden", !reedit);
 
   const body = $("gateBody");
   body.innerHTML = "";
@@ -2253,6 +2288,7 @@ function closeGateToPeek() {
     S.gate === "requirement_review" ? "需求确认待决策" :
     S.gate === "graph_type_select" ? "图种类待选择" :
     S.gate === "checklist_route" ? "清单路由待确认" :
+    S.gate === "feature_questions" ? "拆分确认待决策" :
     S.gate === "graph_review" ? "制图评审待决策" : "人工验收待决策";
   $("gatePill").classList.remove("hidden");
 }
@@ -3132,6 +3168,23 @@ function editAndResend(msgEl, text) {
   };
   const pre = messageRevertTarget(msgEl);
   if (!pre) {
+    // 第一条消息之前没有存档点。发送通道被门禁/半途终止锁死时「直接发送」做不到，
+    // 不把原文放回输入框误导——指到真实可用的回头路
+    if (S.gate === "requirement_review") {
+      toast("需求确认待决策", "在确认窗中直接修改字段，或「驳回，先补充需求」后重新描述", "err");
+      return;
+    }
+    if (S.gate) {
+      const t = GATE_REEDIT[S.gate];
+      toast("门禁待决策，暂不能重发历史消息",
+        `点右下角悬浮签回到门禁弹窗，用「${t ? t.label : "⟲ 从此重来"}」回退改需求；或先完成决策再编辑`, "err");
+      return;
+    }
+    if (S.stopped && S.stage !== "done") {
+      toast("流程终止在半途，暂不能重发历史消息",
+        "先点输入框「⏵ 继续」跑完当前轮，或用步骤分隔线的「⟲ 从此重来」回退", "err");
+      return;
+    }
     backToComposer();
     toast("已放回输入框", "这条消息之前没有存档点；修改后直接发送即可");
     return;
@@ -3165,8 +3218,8 @@ function updateComposer() {
       : S.gate === "checklist_route"
       ? "业务清单路由待确认 — 请在弹窗中勾选要注入的检查清单"
       : S.gate === "graph_review"
-      ? "制图评审待决策 — 请在评审窗中通过或驳回"
-      : "人工验收待决策 — 请在验收窗中通过或驳回";
+      ? "制图评审待决策 — 弹窗内通过 / 驳回重制图，或「⟲ 修改需求重制图」改需求"
+      : "人工验收待决策 — 弹窗内通过 / 驳回，或「⟲ 改需求重跑」回退改需求";
     send.disabled = true;
     input.disabled = true;
   } else if (S.stopped && S.stage !== "done") {
@@ -3766,6 +3819,7 @@ function boot() {
     submitGate("reject", c || null);
   };
   $("btnGatePeek").onclick = closeGateToPeek;
+  $("btnGateReedit").onclick = gateReedit;
   $("gatePill").onclick = reopenGate;
   // 步骤回退（time-travel）
   $("btnRevertCancel").onclick = () => {

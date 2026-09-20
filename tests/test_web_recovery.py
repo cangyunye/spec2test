@@ -189,3 +189,61 @@ def test_revert_unknown_checkpoint_is_400(client):
     tid = _create_session(client)
     r = client.post(f"/api/sessions/{tid}/revert", json={"checkpoint_id": "nonexistent"})
     assert r.status_code == 400
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 制图评审门禁挂起时的回退（「改需求重制图」按钮的后端契约）
+# ═══════════════════════════════════════════════════════════════════
+
+
+def _drive_to_graph_review_gate(client: TestClient, tid: str) -> None:
+    """需求确认 → 通过；选图种类 → 自动制图；停在制图评审门禁。"""
+    _drive_to_review_gate(client, tid)
+    r = client.post(f"/api/sessions/{tid}/gates", json={"decision": "approve"})
+    assert r.status_code == 200
+    _wait_idle(client, tid)
+    r = client.post(f"/api/sessions/{tid}/gates", json={"decision": "flowchart"})
+    assert r.status_code == 200
+    _wait_idle(client, tid)
+    snap = client.get(f"/api/sessions/{tid}").json()
+    assert "graph_review" in snap["next"], f"应停在制图评审门禁: {snap['next']}"
+
+
+def test_message_409_while_graph_review_gate_pending(client):
+    """门禁挂起时普通消息被 409：这正是用户「总被要求先审批」的根源（前端须引导到回退入口）。"""
+    tid = _create_session(client)
+    _drive_to_graph_review_gate(client, tid)
+    r = client.post(f"/api/sessions/{tid}/messages", json={"text": "我想改需求重新澄清"})
+    assert r.status_code == 409
+
+
+def test_revert_at_graph_review_gate_edits_requirement_and_reruns_graph(client):
+    """制图评审门禁挂起时回退到选图种类时点：门禁分支废弃、就地改需求、重跑制图后再次到门禁。
+
+    前端「⟲ 修改需求重制图」依赖的完整契约：
+      1. 门禁挂起（非 running）时 /revert 不被拦；
+      2. 续跑重跑 graph_generate（不会 resume 旧门禁的 interrupt）；
+      3. fields 就地修改生效，重制图后停在新一轮制图评审门禁；
+      4. 旧分支锚点保留，可再反悔。
+    """
+    tid = _create_session(client)
+    _drive_to_graph_review_gate(client, tid)
+    steps_before = client.get(f"/api/sessions/{tid}/history").json()["steps"]
+    anchor = next(s for s in steps_before if s["node"] == "graph_type_select")
+
+    r = client.post(f"/api/sessions/{tid}/revert", json={
+        "checkpoint_id": anchor["checkpoint_id"],
+        "fields": {"project_context": "回退时改掉的项目背景"},
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["next"] == ["graph_generate"], f"回退后应重跑制图而非恢复旧门禁: {body['next']}"
+
+    _wait_idle(client, tid)
+    snap = client.get(f"/api/sessions/{tid}").json()
+    assert snap["values"]["requirement"]["project_context"] == "回退时改掉的项目背景", "就地改需求应生效"
+    assert snap["values"].get("logic_graph"), "重制图应产出新逻辑图"
+    assert "graph_review" in snap["next"], f"重制图后应停在新一轮制图评审门禁: {snap['next']}"
+
+    steps_after = client.get(f"/api/sessions/{tid}/history").json()["steps"]
+    assert any(s["checkpoint_id"] == anchor["checkpoint_id"] for s in steps_after), "旧分支锚点应保留"
