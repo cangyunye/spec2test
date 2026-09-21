@@ -207,6 +207,8 @@ python3 -m devflow.cli spec requirements.docx --out ./artifacts
 - **需求文档信息不足时由 AI 脑补**：缺口字段由 LLM 给出最佳推断值，来源标 `inferred`，报告中逐字段标注「AI 脑补的最佳选择」（LLM 全挂走 mock 兜底时另行警示）；
 - **产物落盘 `./artifacts/<thread_id>/`**：`casecraft-tests-<tid>.csv`（11 列用例表，Excel 可直接打开）、`casecraft-spec-<tid>.md`（全过程报告：需求清单+脑补标注、门禁自动决策时间线、逻辑图、用例明细、测试执行结果）、以及 `requirement.json` / `logic_graph.*` 等结构化产物；
 - **不写 checklist 库**：跳过了人工用例过滤步骤，本会话产物不会沉淀进 `.checklist`；
+  若想复用这批用例，可 `devflow cases import artifacts/<tid>/casecraft-tests-<tid>.csv`
+  回灌用例库，再 `devflow checklist distill --business <目录>` 独立沉淀入库；
 - 会话照常落 checkpoint，事后可 `devflow resume <thread_id> --full` 回看与继续。
 
 ## 6. 常见问题

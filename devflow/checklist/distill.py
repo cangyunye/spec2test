@@ -9,10 +9,17 @@ from __future__ import annotations
 import json
 import logging
 from datetime import date
+from pathlib import Path
 from typing import Any, Optional
 
 from ..llm_client import invoke_json
-from .library import parse_frontmatter
+from .library import (
+    CHECKLIST_FILE,
+    SCENARIO_FILE,
+    parse_frontmatter,
+    resolve_root,
+    validate_rel_dir,
+)
 from .models import (
     CHECKLIST_CATEGORIES,
     DistillOutput,
@@ -227,9 +234,67 @@ def merge_sources(existing_checklist_md: str, new_source: str) -> list[str]:
     return out
 
 
+# ═══════════════════════════════════════════════════════════════════
+# 沉淀预览核心（Web 与 CLI 共用：会话用例 / 用例库勾选 / 文档导入皆汇于此）
+# ═══════════════════════════════════════════════════════════════════
+
+
+async def distill_preview_core(
+    cases: list[dict[str, Any]],
+    business: dict[str, Any] | None,
+    *,
+    doc_text: str | None = None,
+    project_root: str = "",
+    checklist_root: Optional[Path] = None,
+    source_label: str = "",
+) -> dict[str, Any]:
+    """归纳预览（不落盘）：create/merge 判定 + LLM 归纳 + 渲染 scenario/checklist 两份 markdown。
+
+    cases 走用例归纳；doc_text 给定时走文档/手写规范化。目标目录已有 checklist.md
+    时自动 merge（旧清单原文一并交给 LLM 去重合并），sources 累积不丢溯源。
+    rel_dir 非法抛 ValueError；LLM 失败向上抛——沉淀是显式动作，失败要可见。
+    checklist_root 显式给定时优先（CLI --root），否则按库根优先级解析。
+    """
+    biz = business or {}
+    rel_dir = validate_rel_dir(str(biz.get("rel_dir") or ""))
+    if not rel_dir:
+        raise ValueError("业务类型目录名非法（限英文/数字/连字符，可含 / 子业务）")
+    root = checklist_root if checklist_root is not None else resolve_root(project_root)
+    existing_scenario = ""
+    existing_checklist = ""
+    target = root / rel_dir
+    if (target / CHECKLIST_FILE).is_file():
+        existing_checklist = (target / CHECKLIST_FILE).read_text(encoding="utf-8")
+    if (target / SCENARIO_FILE).is_file():
+        existing_scenario = (target / SCENARIO_FILE).read_text(encoding="utf-8")
+    mode = "merge" if existing_checklist else "create"
+
+    biz_input = {
+        "rel_dir": rel_dir,
+        "name": str(biz.get("name") or ""),
+        "description": str(biz.get("description") or ""),
+    }
+    if doc_text is not None:
+        out = await distill_from_doc(doc_text, biz_input, existing_scenario, existing_checklist)
+    else:
+        out = await distill_from_cases(cases or [], biz_input, existing_scenario, existing_checklist)
+
+    return {
+        "mode": mode,
+        "rel_dir": rel_dir,
+        "scenario_md": render_scenario_md(out),
+        "checklist_md": render_checklist_md(
+            out, business=rel_dir, sources=merge_sources(existing_checklist, source_label)
+        ),
+        "merge_notes": out.merge_notes,
+        "case_count": len(cases or []),
+    }
+
+
 __all__ = [
     "distill_from_cases",
     "distill_from_doc",
+    "distill_preview_core",
     "merge_sources",
     "parse_checklist_meta",
     "render_checklist_md",

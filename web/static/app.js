@@ -23,7 +23,8 @@ const S = {
   stopped: false,           // 流程被用户终止停在半途（服务端 resumable）：composer 显示「⏵ 继续」
   stopping: false,          // 已请求终止、等 stopped 事件落地的过渡态
   stopSeen: false,          // 本轮 run 收到过 stopped 事件（stream_end 时定性用）
-  lib: { root: "", tree: [], exists: true, search: "" }, // TC-CHECKLIST 浏览抽屉数据（/api/library 全量缓存）
+  lib: { root: "", tree: [], exists: true, search: "",       // TC-CHECKLIST 浏览抽屉数据（/api/library 全量缓存）
+         tab: "checklist", cases: [], threads: [], casesRoot: "" }, // 用例库页签（/api/case-library）
 };
 
 /* 是否提供项目代码：true=代码模式（检索/生成）；false=仅需求模式（直接出端到端用例） */
@@ -1855,6 +1856,8 @@ function gateChecklistEmptyBody(p) {
     "有现成的业务检查清单（内部 wiki 页面、验收清单、历史用例文档）？上传后 AI 会按库规范归纳入库，确认后即可注入本单用例设计。"));
   const actions = h("div", "cl-empty-actions");
   actions.appendChild(miniBtn("📤 上传清单文档入库", () => openImportModal("gate"), "支持 .md / .txt / .docx"));
+  actions.appendChild(miniBtn("☰ 从用例库沉淀清单", () => openLibraryDrawer("cases"),
+    "从已采纳用例库勾选用例，AI 归纳为清单条目入库"));
   actions.appendChild(miniBtn("☰ 查看 TC-CHECKLIST", () => openLibraryDrawer(), "浏览当前 TC-CHECKLIST"));
   note.appendChild(actions);
   wrap.appendChild(note);
@@ -1877,7 +1880,9 @@ function showLibDrawer() {
   return body;
 }
 
-async function openLibraryDrawer() {
+async function openLibraryDrawer(tab) {
+  // onclick 直绑时首个参数是点击事件，只认字符串页签名
+  setLibTab(typeof tab === "string" ? tab : "checklist");
   showLibDrawer();
   // 首次（输入为空时）预填库根：会话 project_root > 上次使用（与 /library 页共用存储）> 留空（全局默认）
   if (!$("libDrawerRootInput").value.trim()) {
@@ -1887,11 +1892,25 @@ async function openLibraryDrawer() {
     $("libDrawerRootInput").value = sessionRoot || (localStorage.getItem("df-lib-root") || "");
   }
   loadLibDrawerRoots();
-  await loadLibraryDrawer();
+  if (S.lib.tab === "cases") await loadCaseLibrary();
+  else await loadLibraryDrawer();
+}
+
+/* 页签切换：清单库（按库根浏览 TC-CHECKLIST）↔ 用例库（跨会话登记用例，无库根概念） */
+function setLibTab(tab) {
+  S.lib.tab = tab === "cases" ? "cases" : "checklist";
+  $("libTabChecklist").classList.toggle("active", S.lib.tab === "checklist");
+  $("libTabCases").classList.toggle("active", S.lib.tab === "cases");
+  $("libCasesActions").classList.toggle("hidden", S.lib.tab !== "cases");
+  $("libRootBar").classList.toggle("hidden", S.lib.tab === "cases");
+  $("libDrawerSearch").placeholder = S.lib.tab === "cases"
+    ? "检索用例标题 / 编号 / 模块…"
+    : "检索业务 / 检查点…";
 }
 
 /* 入库提示「查看」直达：按会话库根打开抽屉并定位闪烁到新业务行 */
 async function openLibraryDrawerAt(rel) {
+  setLibTab("checklist");
   showLibDrawer();
   $("libDrawerMode").value = "project_root";
   $("libDrawerRootInput").value = String((S.req || {}).project_root || "").trim();
@@ -1960,6 +1979,179 @@ function closeLibDrawer() {
   $("libDrawer").classList.add("hidden");
   $("libScrim").classList.add("hidden");
   $("libraryModal").classList.add("hidden");
+}
+
+/* ═══ 用例库页签：跨会话登记用例的浏览 / 删除 / 导入 / 勾选沉淀 ═══
+   数据源 /api/case-library（无会话依赖）；采纳即登记（Web 终审 / CLI approve），
+   也可导入 CaseCraft 导出的 CSV 或 JSON 用例；勾选任意子集可独立沉淀为清单。 */
+
+async function loadCaseLibrary() {
+  const body = $("libDrawerBody");
+  body.innerHTML = "";
+  body.appendChild(h("div", "cl-empty", "加载中…"));
+  try {
+    const data = await api("/api/case-library");
+    S.lib.casesRoot = data.root || "";
+    S.lib.cases = data.cases || [];
+    S.lib.threads = data.threads || [];
+    renderCaseLibList();
+  } catch (err) {
+    body.innerHTML = "";
+    body.appendChild(h("div", "cl-empty", "加载失败：" + err.message));
+  }
+}
+
+function caseLibMatches(c, q) {
+  if (!q) return true;
+  return [c.case_id, c.title, c.target, c.expected, c.thread_id]
+    .join(" ").toLowerCase().includes(q);
+}
+
+function renderCaseLibList() {
+  const body = $("libDrawerBody");
+  body.innerHTML = "";
+  const q = String(S.lib.search || "").trim().toLowerCase();
+  const threads = S.lib.threads || [];
+  if (!threads.length) {
+    body.appendChild(h("div", "cl-empty",
+      `用例库还是空的 · 库根：${S.lib.casesRoot || "—"}。`
+      + "采纳即登记：终审勾选采纳 / CLI `approve 1,3-5` 自动入库；也可 ⬆ 导入 CaseCraft 导出的 CSV 或 JSON 用例。"));
+    $("libDrawerRoot").textContent = `用例库：${S.lib.casesRoot || "—"}`;
+    return;
+  }
+  let shown = 0;
+  threads.forEach((t) => {
+    const cases = (S.lib.cases || []).filter((c) => c.thread_id === t.thread_id && caseLibMatches(c, q));
+    if (q && !cases.length) return;
+    shown += cases.length;
+    body.appendChild(caseLibThreadRow(t, cases));
+    cases.forEach((c) => body.appendChild(caseLibRow(c)));
+  });
+  if (q && !shown) body.appendChild(h("div", "cl-empty", "没有匹配的用例，换个关键词试试。"));
+  $("libDrawerRoot").textContent = `用例库：${S.lib.casesRoot || "—"} · ${threads.length} 来源 · ${(S.lib.cases || []).length} 条`;
+}
+
+function caseLibThreadRow(t, cases) {
+  const row = h("div", "lib-nav-row case-thread");
+  row.appendChild(h("b", "mono", t.thread_id));
+  row.appendChild(h("span", "cl-dir", `${cases.length} 条 · 最近采纳 ${t.last_adopted_at || "—"}`));
+  const del = miniBtn("🗑", async (e) => {
+    e.stopPropagation();
+    if (!confirm(`注销来源 ${t.thread_id} 的全部 ${t.count} 条登记用例？`)) return;
+    try {
+      await api(`/api/case-library/threads/${encodeURIComponent(t.thread_id)}`, { method: "DELETE" });
+      toast("已注销来源", t.thread_id);
+      loadCaseLibrary();
+    } catch (err) { toast("删除失败", err.message, "err"); }
+  }, "注销该来源全部登记用例（不影响原会话）");
+  del.style.marginLeft = "auto";
+  row.appendChild(del);
+  return row;
+}
+
+function caseLibRow(c) {
+  const row = h("label", "lib-drawer-hit case-row");
+  const cb = h("input");
+  cb.type = "checkbox";
+  cb.dataset.thread = c.thread_id;
+  cb.dataset.caseId = c.case_id;
+  row.appendChild(cb);
+  row.appendChild(h("span", "mono", c.case_id));
+  row.appendChild(h("span", "prio " + String(c.priority || "P2").toUpperCase(), String(c.priority || "P2").toUpperCase()));
+  row.appendChild(h("span", "dl-case-title", c.title || "—"));
+  if (c.origin === "manual") row.appendChild(h("span", "manual-badge", "人工"));
+  const del = miniBtn("🗑", async (e) => {
+    e.stopPropagation();
+    e.preventDefault(); // label 内点击不误触勾选
+    if (!confirm(`删除登记用例 ${c.case_id}？`)) return;
+    try {
+      await api(`/api/case-library/cases/${encodeURIComponent(c.thread_id)}/${encodeURIComponent(c.case_id)}`,
+        { method: "DELETE" });
+      toast("已删除", c.case_id);
+      loadCaseLibrary();
+    } catch (err) { toast("删除失败", err.message, "err"); }
+  }, "删除该条登记用例（不影响原会话）");
+  del.style.marginLeft = "auto";
+  row.appendChild(del);
+  return row;
+}
+
+async function importCaseFile(ev) {
+  const file = ev.target.files && ev.target.files[0];
+  ev.target.value = "";
+  if (!file) return;
+  const fd = new FormData();
+  fd.append("file", file);
+  try {
+    const out = await api("/api/case-library/import", { method: "POST", body: fd });
+    toast("用例已入库", `${out.thread_id} · ${out.registered}/${out.total_in_file} 条`);
+    loadCaseLibrary();
+  } catch (err) { toast("导入失败", err.message, "err"); }
+}
+
+/* 勾选用例 → 内联业务表单 → AI 归纳预览 → 确认入库（/api/library/*，无会话依赖）。
+   与会话内沉淀弹窗同规范：业务目录已有清单自动 merge，预览确认后才落盘。 */
+async function distillSelectedFromLibrary() {
+  const boxes = [...$("libDrawerBody").querySelectorAll("input[type=checkbox]:checked")];
+  const selections = boxes.map((b) => ({ thread_id: b.dataset.thread, case_id: b.dataset.caseId }));
+  if (!selections.length) { toast("先勾选用例", "在用例库列表勾选要沉淀的用例", "err"); return; }
+  const prev = { selections, tree: [], formEl: null, prevEl: null, preview: null };
+  try { prev.tree = (await api("/api/library")).tree || []; } catch { /* 库树失败不阻塞新建业务 */ }
+  const body = $("libDrawerBody");
+  body.innerHTML = "";
+  const formEl = h("div", "dl-form");
+  formEl.appendChild(bizSectionEl(prev.tree, S.lib.casesRoot || "").bizSec);
+  formEl.appendChild(h("div", "cl-hint", `已选 ${selections.length} 条用例，AI 归纳为「可验证的一句话检查点」后登记到所选业务目录。`));
+  const actions = h("div", "cl-empty-actions");
+  actions.appendChild(miniBtn("✦ 生成预览", () => genLibDistill(prev), "AI 归纳为清单条目"));
+  actions.appendChild(miniBtn("↩ 返回列表", () => renderCaseLibList()));
+  formEl.appendChild(actions);
+  prev.formEl = formEl;
+  prev.prevEl = h("div", "hidden");
+  body.appendChild(formEl);
+  body.appendChild(prev.prevEl);
+}
+
+async function genLibDistill(prev) {
+  const biz = collectBusiness(prev.tree, prev.formEl);
+  if (biz.err) { toast("缺少业务类型", biz.err, "err"); return; }
+  try {
+    const preview = await api("/api/library/distill", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ business: biz.business, selections: prev.selections }),
+    });
+    prev.preview = preview;
+    renderDistillPreviewInto(prev.prevEl, preview);
+    prev.formEl.classList.add("hidden");
+    prev.prevEl.classList.remove("hidden");
+    const actions = h("div", "cl-empty-actions");
+    actions.appendChild(miniBtn("✓ 确认入库", () => commitLibDistill(prev)));
+    actions.appendChild(miniBtn("↩ 返回修改", () => {
+      actions.remove();
+      prev.prevEl.classList.add("hidden");
+      prev.formEl.classList.remove("hidden");
+    }));
+    prev.prevEl.appendChild(actions);
+  } catch (err) { toast("归纳失败", err.message, "err"); }
+}
+
+async function commitLibDistill(prev) {
+  if (!prev.preview) return;
+  try {
+    await api("/api/library/commit", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        rel_dir: prev.preview.rel_dir,
+        scenario_md: prev.preview.scenario_md,
+        checklist_md: prev.preview.checklist_md,
+      }),
+    });
+    toast("已登记到 TC-CHECKLIST", `${prev.preview.rel_dir}/checklist.md（下次生成自动路由可用）`, null,
+      { label: "☰ 查看", onClick: () => openLibraryDrawerAt(prev.preview.rel_dir) });
+    setLibTab("checklist");
+    await loadLibraryDrawer();
+    flashLibRow(prev.preview.rel_dir);
+  } catch (err) { toast("写入失败", err.message, "err"); }
 }
 
 /* 关键词命中：业务名 / 目录 / 描述 / 关键词 / 检查点文本 */
@@ -3855,8 +4047,15 @@ function boot() {
   $("libScrim").onclick = closeLibDrawer;
   $("libDrawerSearch").addEventListener("input", () => {
     S.lib.search = $("libDrawerSearch").value;
-    renderLibDrawer();
+    if (S.lib.tab === "cases") renderCaseLibList();
+    else renderLibDrawer();
   });
+  // 用例库页签：切换 / 导入 / 勾选沉淀
+  $("libTabChecklist").onclick = async () => { setLibTab("checklist"); await loadLibraryDrawer(); };
+  $("libTabCases").onclick = async () => { setLibTab("cases"); await loadCaseLibrary(); };
+  $("btnLibCaseImport").onclick = () => $("libCaseImportFile").click();
+  $("libCaseImportFile").onchange = importCaseFile;
+  $("btnLibCaseDistill").onclick = distillSelectedFromLibrary;
   $("libDrawerRootInput").addEventListener("keydown", (e) => {
     if (e.key === "Enter") { saveLibDrawerRoot(); loadLibraryDrawer(); }
   });

@@ -1090,6 +1090,18 @@ body.libpage { overflow: hidden; display: flex; flex-direction: column; }
 }
 .lib-drawer-head b { font-size: 13px; }
 .lib-drawer-tools { padding: 12px 14px 0; }
+/* 抽屉页签：清单库 / 用例库 */
+.lib-tabs { display: flex; align-items: center; gap: 4px; margin-bottom: 8px; }
+.lib-tab {
+  appearance: none; border: 1px solid transparent; background: none; color: var(--ink-3);
+  cursor: pointer; font: 600 12px/1 inherit; font-family: inherit;
+  padding: 6px 10px; border-radius: 8px 8px 0 0;
+}
+.lib-tab:hover { color: var(--ink); }
+.lib-tab.active { color: var(--ink); border-color: var(--border); background: var(--surface-2); }
+.lib-cases-actions { display: flex; gap: 6px; }
+.lib-drawer-body .case-thread { color: var(--ink-3); font-size: 11.5px; }
+.lib-drawer-body .case-row .prio { margin: 0 2px; }
 .lib-drawer-body {
   flex: 1; min-height: 0; overflow-y: auto;
   display: flex; flex-direction: column; gap: 4px;

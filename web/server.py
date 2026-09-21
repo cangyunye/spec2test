@@ -34,6 +34,7 @@ from langchain_core.messages import HumanMessage
 from langgraph.types import Command
 from pydantic import BaseModel
 
+from devflow.case_library import register_cases as register_adopted_cases
 from devflow.cli import _config, _thread_exists, apply_assignments
 from devflow.checklist.library import validate_rel_dir
 from devflow.config import settings
@@ -943,60 +944,26 @@ async def _distill_preview(
     doc_text: str | None = None,
     source_label: str = "",
 ) -> dict[str, Any]:
-    """归纳预览（不落盘）：cases 走用例归纳，doc_text 走文档/手写规范化。
+    """归纳预览（不落盘）：会话维度包装 distill_preview_core，错误转 HTTP 语义。
 
-    目标目录已有 checklist.md 时走 merge（旧清单原文一并交给 LLM 去重合并），
-    且旧 frontmatter 的 sources 与本次来源累积合并，不丢溯源。
+    数据源除本会话用例/手写外，还有无会话的用例库勾选（/api/library/distill 走核心）。
     """
-    from devflow.checklist.distill import (
-        distill_from_cases,
-        distill_from_doc,
-        merge_sources,
-        render_checklist_md,
-        render_scenario_md,
-    )
-    from devflow.checklist.library import resolve_root
-
-    biz = business or {}
-    rel_dir = validate_rel_dir(str(biz.get("rel_dir") or ""))
-    if not rel_dir:
-        raise HTTPException(400, "业务类型目录名非法（限英文/数字/连字符，可含 / 子业务）")
+    from devflow.checklist.distill import distill_preview_core
 
     req = build_graph_with_providers().get_state(_config(thread_id=tid)).values.get("requirement") or {}
-    root = resolve_root(str(req.get("project_root") or ""))
-    existing_scenario = ""
-    existing_checklist = ""
-    target = root / rel_dir
-    if (target / "checklist.md").is_file():
-        existing_checklist = (target / "checklist.md").read_text(encoding="utf-8")
-    if (target / "scenario.md").is_file():
-        existing_scenario = (target / "scenario.md").read_text(encoding="utf-8")
-    mode = "merge" if existing_checklist else "create"
-
-    biz_input = {
-        "rel_dir": rel_dir,
-        "name": str(biz.get("name") or ""),
-        "description": str(biz.get("description") or ""),
-    }
     try:
-        if doc_text is not None:
-            out = await distill_from_doc(doc_text, biz_input, existing_scenario, existing_checklist)
-        else:
-            out = await distill_from_cases(cases or [], biz_input, existing_scenario, existing_checklist)
+        return await distill_preview_core(
+            cases or [], business,
+            doc_text=doc_text,
+            project_root=str(req.get("project_root") or ""),
+            source_label=source_label,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(502, f"清单归纳失败：{e}")
-
-    checklist_md = render_checklist_md(
-        out, business=rel_dir, sources=merge_sources(existing_checklist, source_label)
-    )
-    return {
-        "mode": mode,
-        "rel_dir": rel_dir,
-        "scenario_md": render_scenario_md(out),
-        "checklist_md": checklist_md,
-        "merge_notes": out.merge_notes,
-        "case_count": len(cases or []),
-    }
 
 
 @app.post("/api/sessions/{tid}/checklist/distill")
@@ -1063,19 +1030,152 @@ async def import_checklist(
 @app.post("/api/sessions/{tid}/checklist/commit")
 def commit_checklist(tid: str, body: DistillCommit) -> dict[str, Any]:
     """确认后的预览写入库（覆盖写；merge 已在 distill 预览环节完成）。"""
-    rel_dir = validate_rel_dir(body.rel_dir)
-    if not rel_dir:
-        raise HTTPException(400, f"非法的业务目录名: {body.rel_dir!r}")
-    if not body.scenario_md.strip() or not body.checklist_md.strip():
-        raise HTTPException(400, "scenario.md / checklist.md 内容为空")
     graph = build_graph_with_providers()
     vals = graph.get_state(_config(thread_id=tid)).values or {}
     req = vals.get("requirement") or {}
+    return _commit_checklist_core(
+        body.rel_dir, body.scenario_md, body.checklist_md, str(req.get("project_root") or "")
+    )
+
+
+def _commit_checklist_core(
+    rel_dir_raw: str, scenario_md: str, checklist_md: str, project_root: str
+) -> dict[str, Any]:
+    """清单落库共用核心：会话沉淀（/sessions/{tid}/checklist/commit）与
+    无会话独立沉淀（/library/commit）同走此处。"""
+    rel_dir = validate_rel_dir(rel_dir_raw)
+    if not rel_dir:
+        raise HTTPException(400, f"非法的业务目录名: {rel_dir_raw!r}")
+    if not scenario_md.strip() or not checklist_md.strip():
+        raise HTTPException(400, "scenario.md / checklist.md 内容为空")
     from devflow.checklist.library import resolve_root, write_checklist
 
-    root = resolve_root(str(req.get("project_root") or ""))
-    target = write_checklist(root, rel_dir, body.scenario_md, body.checklist_md)
+    root = resolve_root(project_root)
+    target = write_checklist(root, rel_dir, scenario_md, checklist_md)
     return {"written": [str(target / "scenario.md"), str(target / "checklist.md")], "root": str(root)}
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 采纳用例库（跨会话资产）：列表 / 删除 / 导入 + 独立沉淀（无会话）
+# ═══════════════════════════════════════════════════════════════════
+
+
+@app.get("/api/case-library")
+def case_library(keyword: str = "", thread: str = "") -> dict[str, Any]:
+    """登记用例跨会话汇总（Web 用例库页签数据源；采纳即登记，见 case_library 模块）。"""
+    from devflow.case_library import iter_threads, list_cases, resolve_root
+
+    root = resolve_root()
+    return {
+        "root": str(root),
+        "threads": iter_threads(root),
+        "cases": list_cases(root, thread=thread or None, keyword=keyword or None),
+    }
+
+
+@app.delete("/api/case-library/threads/{tid}")
+def case_library_delete_thread(tid: str) -> dict[str, Any]:
+    """注销整个来源（某会话/某次导入的全部登记用例；不影响原会话 checkpoint）。"""
+    from devflow.case_library import remove_cases
+
+    out = remove_cases(thread=tid)
+    if not out["removed"]:
+        raise HTTPException(404, f"用例库中没有来源 {tid}")
+    return out
+
+
+@app.delete("/api/case-library/cases/{tid}/{case_id}")
+def case_library_delete_case(tid: str, case_id: str) -> dict[str, Any]:
+    """删除单条登记用例（只影响用例库，不动原会话的用例与采纳记录）。"""
+    from devflow.case_library import remove_cases
+
+    out = remove_cases(thread=tid, case_ids=[case_id])
+    if not out["removed"]:
+        raise HTTPException(404, f"未找到登记用例 {case_id}（来源 {tid}）")
+    return out
+
+
+@app.post("/api/case-library/import")
+async def case_library_import(
+    file: UploadFile = File(...), thread: str = Form("")
+) -> dict[str, Any]:
+    """导入外部用例文件登记入库：.csv（CaseCraft 导出格式）/ .json（用例数组或 test_report）。"""
+    import tempfile
+
+    from devflow.case_library import import_cases_file
+
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix not in (".csv", ".json"):
+        raise HTTPException(415, f"不支持的格式 {suffix}（仅 .csv / .json）")
+    data = await file.read()
+    if len(data) > 5 * 1024 * 1024:
+        raise HTTPException(413, "文件超过 5MB 上限")
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(data)
+        tmp_path = tmp.name
+    # 来源标签：显式 thread > 原始文件名（临时文件名不进溯源）
+    label = (thread or "").strip() or f"imported-{Path(file.filename or '').stem}"
+    try:
+        return import_cases_file(tmp_path, thread_label=label)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
+class LibraryDistillBody(BaseModel):
+    # 无会话独立沉淀：从用例库勾选的 (thread_id, case_id) 子集
+    business: dict[str, Any] | None = None
+    selections: list[dict[str, str]] = []
+    project_root: str = ""
+
+
+class LibraryCommitBody(BaseModel):
+    rel_dir: str
+    scenario_md: str
+    checklist_md: str
+    project_root: str = ""
+
+
+@app.post("/api/library/distill")
+async def library_distill(body: LibraryDistillBody) -> dict[str, Any]:
+    """独立沉淀预览（不落盘）：用例库勾选子集 → AI 归纳，不经澄清/用例生成流程。"""
+    from devflow.case_library import load_thread
+    from devflow.checklist.distill import distill_preview_core
+
+    wanted = {
+        (str(s.get("thread_id") or "").strip(), str(s.get("case_id") or "").strip())
+        for s in body.selections if isinstance(s, dict)
+    } - {("", "")}
+    wanted = {(t, c) for t, c in wanted if t and c}
+    if not wanted:
+        raise HTTPException(400, "至少勾选一条用例库中的用例")
+    picked: list[dict[str, Any]] = []
+    by_thread = {t: {str(r.get("case_id") or ""): r for r in load_thread(t)} for t, _ in wanted}
+    for t, cid in sorted(wanted):
+        rec = by_thread[t].get(cid)
+        if rec is not None:
+            picked.append(rec)
+    if not picked:
+        raise HTTPException(400, "勾选的用例在用例库中均已不存在，请刷新后重选")
+    source_label = "+".join(sorted({t for t, _ in wanted}))[:200]
+    try:
+        return await distill_preview_core(
+            picked, body.business, project_root=body.project_root, source_label=source_label,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(502, f"清单归纳失败：{e}")
+
+
+@app.post("/api/library/commit")
+def library_commit(body: LibraryCommitBody) -> dict[str, Any]:
+    """无会话的清单落库（预览来自 /api/library/distill）；root 按显式 project_root 或默认优先级。"""
+    return _commit_checklist_core(body.rel_dir, body.scenario_md, body.checklist_md, body.project_root)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1217,7 +1317,18 @@ async def adopt_review(tid: str, body: AdoptBody) -> dict[str, Any]:
     result = await start_run(tid, Command(resume={"decision": "approve", "adopted": case_ids}))
     if not result.get("accepted"):
         raise HTTPException(409, result.get("reason", "该会话正在推进中"))
-    return {"accepted": True, "adopted": case_ids}
+    # 采纳即登记：完整结构化用例写入持久用例库（跨会话管理 / 独立沉淀的数据源）。
+    # 登记失败不回滚采纳——用例库是衍生资产，仍可从原会话重新沉淀。
+    registered = 0
+    try:
+        report = (snap.values or {}).get("test_report") or {}
+        reg = register_adopted_cases(
+            tid, [c for c in (report.get("test_cases") or []) if isinstance(c, dict)], case_ids
+        )
+        registered = reg.get("registered", 0)
+    except Exception as e:  # pragma: no cover - 防御：库盘故障不影响采纳主流程
+        print(f"[warn] case library register failed for {tid}: {e}")
+    return {"accepted": True, "adopted": case_ids, "case_library_registered": registered}
 
 
 @app.post("/api/sessions/{tid}/distill/dismiss")

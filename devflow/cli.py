@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import sys
 import uuid
@@ -540,6 +541,194 @@ def checklist_show(
         console.print(Panel(Syntax(f.read_text(encoding="utf-8"), "markdown", theme="monokai"), title=f"{title} · {rel}"))
 
 
+@checklist_app.command("rm")
+def checklist_rm(
+    business: str = typer.Argument(..., help="业务/子业务相对路径，如 payment 或 payment/refund"),
+    root: Path | None = typer.Option(None, "--root", help="库根目录；缺省按默认优先级解析"),
+    yes: bool = typer.Option(False, "--yes", help="跳过确认"),
+) -> None:
+    """删除业务清单目录（scenario.md + checklist.md，含其下子业务一并移除）。"""
+    import shutil
+
+    from .checklist.library import resolve_root, validate_rel_dir
+
+    lib_root = Path(root) if root is not None else resolve_root("")
+    rel = validate_rel_dir(business)
+    if rel is None:
+        console.print(f"[red]×[/] 非法的业务路径: {business!r}")
+        raise typer.Exit(code=1)
+    d = lib_root / rel
+    if not d.is_dir():
+        console.print(f"[yellow]—[/] 目录不存在: {d}")
+        raise typer.Exit(code=1)
+    if not yes:
+        typer.confirm(f"确认删除 {d}？（目录整体移除，不可恢复）", abort=True)
+    shutil.rmtree(d)
+    console.print(f"[green]✓[/] 已删除 {rel}")
+    console.print("[dim]提示：库已发布到 tc-checklist 分支的，运行 python scripts/publish_checklist.py --push 同步[/]")
+
+
+@checklist_app.command("distill")
+def checklist_distill(
+    business: str = typer.Option(
+        ..., "--business", help="目标业务目录（已有自动合并 / 新建），如 payment 或 payment/refund"
+    ),
+    name: str = typer.Option("", "--name", help="业务中文名（新建时）"),
+    description: str = typer.Option("", "--description", help="一句话路由描述（新建时，AI 也会辅助归纳）"),
+    ids: str = typer.Option("", "--ids", help="只沉淀这些用例（逗号分隔编号）；缺省 = 过滤命中的全部"),
+    thread: str = typer.Option("", "--thread", help="只从某来源（会话 id / imported-*）选用例"),
+    keyword: str = typer.Option("", "--keyword", help="按编号/标题/模块/预期过滤用例"),
+    root: Path | None = typer.Option(None, "--root", help="checklist 库根；缺省按默认优先级解析"),
+    project_root: str = typer.Option("", "--project-root", help="项目根（读 <root>/.checklist 时使用）"),
+    yes: bool = typer.Option(False, "--yes", help="跳过预览确认直接入库"),
+) -> None:
+    """独立沉淀：从采纳用例库勾选用例 → AI 归纳为清单条目入库。
+
+    不经「需求澄清 → 用例生成」全流程——手里有任何一批被采纳过的用例（含
+    devflow cases import 导入的）都可独立沉淀入库。
+    """
+    import asyncio
+
+    from .case_library import list_cases
+    from .checklist.distill import distill_preview_core
+    from .checklist.library import resolve_root as _resolve_lib_root
+    from .checklist.library import write_checklist
+
+    cases = list_cases(thread=thread or None, keyword=keyword or None)
+    if ids.strip():
+        wanted = [t.strip() for t in ids.split(",") if t.strip()]
+        by_lower = {str(c.get("case_id") or "").lower(): c for c in cases}
+        cases = [by_lower[t.lower()] for t in wanted if t.lower() in by_lower]
+        missing = [t for t in wanted if t.lower() not in by_lower]
+        if missing:
+            console.print(f"[yellow]![/] 用例库中未找到: {', '.join(missing)}")
+    if not cases:
+        console.print("[yellow]—[/] 没有可沉淀的用例（先 devflow cases list 看看库里有什么）")
+        raise typer.Exit(code=1)
+
+    lib_root = root if root is not None else _resolve_lib_root(project_root)
+    try:
+        preview = asyncio.run(distill_preview_core(
+            cases,
+            {"rel_dir": business, "name": name, "description": description},
+            project_root=project_root,
+            checklist_root=root,
+            source_label="cli:cases",
+        ))
+    except ValueError as e:
+        console.print(f"[red]×[/] {e}")
+        raise typer.Exit(code=1)
+    except Exception as e:
+        console.print(f"[red]×[/] 清单归纳失败：{e}")
+        raise typer.Exit(code=1)
+
+    console.print(Panel(
+        Syntax(preview["scenario_md"], "markdown", theme="monokai"),
+        title=f"scenario.md 预览 · {preview['rel_dir']}（{'合并' if preview['mode'] == 'merge' else '新建'}模式，{preview['case_count']} 条用例）",
+        border_style="cyan",
+    ))
+    console.print(Panel(Syntax(preview["checklist_md"], "markdown", theme="monokai"), title="checklist.md 预览"))
+    if preview["merge_notes"]:
+        console.print(f"[dim]合并说明：{preview['merge_notes']}[/]")
+    if not yes:
+        typer.confirm("确认入库？", abort=True)
+    write_checklist(lib_root, preview["rel_dir"], preview["scenario_md"], preview["checklist_md"])
+    console.print(f"[green]✓[/] 已登记到 TC-CHECKLIST：{preview['rel_dir']}/checklist.md")
+    console.print("[dim]提示：库已发布到 tc-checklist 分支的，运行 python scripts/publish_checklist.py --push 同步[/]")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 采纳用例库（case library）：跨会话登记 / 管理 / 删除 / 导入
+# ═══════════════════════════════════════════════════════════════════
+
+cases_app = typer.Typer(help="采纳用例库：跨会话登记/管理被采纳的测试用例")
+app.add_typer(cases_app, name="cases")
+
+
+@cases_app.command("list")
+def cases_list(
+    thread: str = typer.Option("", "--thread", help="只看某来源（会话 id / imported-*）"),
+    keyword: str = typer.Option("", "--keyword", help="按编号/标题/模块/预期过滤"),
+) -> None:
+    """列出用例库中的登记用例（跨会话汇总）。"""
+    from .case_library import iter_threads, list_cases, resolve_root
+
+    root = resolve_root()
+    threads = iter_threads(root)
+    if not threads:
+        console.print(
+            "[yellow]—[/] 用例库为空。采纳即登记：Web 终审勾选采纳、CLI `approve 1,3-5`，"
+            "或 devflow cases import 导入外部用例。"
+        )
+        return
+    recs = list_cases(root, thread=thread or None, keyword=keyword or None)
+    table = Table(title=f"采纳用例库（{root} · {len(threads)} 来源 · {sum(t['count'] for t in threads)} 条）")
+    table.add_column("来源")
+    table.add_column("编号")
+    table.add_column("优先级")
+    table.add_column("类型")
+    table.add_column("标题")
+    table.add_column("标记")
+    table.add_column("采纳时间")
+    for c in recs:
+        table.add_row(
+            str(c.get("thread_id") or "—"),
+            str(c.get("case_id") or "—"),
+            str(c.get("priority") or "P2"),
+            str(c.get("case_type") or "—"),
+            str(c.get("title") or "—"),
+            "人工" if c.get("origin") == "manual" else "AI",
+            str(c.get("adopted_at") or "—"),
+        )
+    console.print(table)
+
+
+@cases_app.command("rm")
+def cases_rm(
+    case_ids: list[str] = typer.Argument(None, help="要删除的用例编号（可多个）"),
+    thread: str = typer.Option("", "--thread", help="限定来源；只给 --thread 不给编号 = 注销整个来源"),
+    yes: bool = typer.Option(False, "--yes", help="跳过确认"),
+) -> None:
+    """删除登记用例：删指定编号，或 --thread 注销整个来源（删空文件自动移除）。"""
+    from .case_library import remove_cases
+
+    ids = [c.strip() for c in (case_ids or []) if c.strip()]
+    if not thread and not ids:
+        console.print("[red]×[/] 用法：cases rm <编号...> [--thread 来源]，或 cases rm --thread <来源>（注销整个来源）")
+        raise typer.Exit(code=1)
+    scope = f"来源 {thread} 的全部用例" if (thread and not ids) else "、".join(ids or [])
+    if not yes:
+        typer.confirm(f"确认删除 {scope}？（不可恢复）", abort=True)
+    try:
+        out = remove_cases(thread=thread or None, case_ids=ids or None)
+    except ValueError as e:
+        console.print(f"[red]×[/] {e}")
+        raise typer.Exit(code=1)
+    console.print(f"[green]✓[/] 已删除 {out['removed']} 条" + (f"（注销来源：{', '.join(out['threads_removed'])}）" if out["threads_removed"] else ""))
+
+
+@cases_app.command("import")
+def cases_import(
+    file: Path = typer.Argument(..., help="用例文件：.csv（CaseCraft 导出格式）/ .json（用例数组或 test_report）"),
+    thread_label: str = typer.Option("", "--thread", help="来源标签；缺省 imported-<文件名>"),
+) -> None:
+    """导入外部用例文件登记入库（如 spec 模式导出的 casecraft-tests-*.csv）。"""
+    from .case_library import import_cases_file
+
+    if not file.is_file():
+        console.print(f"[red]×[/] 文件不存在: {file}")
+        raise typer.Exit(code=1)
+    try:
+        out = import_cases_file(file, thread_label=thread_label or None)
+    except ValueError as e:
+        console.print(f"[red]×[/] {e}")
+        raise typer.Exit(code=1)
+    console.print(
+        f"[green]✓[/] 已登记 {out['registered']}/{out['total_in_file']} 条 → "
+        f"来源 [bold]{out['thread_id']}[/]（devflow checklist distill 可独立沉淀入库）"
+    )
+
+
 # ═══════════════════════════════════════════════════════════════════
 # 交互主循环
 # ═══════════════════════════════════════════════════════════════════
@@ -715,16 +904,67 @@ def _interactive_loop(tid: str, *, full: bool = False) -> None:
                     decision = raw
                 _resume_from_interrupt(graph, tid, decision, gate="graph_type_select")
                 continue
+            gate = "graph_review" if "graph_review" in next_nodes else "review"
+            if gate == "review":
+                gate_cases = [
+                    c for c in ((snap.get("test_report") or {}).get("test_cases") or [])
+                    if isinstance(c, dict) and c.get("case_id")
+                ]
+                if gate_cases:
+                    case_table = Table(title="测试场景（approve 后跟序号/编号即采纳，如 approve 1,3-5）")
+                    case_table.add_column("#", justify="right")
+                    case_table.add_column("编号")
+                    case_table.add_column("优先级")
+                    case_table.add_column("类型")
+                    case_table.add_column("标题")
+                    for i, c in enumerate(gate_cases, start=1):
+                        mark = " [green]✓[/]" if c.get("origin") == "manual" else ""
+                        case_table.add_row(
+                            str(i), str(c["case_id"]), str(c.get("priority") or "P2"),
+                            str(c.get("case_type") or "—"), f"{c.get('title') or '—'}{mark}",
+                        )
+                    console.print(case_table)
             try:
-                decision = console.input(f"[bold yellow]{prompt_label}[/] (approve/reject) > ").strip().lower()
+                raw = console.input(
+                    f"[bold yellow]{prompt_label}[/] (approve / approve <采纳清单> / reject) > "
+                ).strip()
             except (EOFError, KeyboardInterrupt):
                 console.print("\n[dim]已退出（下次可用 devflow resume 继续）[/]")
                 return
-            if decision not in ("approve", "reject"):
-                console.print("[yellow]![/] 请输入 approve 或 reject")
+            head, _, tail = raw.lower().partition(" ")
+            tail = tail.strip()
+            if head not in ("approve", "reject"):
+                console.print(
+                    "[yellow]![/] 请输入 approve 或 reject"
+                    "（终审 approve 后可跟采纳清单：all / 序号 / TC 编号，如 approve 1,3-5）"
+                )
                 continue
-            gate = "graph_review" if "graph_review" in next_nodes else "review"
-            _resume_from_interrupt(graph, tid, decision, gate=gate)
+            resume_value: Any = head
+            adopted_ids: list[str] = []
+            if head == "approve" and tail:
+                if gate != "review":
+                    console.print("[yellow]![/] 制图门禁不支持采纳清单（采纳仅终审有效），按 approve 处理")
+                else:
+                    adopted_ids = _parse_case_selection(tail, gate_cases)
+                    if adopted_ids is None:
+                        console.print(
+                            "[yellow]![/] 采纳清单无法识别：用 all、场景表里的序号或 TC 编号（如 all / 1,3-5 / TC-001）"
+                        )
+                        continue
+                    resume_value = {"decision": "approve", "adopted": adopted_ids}
+            _resume_from_interrupt(graph, tid, resume_value, gate=gate)
+            if adopted_ids:
+                # 采纳即登记：写入持久用例库（跨会话管理 / 独立沉淀 checklist 的数据源）
+                try:
+                    from .case_library import register_cases
+
+                    reg = register_cases(tid, gate_cases, adopted_ids)
+                    console.print(
+                        f"[green]✓[/] 已登记 {reg['registered']} 条采纳用例入用例库"
+                        f"（devflow cases list 查看）"
+                    )
+                except Exception as e:
+                    console.print(f"[yellow]![/] 用例库登记失败（不影响本次采纳）：{e}")
             continue
 
         # ── 读用户输入 ─────────────────────────────────
@@ -911,6 +1151,42 @@ def _run_checklist_route_gate(graph, tid: str, snap: dict) -> None:
     _resume_from_interrupt(
         graph, tid, {"decision": "confirm", "selected": selected}, gate="checklist_route"
     )
+
+
+def _parse_case_selection(sel: str, cases: list[dict[str, Any]]) -> list[str] | None:
+    """解析终审采纳清单：all / 逗号分隔的场景表序号（1 起，支持 a-b 区间）/ TC 编号。
+
+    返回去重保序的 case_id 列表；有任一 token 无法识别返回 None（调用方重新提示）。
+    编号匹配大小写不敏感（tc-001 等价 TC-001）。
+    """
+    sel = (sel or "").strip().lower()
+    ids = [str(c.get("case_id") or "").strip() for c in (cases or [])]
+    id_map = {i.lower(): i for i in ids if i}
+    if not id_map:
+        return None
+    if sel == "all":
+        return [i for i in ids if i]
+    picked: list[str] = []
+    for token in (t.strip() for t in sel.split(",")):
+        if not token:
+            continue
+        m = re.fullmatch(r"(\d+)\s*-\s*(\d+)", token)
+        if m:
+            lo, hi = int(m.group(1)), int(m.group(2))
+            if lo < 1 or hi > len(ids) or lo > hi:
+                return None
+            picked.extend(ids[i - 1] for i in range(lo, hi + 1) if ids[i - 1])
+        elif token.isdigit():
+            idx = int(token)
+            if idx < 1 or idx > len(ids) or not ids[idx - 1]:
+                return None
+            picked.append(ids[idx - 1])
+        elif token in id_map:
+            picked.append(id_map[token])
+        else:
+            return None
+    seen: set[str] = set()
+    return [p for p in picked if not (p in seen or seen.add(p))]
 
 
 def _resume_from_interrupt(graph, tid: str, decision: str | dict, *, gate: str = "review") -> None:
