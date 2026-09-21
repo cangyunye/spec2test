@@ -965,6 +965,11 @@ def _interactive_loop(tid: str, *, full: bool = False) -> None:
                     )
                 except Exception as e:
                     console.print(f"[yellow]![/] 用例库登记失败（不影响本次采纳）：{e}")
+            elif gate == "review":
+                console.print(
+                    "[dim]— 未做采纳，用例未登记入用例库"
+                    "（approve 后跟 all / 序号 / TC 编号即采纳并登记，如 approve 1,3-5）[/]"
+                )
             continue
 
         # ── 读用户输入 ─────────────────────────────────

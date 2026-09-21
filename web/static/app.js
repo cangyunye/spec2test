@@ -852,11 +852,18 @@ async function submitAdoptReview() {
     S.gate = null;
     refreshAdoptUI();
     refreshTestCard();  // 评审结束：测试卡的「＋ 添加用例」入口随状态显隐
-    addDivider(`评审通过 · 已采纳 ${resp.adopted.length} 条用例`, "可继续沉淀为业务清单", true);
+    const registered = Number(resp.case_library_registered || 0);
+    addDivider(
+      `评审通过 · 已采纳 ${resp.adopted.length} 条用例（已登记入用例库）`,
+      "可继续沉淀为业务清单", true,
+    );
     S.pendingDistill = resp.adopted || [];
     setRunning(true);
     attachEvents();
-    toast("评审已通过", `采纳 ${resp.adopted.length} 条用例；完成后可沉淀为业务清单`);
+    toast("评审已通过", registered
+      ? `采纳 ${resp.adopted.length} 条 · ${registered} 条已登记入用例库`
+      : `采纳 ${resp.adopted.length} 条 · 用例库登记失败（可从会话重新沉淀）`, null,
+      { label: "☰ 用例库", onClick: () => openLibraryDrawer("cases") });
   } catch (err) {
     toast("提交失败", err.message, "err");
   }
@@ -1638,7 +1645,8 @@ function openGate(gate, payload) {
     else body.appendChild(gateReviewBody(S.gatePayload));
     if (gate === "human_review") {
       body.appendChild(h("p", "cl-hint",
-        "提示：可先在测试卡逐条勾选「采纳」，再点测试卡上的「✓ 提交评审」一键通过。"));
+        "提示：「通过」= 采纳测试卡勾选的用例并登记入用例库（未勾选会先确认，直接通过则不采纳）；"
+        + "也可在测试卡点「✓ 提交评审」，效果相同。"));
     }
   }
 
@@ -2490,6 +2498,17 @@ function reopenGate() {
 }
 function submitGate(decision, comment) {
   if (!S.gate) return;
+  // 终审「通过」= 采纳提交：测试卡勾了用例就走采纳链路（登记用例库，与「✓ 提交评审」同路）；
+  // 一个没勾时明确确认——直接通过将不做采纳、用例不登记入用例库
+  if (S.gate === "human_review" && decision === "approve" && S.report) {
+    if (S.adoptSel.size > 0) { submitAdoptReview(); return; }
+    const go = confirm(
+      "未勾选任何采纳用例：直接通过将不做采纳，用例也不会登记入用例库。\n\n"
+      + "· 推荐：点「取消」回测试卡勾选采纳，再点「通过」或「✓ 提交评审」\n"
+      + "· 确认不要这批用例入库：点「确定」直接通过"
+    );
+    if (!go) return;
+  }
   const gate = S.gate;
   const isRoute = gate === "checklist_route";
   const isReqReview = gate === "requirement_review";
@@ -2535,11 +2554,13 @@ function submitGate(decision, comment) {
     );
   } else {
     if (gate === "human_review" && decision === "approve") {
-      // 终审通过（未走采纳提交）：之后也弹沉淀建议（无预勾选 = 全部用例）
+      // 终审直接通过（确认放弃采纳）：之后也弹沉淀建议（无预勾选 = 全部用例）
       S.pendingDistill = [];
+      addDivider("评审通过 · 未做采纳（用例未登记入用例库，可用「☰ 沉淀」归纳入库）", null, true);
+    } else {
+      addDivider(decision === "approve" ? "评审通过 · 继续推进" : "已驳回 · 意见回传",
+        comment ? `「${comment.slice(0, 40)}${comment.length > 40 ? "…" : ""}」` : null, true);
     }
-    addDivider(decision === "approve" ? "评审通过 · 继续推进" : "已驳回 · 意见回传",
-      comment ? `「${comment.slice(0, 40)}${comment.length > 40 ? "…" : ""}」` : null, true);
   }
   if (decision === "approve") setStep(stepIdxForStage(gate) + 1, true);
   setRunning(true);
