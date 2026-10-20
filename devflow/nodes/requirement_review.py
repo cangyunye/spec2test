@@ -24,7 +24,7 @@ from langchain_core.messages import AIMessage
 from langgraph.types import interrupt
 
 from ..schemas import empty_requirement, has_project_code
-from ..state import SOURCE_INFERRED, SOURCE_MOCK, SOURCE_USER, GlobalState
+from ..state import SOURCES_NEED_REVIEW, SOURCE_INFERRED, SOURCE_MOCK, SOURCE_USER, GlobalState
 
 # 需求字段展示规格：(点路径, 中文标签, 值类型)
 # 值类型给前端选控件：text 多行 / str 单行 / list 每行一项 / bool 勾选
@@ -67,18 +67,18 @@ def requirement_fields(
             "kind": kind,
             "value": _get(req, key),
             "source": src.get(key) or "",
-            # mock 兜底编造的字段视同推断：重点标注、强制确认
-            "inferred": src.get(key) in (SOURCE_INFERRED, SOURCE_MOCK),
+            # AI 推断 / mock 兜底 / 文档抽取都视同「需要重点核对」：均非用户原话
+            "inferred": src.get(key) in SOURCES_NEED_REVIEW,
         }
         for key, label, kind in REQUIREMENT_FIELD_SPEC
     ]
 
 
 def inferred_fields(sources: dict[str, str] | None) -> list[str]:
-    """需要人工确认的字段：AI 推断的 + mock 兜底编造的（都不是用户原话依据）。"""
+    """需要人工确认的字段：AI 推断 / mock 兜底编造 / 文档抽取（都非用户原话依据）。"""
     return [
         k for k, v in (sources or {}).items()
-        if v in (SOURCE_INFERRED, SOURCE_MOCK)
+        if v in SOURCES_NEED_REVIEW
     ]
 
 
@@ -136,8 +136,8 @@ def review_payload(state: GlobalState) -> dict[str, Any]:
         "missing_fields": state.get("missing_fields") or [],
         "mode": "with_code" if has_project_code(req) else "no_code",
         "summary": (
-            "请逐项核对需求字段（AI 推断的字段重点看）：确认后进入制图；"
-            "驳回则本轮结束，补充需求后重新澄清"
+            "请逐项核对需求字段（AI 推断 / 文档抽取的字段重点看——文档抽取是模型对"
+            "文档的提炼，不是原文照抄）：确认后进入制图；驳回则本轮结束，补充需求后重新澄清"
         ),
     }
 

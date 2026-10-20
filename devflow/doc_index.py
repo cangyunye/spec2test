@@ -329,6 +329,34 @@ def classify_docs(
     return buckets["requirement"], buckets["api"], buckets["model"]
 
 
+# 聊天路径识别：只认含路径分隔符 + 白名单扩展名的 token（裸文件名如「需求.md」
+# 歧义太大——相对谁？——不认）；分隔符 charset 排除常见 CJK 标点，容忍路径
+# 紧跟中文标点结尾。带空格的路径认不了，请用上传/CLI 入口。
+_DOC_EXT_RE = re.compile(r"\.(md|markdown|txt|docx|json)$", re.IGNORECASE)
+# 注意不含 `.`——会把 ./x.md 的相对前缀剥掉
+_PATH_TOKEN_STRIP = "，,;；！!？?）)】」'\""
+
+
+def extract_doc_paths(text: str) -> list[str]:
+    """从聊天消息里提取文档路径候选（去重保序）。
+
+    判据：token 含 `/`（绝对路径、~/、./ 或任意相对子路径）且以白名单扩展名结尾。
+    只提取候选、不做存在性判断（调用方负责 is_file 过滤）。
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for tok in re.split(r"[\s，。；、|]+", text or ""):
+        # 路径后紧贴中文括号注释（"…models.md（按这些文档来）"）：先剥尾缀括号组
+        tok = re.sub(r"（[^）]*）$", "", tok)
+        tok = tok.strip(_PATH_TOKEN_STRIP)
+        if not tok or "/" not in tok or not _DOC_EXT_RE.search(tok):
+            continue
+        if tok not in seen:
+            seen.add(tok)
+            out.append(tok)
+    return out
+
+
 # ═══════════════════════════════════════════════════════════════════
 # 目录构建：多文档 → manifest（稳定 ID + 缓存 + manifest.json 落盘）
 # ═══════════════════════════════════════════════════════════════════

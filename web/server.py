@@ -20,6 +20,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
+import shutil
 import time
 import uuid
 from collections import deque
@@ -30,7 +32,7 @@ from typing import Any
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.types import Command
 from pydantic import BaseModel
 
@@ -160,10 +162,14 @@ def _paused_midway(graph: Any, tid: str) -> bool:
     return bool((snap.values or {}).get("messages"))
 
 
-async def start_run(tid: str, input_msg: Any) -> dict[str, Any]:
+async def start_run(tid: str, input_msg: Any, prepare: Any = None) -> dict[str, Any]:
     """把一次图推进放到后台执行，事件进 RunBus；立即返回。
 
     同一会话已有 run 在跑 → accepted=False。消费进度走 GET /events 订阅。
+    prepare：可选异步回调，在拿到会话锁、确认 accepted 之后、启动后台任务之前
+    执行（可安全 update_state / 做重 IO——比如聊天路径识别建文档目录），
+    返回值替换 input_msg；抛异常则释放锁并把错误上抛给调用方。
+    在锁外做这些事会和运行中的后台线程并发写 checkpoint（竞态）。
     """
     bus = _bus(tid)
     lock = _tid_lock(tid)
@@ -173,6 +179,13 @@ async def start_run(tid: str, input_msg: Any) -> dict[str, Any]:
     bus.running = True
     bus.stop_requested = False  # 新 run 不继承上一轮的终止请求
     bus.buffer.clear()  # seq 继续递增，旧游标依然有效
+    try:
+        if prepare is not None:
+            input_msg = await prepare()
+    except Exception:
+        bus.running = False
+        lock.release()
+        raise
     graph = build_graph_with_providers()
     bus.task = asyncio.create_task(_run_graph(graph, tid, input_msg, bus, lock))
     _mark_run(tid)
@@ -544,6 +557,30 @@ def _serialize_state(values: Any) -> dict[str, Any]:
     return out
 
 
+def _cleanup_doc_index(tid: str) -> None:
+    """回收会话的文档目录层磁盘产物（DOC_INDEX_ROOT 限定内，防误删任意路径）。
+
+    覆盖两处：<DOC_INDEX_ROOT>/<tid>（聊天路径识别建）与 manifest.root 指向的
+    目录（/api/doc/index 的 upload-<uuid> 建后经 doc_manifest 挂进会话）。
+    """
+    from devflow.config import settings
+
+    allowed = Path(settings.DOC_INDEX_ROOT).resolve()
+    targets: list[Path] = [allowed / tid]
+    try:
+        graph = build_graph_with_providers()
+        vals = graph.get_state(_config(thread_id=tid)).values or {}
+        root = str((vals.get("doc_manifest") or {}).get("root") or "")
+        if root:
+            rp = Path(root).resolve()
+            if rp.parent == allowed and rp.is_dir():
+                targets.append(rp)
+    except Exception:
+        pass  # 回收是尽力而为，不影响删除主流程
+    for t in targets:
+        shutil.rmtree(t, ignore_errors=True)
+
+
 @app.delete("/api/sessions/{tid}")
 def delete_session(tid: str) -> dict[str, Any]:
     if not _thread_exists(tid):
@@ -559,6 +596,7 @@ def delete_session(tid: str) -> dict[str, Any]:
     conn.commit()
     _clear_run_mark(tid)
     _buses.pop(tid, None)
+    _cleanup_doc_index(tid)
     return {"deleted": tid}
 
 
@@ -621,22 +659,31 @@ async def index_docs(
         if len(data) > 20 * 1024 * 1024:
             raise HTTPException(413, f"文件超过 20MB 上限: {f.filename}")
         dest = root / "source" / f"{len(saved)}_{Path(f.filename or 'doc').name}"
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(data)
-        saved.append(dest)
+        saved.append((dest, data))
 
-    if kinds is None:
-        by_req, by_api, by_model = classify_docs(saved)
-    else:
-        by_kind: dict[str, list[Path]] = {
-            "requirement": [], "api": [], "model": [],
-        }
-        for dest, kind in zip(saved, kinds):
-            by_kind[kind].append(dest)
-        by_req, by_api, by_model = by_kind["requirement"], by_kind["api"], by_kind["model"]
+    def _build() -> dict[str, Any]:
+        # 重 IO（落盘 + 嗅探分类 + docx 解析 + 缓存写入）放线程池：build_doc_index
+        # 是同步实现，直接跑在 async 端点会阻塞事件循环（所有会话的 SSE 停摆）
+        for dest, data in saved:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(data)
+        if kinds is None:
+            by_req, by_api, by_model = classify_docs([dest for dest, _ in saved])
+        else:
+            by_kind: dict[str, list[Path]] = {
+                "requirement": [], "api": [], "model": [],
+            }
+            for dest, kind in zip([dest for dest, _ in saved], kinds):
+                by_kind[kind].append(dest)
+            by_req = by_kind["requirement"]
+            by_api = by_kind["api"]
+            by_model = by_kind["model"]
+        return build_doc_index(by_req, by_api, by_model, root=root)
+
     try:
-        manifest = build_doc_index(by_req, by_api, by_model, root=root)
+        manifest = await asyncio.to_thread(_build)
     except (FileNotFoundError, ValueError, ImportError) as e:
+        shutil.rmtree(root, ignore_errors=True)  # 失败不残留半成品目录
         raise HTTPException(422, f"文档摄入失败: {e}")
     return manifest
 
@@ -1286,16 +1333,111 @@ def _gate_resume(
     return Command(resume=decision)
 
 
+def _maybe_ingest_doc_paths(tid: str, text: str) -> tuple[str | None, dict[str, Any] | None, str | None]:
+    """聊天路径识别：消息里贴了文档路径 → 自动建目录挂会话。
+
+    会话尚未挂 manifest 且消息含白名单扩展名的真实文件路径时，按内容嗅探分拣
+    建 doc manifest 并 update_state 写入会话（同步重 IO，调用方须放线程池，
+    且只在 start_run 的锁内执行——锁外写 checkpoint 会与运行中的图并发）。
+
+    返回 (最终消息文本或 None, manifest 或 None, 用户提示或 None)：
+      - 全部成功 → (残留正文或载入回执, manifest, None)
+      - 部分路径不存在 → manifest 照建，提示注明跳过清单
+      - 路径都不存在 / 建目录失败 → (剥掉路径后的残留文本或 None, None, 引导提示)
+      - 会话已写入过需求内容 → 不摄入（分章抽取只跑一次的守卫会让 manifest
+        半生效），提示新开会话再贴文档
+    最终文本为 None = 本轮不放 HumanMessage（只剩提示）。
+    """
+    from devflow.config import settings
+    from devflow.doc_index import (
+        build_doc_index,
+        classify_docs,
+        doc_feed_notice,
+        extract_doc_paths,
+    )
+    from devflow.nodes.clarify import _requirement_has_content
+
+    graph = build_graph_with_providers()
+    try:
+        vals = graph.get_state(_config(thread_id=tid)).values or {}
+    except Exception:
+        vals = {}
+    if vals.get("doc_manifest"):
+        return text, None, None  # 已挂目录：后续消息不再识别（避免中途误吞文本）
+
+    candidates = extract_doc_paths(text)
+    if not candidates:
+        return text, None, None
+    existing = [p for p in candidates if Path(p).is_file()]
+    skipped = [p for p in candidates if p not in existing]
+    residual = text
+    for p in candidates:
+        residual = residual.replace(p, " ")
+    residual = re.sub(r"\s+", " ", residual).strip()
+
+    if not existing:
+        note = (
+            "消息里的路径都不存在或不可读，未按文档处理："
+            + "、".join(skipped[:5])
+            + "。请检查路径（需为服务端可读的绝对路径）后重发，或直接把需求内容贴进来。"
+        )
+        return (residual or None), None, note
+    if _requirement_has_content(vals.get("requirement") or {}):
+        note = (
+            "检测到文档路径，但本会话已写入过需求内容——两份需求来源混在一起会让"
+            "覆盖自检失真，本次未按文档目录处理。建议新开会话，首条消息直接贴文档路径；"
+            "或把文档里的关键信息直接描述给我。"
+        )
+        return (residual or None), None, note
+
+    reqs, apis, models = classify_docs(existing)
+    try:
+        manifest = build_doc_index(
+            reqs, apis, models, root=Path(settings.DOC_INDEX_ROOT) / tid
+        )
+    except (FileNotFoundError, ValueError, ImportError) as e:
+        note = f"文档摄入失败（{e}），已按普通消息继续；可检查文件格式后重试。"
+        return (residual or None), None, note
+
+    graph.update_state(_config(thread_id=tid), {"doc_manifest": manifest})
+
+    note = None
+    if skipped:
+        note = (f"已载入 {len(existing)} 份文档；{len(skipped)} 个路径不存在已忽略："
+                + "、".join(skipped[:5]))
+    final = residual or doc_feed_notice(manifest)
+    return final, manifest, note
+
+
 @app.post("/api/sessions/{tid}/messages")
 async def send_message(tid: str, body: SendMessage) -> dict[str, Any]:
-    """提交用户消息：立即返回，进度走 GET /events 订阅。"""
+    """提交用户消息：立即返回，进度走 GET /events 订阅。
+
+    消息里贴了文档路径（会话未挂 manifest 时）→ 自动建目录挂会话，
+    等价 CLI --from-doc；识别与提示走 start_run 锁内的 prepare 回调，
+    重 IO 放线程池（不阻塞事件循环）。
+    """
     if not _thread_exists(tid):
         raise HTTPException(404, f"会话不存在: {tid}")
     if _gate_pending(build_graph_with_providers(), tid):
         raise HTTPException(409, "当前有等待确认的门禁，请先在门禁卡片上完成选择，再继续对话")
     if _paused_midway(build_graph_with_providers(), tid):
         raise HTTPException(409, "流程已终止在半途：请先点输入框的「⏵ 继续」从断点续跑，再发送消息")
-    result = await start_run(tid, {"messages": [HumanMessage(content=body.text)]})
+
+    async def _prepare() -> dict[str, Any]:
+        final, _manifest, note = await asyncio.to_thread(
+            _maybe_ingest_doc_paths, tid, body.text
+        )
+        messages: list[Any] = []
+        if final:
+            messages.append(HumanMessage(content=final))
+        if note:
+            messages.append(AIMessage(content=note))
+        if not messages:
+            messages.append(HumanMessage(content=body.text))
+        return {"messages": messages}
+
+    result = await start_run(tid, None, prepare=_prepare)
     if not result.get("accepted"):
         raise HTTPException(409, result.get("reason", "该会话正在推进中"))
     return result

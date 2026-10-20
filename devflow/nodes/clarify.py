@@ -45,7 +45,7 @@ from ..schemas import (
     empty_requirement,
     validate_requirement,
 )
-from ..state import SOURCE_INFERRED, SOURCE_MOCK, SOURCE_USER, GlobalState
+from ..state import SOURCE_DOC, SOURCE_INFERRED, SOURCE_MOCK, SOURCE_USER, GlobalState
 
 logger = logging.getLogger(__name__)
 
@@ -163,8 +163,12 @@ def _format_earlier_context(earlier: list[str]) -> str:
 
 # ── Pydantic 响应模型：让 LLM 严格按需求 Schema 抽取 ────────
 class _FieldIOConstraints(BaseModel):
-    input: str = Field(description="输入约束，用户提供的输入是什么、格式如何")
-    output: str = Field(description="输出约束，期望输出什么、格式如何")
+    """子字段必须可空：提示词第 2 条要求「没提到必须填 null」，模型遵照返回
+    {"input": null, "output": null} 时不能被自己的校验拒掉（曾致无内容可抽的
+    消息——如只贴了几个文档路径——必然抽取失败）。null 由合并逻辑 _is_present
+    自然跳过，语义不变。"""
+    input: str | None = Field(default=None, description="输入约束，用户提供的输入是什么、格式如何")
+    output: str | None = Field(default=None, description="输出约束，期望输出什么、格式如何")
 
 
 class RequirementExtract(BaseModel):
@@ -391,6 +395,30 @@ def merge_doc_fragments(
     return patch, alignment
 
 
+def _merge_residual_into(
+    merged: dict[str, Any], raw2: dict[str, Any]
+) -> dict[str, Any]:
+    """残留正文抽取结果并入分章抽取结果：列表类字段追加（归一去重），标量覆盖。
+
+    不能用 _merge_requirement 直接覆盖——那会把已并入的章节条目整列表替换掉。
+    """
+    out = copy.deepcopy(merged)
+    list_keys = ("acceptance_criteria", "edge_cases", "target_modules")
+    scalars = {k: v for k, v in raw2.items() if k not in list_keys}
+    for key in list_keys:
+        cur = list(out.get(key) or [])
+        seen = {_norm_ws(x) for x in cur}
+        for item in (raw2.get(key) or []):
+            text = str(item or "").strip()
+            nk = _norm_ws(text)
+            if text and nk not in seen:
+                seen.add(nk)
+                cur.append(text)
+        if cur:
+            out[key] = cur
+    return _merge_requirement(out, scalars)
+
+
 async def _extract_from_doc_index_async(
     state: GlobalState,
     existing: dict[str, Any],
@@ -487,15 +515,76 @@ async def _extract_from_doc_index_async(
     merged = _merge_requirement(existing, patch)
     manifest["alignment"] = alignment
 
+    # 文档抽取字段标 SOURCE_DOC：LLM 对文档的有损压缩提炼，不是用户原话——
+    # 需求确认门禁必须人工核对（前端徽标显示「文档抽取」）
     sources = dict(state.get("requirement_sources") or {})
     for key, val in patch.items():
         if key == "io_constraints":
             for sub in ("input", "output"):
                 if _is_present(val.get(sub)):
-                    sources[f"io_constraints.{sub}"] = SOURCE_USER
+                    sources[f"io_constraints.{sub}"] = SOURCE_DOC
             continue
         if _is_present(val):
-            sources[key] = SOURCE_USER  # 文档是用户提供的需求材料
+            sources[key] = SOURCE_DOC
+
+    # 同消息混写的需求正文（路径剥掉后剩余的叙述，非载入回执）：分章抽取之外
+    # 再做一次常规抽取并入——否则这段正文本轮被跳过，后续轮次只读最新消息，
+    # 从此丢失
+    residual = latest_user_text.strip()
+    if residual and not residual.startswith("（已载入需求文档集"):
+        meta2: dict[str, Any] = {}
+        try:
+            raw2 = await invoke_json(
+                system_prompt=SYSTEM_PROMPT_EXTRACT,
+                user_prompt=USER_PROMPT_TEMPLATE.format(
+                    existing_requirement=_format_requirement_for_llm(merged),
+                    latest_ai_message="（无）",
+                    earlier_context="",
+                    latest_user_message=residual,
+                ),
+                json_schema=RequirementExtract.model_json_schema(),
+                response_type="requirement_extract",
+                meta=meta2,
+            )
+            try:
+                RequirementExtract.model_validate(raw2)
+            except ValidationError as ve:
+                raise LlmOutputFormatError(
+                    f"需求抽取结果不符合 RequirementExtract schema: {ve}",
+                    validation_errors=[err["msg"] for err in ve.errors()],
+                    extra={"raw_tail": str(raw2)[:200]},
+                ) from ve
+        except DevFlowError as e:
+            # 章节抽取已成功但正文抽取失败：整轮按可重试失败处理（静默丢弃
+            # 用户正文 = 数据丢失，比多花一次重试更糟）
+            retry = state.get("retry_count", {}) or {}
+            retry["clarify_extract"] = retry.get("clarify_extract", 0) + 1
+            return {
+                "requirement": existing,
+                "last_error": f"[clarify_extract:{e.code}] {e.message}",
+                "last_error_code": e.code,
+                "last_error_retryable": e.retryable,
+                "retry_count": retry,
+                **mode_update,
+            }
+        if not meta2.get("mock"):
+            declared = {str(x).strip() for x in (raw2.pop("inferred_fields", None) or [])}
+            # 列表类字段用追加语义（分章抽取的条目不能被正文抽取覆盖）；
+            # 标量字段（io/背景等）仍走覆盖合并
+            merged = _merge_residual_into(merged, raw2)
+            for key, val in raw2.items():
+                if key == "io_constraints":
+                    if isinstance(val, dict):
+                        for sub in ("input", "output"):
+                            if _is_present(val.get(sub)):
+                                dotted = f"io_constraints.{sub}"
+                                sources[dotted] = (
+                                    SOURCE_INFERRED
+                                    if "io_constraints" in declared or dotted in declared
+                                    else SOURCE_USER
+                                )
+                elif _is_present(val):
+                    sources[key] = SOURCE_INFERRED if key in declared else SOURCE_USER
 
     title_update: dict[str, Any] = {}
     if not used_mock_only:

@@ -11,9 +11,15 @@ from langgraph.graph.message import add_messages
 # requirement_sources 取值：字段值来自用户原话 / 模型提炼推断 / mock 兜底编造
 SOURCE_USER = "user"
 SOURCE_INFERRED = "inferred"
+# 需求文档分章抽取（doc manifest 模式）：LLM 对用户文档的有损压缩提炼——
+# 不是用户原话，需求确认门禁必须人工核对（与 inferred 同等待遇，展示区分标注）
+SOURCE_DOC = "doc"
 # LLM 全挂时 mock 兜底填入的演示数据：不是真实抽取结果，后续真实抽取必须能覆盖它，
 # 且到需求确认门禁时强制人工确认（requirement_review 视同 inferred）
 SOURCE_MOCK = "mock"
+
+# 需要「重点人工核对」的来源集合（requirement_review 门禁与前端徽标共用口径）
+SOURCES_NEED_REVIEW = (SOURCE_INFERRED, SOURCE_MOCK, SOURCE_DOC)
 
 
 # ═══════════════════════════════════════════════════════════════════

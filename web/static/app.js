@@ -134,6 +134,10 @@ function toast(title, body, kind, action) {
 /* 错误分类：给用户可懂的标题 + 下一步建议 */
 function classifyError(text) {
   const t = String(text || "");
+  // LLM.OUTPUT_FORMAT 是本地 schema 校验拒绝（模型没按约定 JSON 输出），
+  // 与 Key/额度/网络无关，必须排在通用 LLM. 判断前面（曾致误导用户自查网络）
+  if (/OUTPUT_FORMAT/i.test(t))
+    return { title: "模型输出不符合约定格式", adv: "系统已自动重试；若持续出现，把内容换种说法（分条说明），或在设置里更换模型。" };
   if (/LLM\.|api[_ ]?key|API key|401|Unauthorized|quota|余额/i.test(t))
     return { title: "LLM 调用失败", adv: "检查 .env 中的 API Key / 额度 / 网络；可运行 `python -m devflow.cli check-providers` 自检。" };
   if (/CLARIFY\.LOOP/i.test(t))
@@ -1735,7 +1739,8 @@ function gateRequirementBody(p) {
     const row = h("div", "rr-row" + (f.inferred ? " inferred" : ""));
     const head = h("div", "rr-head");
     head.appendChild(h("span", "rr-label", f.label || f.key));
-    if (f.inferred) head.appendChild(h("span", "rr-badge", "AI 推断"));
+    if (f.inferred)
+      head.appendChild(h("span", "rr-badge", f.source === "doc" ? "文档抽取" : "AI 推断"));
     head.appendChild(h("span", "rr-key mono", f.key));
     row.appendChild(head);
     row.appendChild(rrControl(f));
@@ -1743,7 +1748,7 @@ function gateRequirementBody(p) {
   });
   wrap.appendChild(list);
   wrap.appendChild(h("p", "rr-hint",
-    "标「AI 推断」的是模型从描述里提炼的内容，请重点核对；"
+    "标「AI 推断 / 文档抽取」的是模型提炼的内容（非原文照抄），请重点核对；"
     + "修改任一字段后点「确认需求」，只有改动的字段会回传并覆盖。"));
   return wrap;
 }

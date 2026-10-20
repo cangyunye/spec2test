@@ -1112,3 +1112,50 @@ class TestStateErrorContract:
         assert "last_error_code" in GlobalState.__annotations__
         assert "last_error_retryable" in GlobalState.__annotations__
         assert SOURCE_MOCK == "mock"
+
+
+class TestSchemaNullTolerance:
+    @pytest.mark.asyncio
+    async def test_io_constraints_null_subfields_tolerated(self, monkeypatch):
+        """模型按提示词「没提到必须填 null」返回 {"input": null, "output": null}
+        时不能被自己的 schema 拒掉（曾致无内容可抽的消息必然抽取失败）：
+        校验通过、不写任何字段、无错误标志。"""
+        captured: dict = {}
+
+        async def fake(**kwargs):
+            captured.update(kwargs)
+            return {"io_constraints": {"input": None, "output": None}}
+
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_json", fake)
+        state = {
+            "messages": [HumanMessage(
+                content="/tmp/docs/需求.md /tmp/docs/api.json（三个文档的路径，请开始）"
+            )],
+            "requirement": empty_requirement(),
+            "clarify_mode": "normal",
+            "session_title": "已命名",
+        }
+        out = await clarify_extract_async(state)  # type: ignore[arg-type]
+        assert out["last_error_code"] is None
+        assert out["requirement"]["io_constraints"] == {"input": "", "output": ""}
+        # 发给 LLM 的 json_schema 不再把 io 子字段标成必填（schema 与提示词不再矛盾）
+        io_schema = captured["json_schema"]["$defs"]["_FieldIOConstraints"]
+        assert "required" not in io_schema or "input" not in io_schema["required"]
+
+    @pytest.mark.asyncio
+    async def test_io_constraints_partial_null_keeps_present_value(self, monkeypatch):
+        """一真一 null：真实值照常写入，null 子字段跳过。"""
+        async def fake(**kwargs):
+            return {"io_constraints": {"input": "上传的图片文件", "output": None}}
+
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_json", fake)
+        state = {
+            "messages": [HumanMessage(content="上传图片做违规审核，返回审核结论，请记录该约束")],
+            "requirement": empty_requirement(),
+            "clarify_mode": "normal",
+            "session_title": "已命名",
+        }
+        out = await clarify_extract_async(state)  # type: ignore[arg-type]
+        assert out["last_error_code"] is None
+        assert out["requirement"]["io_constraints"]["input"] == "上传的图片文件"
+        assert out["requirement"]["io_constraints"]["output"] == ""

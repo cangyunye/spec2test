@@ -5,6 +5,7 @@ LLM 调用全部 monkeypatch（遵循 conftest 的 hermetic 约定），验证�
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from pathlib import Path
@@ -147,8 +148,8 @@ class TestClarifyDocIndex:
         assert req["project_context"] == "订单系统"
         assert out["doc_index_extracted"] is True
         assert out["requirement_confirmed"] is False
-        # 来源标 user（文档是用户提供的材料）；对齐引用回填 manifest
-        assert out["requirement_sources"]["acceptance_criteria"] == "user"
+        # 来源标 doc（LLM 对文档的提炼，非用户原话 → 需求确认门禁必须核对）；对齐引用回填 manifest
+        assert out["requirement_sources"]["acceptance_criteria"] == "doc"
         align = out["doc_manifest"]["alignment"]
         assert align["acceptance_criteria"]["密码长度 8~20 位"] == ["CH-002"]
         # 无 chapter_refs 的条目回退到所在批的全部章节（默认批量预算下单批装下 3 章）
@@ -452,21 +453,23 @@ class TestGraphRoundTrip:
 # ═══════════════════════════════════════════════════════════════════
 
 
+@pytest.fixture()
+def client(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import web.server as ws
+    from devflow.config import settings
+
+    monkeypatch.setattr(settings, "DOC_INDEX_ROOT", tmp_path / "docidx")
+    ws._buses.clear()
+    ws._tid_locks.clear()
+    with TestClient(ws.app) as c:
+        yield c
+    ws._buses.clear()
+    ws._tid_locks.clear()
+
+
 class TestWebApi:
-    @pytest.fixture()
-    def client(self, tmp_path, monkeypatch):
-        from fastapi.testclient import TestClient
-
-        import web.server as ws
-        from devflow.config import settings
-
-        monkeypatch.setattr(settings, "DOC_INDEX_ROOT", tmp_path / "docidx")
-        ws._buses.clear()
-        ws._tid_locks.clear()
-        with TestClient(ws.app) as c:
-            yield c
-        ws._buses.clear()
-        ws._tid_locks.clear()
 
     def test_index_and_session_roundtrip(self, client, tmp_path):
         """上传双文档建目录 → manifest 建会话 → state 携带目录。"""
@@ -518,3 +521,243 @@ class TestWebApi:
         assert r.status_code == 200
         docs = sorted(r.json()["docs"], key=lambda d: d["name"])  # 文件名前缀 = 上传序
         assert [d["kind"] for d in docs] == ["requirement", "api", "model"]
+
+    # ── 聊天路径识别（POST /messages 首条消息贴路径 → 自动建目录挂会话）──
+
+    def _wait_idle(self, client, tid: str, timeout: float = 30.0) -> None:
+        import time
+
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if not client.get(f"/api/sessions/{tid}").json()["running"]:
+                return
+            time.sleep(0.05)
+        raise AssertionError("会话运行超过 30s 仍未空闲")
+
+    def test_message_with_doc_paths_ingests_manifest(self, client, tmp_path):
+        """消息里贴 3 个真实文档路径 → 自动建目录挂会话 + 消息替换为载入回执。"""
+        d = tmp_path / "userdocs"
+        d.mkdir()
+        (d / "需求.md").write_text(
+            "# 审核系统需求\n\n## 文本审核\n违规文本给出类别；长度上限 5000 字。\n",
+            encoding="utf-8")
+        (d / "api.json").write_text(json.dumps(OPENAPI, ensure_ascii=False), encoding="utf-8")
+        (d / "models.md").write_text(
+            "# 模型\n\n## ModerationRecord\n字段：id, category, created_at\n",
+            encoding="utf-8")
+        tid = f"w-{uuid.uuid4().hex[:8]}"
+        assert client.post("/api/sessions", json={"thread_id": tid}).status_code == 200
+
+        text = f"{d / '需求.md'} {d / 'api.json'} {d / 'models.md'}"
+        r = client.post(f"/api/sessions/{tid}/messages", json={"text": text})
+        assert r.status_code == 200
+        self._wait_idle(client, tid)
+
+        vals = client.get(f"/api/sessions/{tid}").json()["values"]
+        m = vals.get("doc_manifest")
+        assert m and len(m["docs"]) == 3
+        kinds = {doc["name"]: doc["kind"] for doc in m["docs"]}
+        assert set(kinds.values()) == {"requirement", "api", "model"}
+        # 首条消息被替换为载入回执（纯路径消息剥完为空 → 短文案占位）
+        human = [str(getattr(msg, "content", msg)) for msg in vals.get("messages") or []]
+        assert any("已载入需求文档集" in t for t in human)
+
+    def test_message_with_bogus_paths_stays_plain_text(self, client):
+        """路径都不存在 → 原样按普通文本澄清，不建目录。"""
+        tid = f"w-{uuid.uuid4().hex[:8]}"
+        assert client.post("/api/sessions", json={"thread_id": tid}).status_code == 200
+        r = client.post(
+            f"/api/sessions/{tid}/messages",
+            json={"text": "/no/such/需求.md /no/such/api.json 看看这些文档"},
+        )
+        assert r.status_code == 200
+        self._wait_idle(client, tid)
+        vals = client.get(f"/api/sessions/{tid}").json()["values"]
+        assert not vals.get("doc_manifest")
+
+    def test_second_message_after_manifest_not_reingested(self, client, tmp_path):
+        """已挂 manifest 的会话：后续消息里的路径不再触发识别（不误吞文本）。"""
+        d = tmp_path / "docs2"
+        d.mkdir()
+        (d / "需求.md").write_text("# 需求\n\n## 登录\n密码 8~20 位。\n", encoding="utf-8")
+        tid = f"w-{uuid.uuid4().hex[:8]}"
+        assert client.post("/api/sessions", json={"thread_id": tid}).status_code == 200
+        client.post(f"/api/sessions/{tid}/messages",
+                    json={"text": f"{d / '需求.md'} 请开始"})
+        self._wait_idle(client, tid)
+        m1 = client.get(f"/api/sessions/{tid}").json()["values"].get("doc_manifest")
+        assert m1
+
+        client.post(f"/api/sessions/{tid}/messages",
+                    json={"text": f"补充一下 {d / '需求.md'} 的边界场景"})
+        self._wait_idle(client, tid)
+        vals = client.get(f"/api/sessions/{tid}").json()["values"]
+        assert vals.get("doc_manifest") == m1  # 没有重建目录
+        # 消息原样进对话（路径没被剥）
+        human = [str(getattr(msg, "content", msg)) for msg in vals.get("messages") or []]
+        assert any("补充一下" in t and "需求.md" in t for t in human)
+
+
+class TestStartRunPrepare:
+    """start_run 的 prepare 回调：锁内执行、产出替换 input、busy 时不执行。"""
+
+    @pytest.mark.asyncio
+    async def test_prepare_runs_inside_lock_and_replaces_input(self):
+        import web.server as ws
+
+        tid = f"w-prepare-{uuid.uuid4().hex[:6]}"
+        graph = ws.build_graph_with_providers()
+        graph.update_state(ws._config(thread_id=tid), ws.initial_state())
+        called = {}
+
+        async def prepare():
+            called["ran"] = True
+            return {"messages": [HumanMessage(content="prepare 产出的消息")]}
+
+        r = await ws.start_run(tid, None, prepare=prepare)
+        assert r["accepted"] is True
+        # 等 run 跑完（mock LLM 很快），轮询 running
+        import time
+        for _ in range(200):
+            if not ws._session_running(tid):
+                break
+            await asyncio.sleep(0.05)
+        assert called.get("ran") is True
+        vals = graph.get_state(ws._config(thread_id=tid)).values
+        texts = [str(getattr(m, "content", "")) for m in vals.get("messages") or []]
+        assert any("prepare 产出的消息" in t for t in texts)
+
+    @pytest.mark.asyncio
+    async def test_busy_session_skips_prepare(self):
+        import web.server as ws
+
+        tid = f"w-busy-{uuid.uuid4().hex[:6]}"
+        lock = ws._tid_lock(tid)
+        await lock.acquire()  # 模拟已有 run 占锁
+        called = {}
+
+        async def prepare():
+            called["ran"] = True
+            return {"messages": []}
+
+        try:
+            r = await ws.start_run(tid, None, prepare=prepare)
+            assert r["accepted"] is False
+            assert called == {}  # 锁外绝不执行 prepare（不写 checkpoint）
+        finally:
+            lock.release()
+
+
+class TestChatIngestFeedback:
+    """P1-3/4/5：贴路径的分支反馈——混写合并、阻塞引导、部分失败清单。"""
+
+    def _wait_idle(self, client, tid: str, timeout: float = 30.0) -> None:
+        import time
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if not client.get(f"/api/sessions/{tid}").json()["running"]:
+                return
+            time.sleep(0.05)
+        raise AssertionError("会话运行超过 30s 仍未空闲")
+
+    def test_paths_with_prose_merges_both(self, client, tmp_path, monkeypatch):
+        """路径 + 正文混写：分章抽取与残留正文各抽各的、合并进同一份需求。"""
+        from devflow.nodes import clarify as clarify_mod
+
+        d = tmp_path / "mixdocs"
+        d.mkdir()
+        (d / "需求.md").write_text(
+            "# 审核需求\n\n## 文本审核\n章节准则：文本长度上限 5000 字。\n",
+            encoding="utf-8")
+
+        async def dispatch_json(**kwargs):
+            sp = str(kwargs.get("system_prompt") or "")
+            meta = kwargs.get("meta") or {}
+            meta["mock"] = False
+            if "需求文档的章节原文" in sp:
+                return {"acceptance_criteria": ["章节准则：文本长度上限 5000 字"]}
+            if "严谨的需求分析师" in sp:
+                return {"acceptance_criteria": ["残留正文验收：支持批量上传"]}
+            return {}
+
+        monkeypatch.setattr(clarify_mod, "invoke_json", dispatch_json)
+
+        tid = f"w-{uuid.uuid4().hex[:8]}"
+        assert client.post("/api/sessions", json={"thread_id": tid}).status_code == 200
+        text = f"{d / '需求.md'} 系统要支持批量上传审核"
+        assert client.post(f"/api/sessions/{tid}/messages",
+                           json={"text": text}).status_code == 200
+        self._wait_idle(client, tid)
+
+        vals = client.get(f"/api/sessions/{tid}").json()["values"]
+        assert vals.get("doc_manifest")
+        criteria = " ".join(vals["requirement"].get("acceptance_criteria") or [])
+        assert "章节准则" in criteria and "残留正文验收" in criteria
+        # 来源分账：章节条目 doc、正文条目 user
+        src = vals.get("requirement_sources") or {}
+        assert src.get("acceptance_criteria") in ("user", "doc")
+
+    def test_blocked_when_requirement_has_content(self, client, tmp_path):
+        """会话已有需求内容再贴路径 → 不摄入 + 引导新开会话 + 路径被剥。"""
+        d = tmp_path / "late"
+        d.mkdir()
+        (d / "需求.md").write_text("# 需求\n\n## 登录\n密码 8~20 位。\n", encoding="utf-8")
+        tid = f"w-{uuid.uuid4().hex[:8]}"
+        assert client.post("/api/sessions", json={"thread_id": tid}).status_code == 200
+        # 直接写一个"已有实质内容"的 requirement（不走第一轮——mock 会填满需求
+        # 并停在需求确认门禁，门禁期的 /messages 是 409，到不了识别分支）
+        import web.server as ws
+
+        req = {
+            "project_context": "订单导出工具",
+            "io_constraints": {"input": "订单号列表", "output": "Excel"},
+            "acceptance_criteria": ["导出文件可打开"],
+            "edge_cases": ["订单号不存在时提示"],
+        }
+        ws.build_graph_with_providers().update_state(
+            ws._config(thread_id=tid), {"requirement": req}
+        )
+        client.post(f"/api/sessions/{tid}/messages",
+                    json={"text": f"{d / '需求.md'} 用这个文档"})
+        self._wait_idle(client, tid)
+
+        vals = client.get(f"/api/sessions/{tid}").json()["values"]
+        assert not vals.get("doc_manifest")  # 未摄入
+        human_ai = [str(getattr(m, "content", m)) for m in vals.get("messages") or []]
+        assert any("新开会话" in t for t in human_ai)  # 引导提示
+        assert all("需求.md" not in t or "新开会话" in t for t in human_ai if "用这个文档" in t)
+
+    def test_partial_missing_paths_reports_skipped(self, client, tmp_path):
+        """一真一假路径：真的摄入、假的进跳过清单提示。"""
+        d = tmp_path / "part"
+        d.mkdir()
+        (d / "需求.md").write_text("# 需求\n\n## 登录\n密码 8~20 位。\n", encoding="utf-8")
+        tid = f"w-{uuid.uuid4().hex[:8]}"
+        assert client.post("/api/sessions", json={"thread_id": tid}).status_code == 200
+        client.post(f"/api/sessions/{tid}/messages",
+                    json={"text": f"{d / '需求.md'} /no/such/api.json"})
+        self._wait_idle(client, tid)
+
+        vals = client.get(f"/api/sessions/{tid}").json()["values"]
+        m = vals.get("doc_manifest")
+        assert m and len(m["docs"]) == 1
+        texts = [str(getattr(msg, "content", msg)) for msg in vals.get("messages") or []]
+        assert any("不存在已忽略" in t and "/no/such/api.json" in t for t in texts)
+
+    def test_delete_session_removes_doc_dir(self, client, tmp_path):
+        """删除会话回收文档目录（聊天识别建的 DOC_INDEX_ROOT/<tid>）。"""
+        from devflow.config import settings
+
+        d = tmp_path / "gc"
+        d.mkdir()
+        (d / "需求.md").write_text("# 需求\n\n## 登录\n密码 8~20 位。\n", encoding="utf-8")
+        tid = f"w-{uuid.uuid4().hex[:8]}"
+        assert client.post("/api/sessions", json={"thread_id": tid}).status_code == 200
+        client.post(f"/api/sessions/{tid}/messages",
+                    json={"text": str(d / "需求.md")})
+        self._wait_idle(client, tid)
+        doc_dir = Path(settings.DOC_INDEX_ROOT) / tid
+        assert doc_dir.is_dir()
+
+        assert client.delete(f"/api/sessions/{tid}").status_code == 200
+        assert not doc_dir.exists()

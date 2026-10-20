@@ -15,6 +15,7 @@ from devflow.doc_index import (
     classify_docs,
     concat_chapter_slices,
     doc_feed_notice,
+    extract_doc_paths,
     find_entry,
     format_doc_refs,
     ingest_docs,
@@ -491,3 +492,26 @@ class TestAutoClassify:
         manifest, _ = ingest_docs([], [str(req)], [],
                                   root=tmp_path / "idx", threshold=8000)
         assert manifest["docs"][0]["kind"] == "api"
+
+
+class TestExtractDocPaths:
+    def test_absolute_and_relative_paths(self):
+        text = "/a/b/需求.md ./docs/api.json ~/m/models.md"
+        assert extract_doc_paths(text) == ["/a/b/需求.md", "./docs/api.json", "~/m/models.md"]
+
+    def test_cjk_punctuation_trailing_is_stripped(self):
+        assert extract_doc_paths("看下 /x/y.md。还有 /z/w.docx，对吧？") == ["/x/y.md", "/z/w.docx"]
+
+    def test_duplicate_paths_deduped_in_order(self):
+        assert extract_doc_paths("/a.md /b.md /a.md") == ["/a.md", "/b.md"]
+
+    def test_bare_filename_ignored(self):
+        # 裸文件名没有路径分隔符，相对谁的歧义太大 → 不认
+        assert extract_doc_paths("需求.md 直接给") == []
+
+    def test_non_whitelisted_extension_ignored(self):
+        assert extract_doc_paths("/a/b.doc /c/d.py") == []
+
+    def test_empty_and_none(self):
+        assert extract_doc_paths("") == []
+        assert extract_doc_paths("没有路径的一段话。") == []

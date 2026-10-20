@@ -27,7 +27,7 @@ from devflow.nodes.requirement_review import (
     route_after_requirement_review,
 )
 from devflow.orchestrator import build_graph, build_graph_with_providers, initial_state
-from devflow.state import GlobalState
+from devflow.state import SOURCE_DOC, GlobalState
 
 
 def _mini_graph():
@@ -117,6 +117,23 @@ class TestNeedsReview:
             "project_context": SOURCE_USER,
             "edge_cases": SOURCE_USER,
         })) is False
+
+    def test_doc_source_requires_review(self):
+        """文档分章抽取的字段是 LLM 对文档的提炼（非用户原话）→ 必须人工确认；
+        全 doc 来源的会话不再旁路需求确认门禁（曾致 30 章文档压缩出的需求
+        未经确认直接进制图）。"""
+        assert _needs_review(_state(requirement_sources={
+            "project_context": SOURCE_DOC,
+            "acceptance_criteria": SOURCE_DOC,
+        })) is True
+        assert inferred_fields({"a": SOURCE_DOC}) == ["a"]
+        # 展示载荷：inferred 标记为 True 且 source 保留 doc（前端显示「文档抽取」徽标）
+        fields = requirement_fields(
+            _state(requirement_sources={"project_context": SOURCE_DOC}).get("requirement"),
+            {"project_context": SOURCE_DOC},
+        )
+        ctx = next(f for f in fields if f["key"] == "project_context")
+        assert ctx["inferred"] is True and ctx["source"] == "doc"
 
     def test_inferred_fields_helper(self):
         assert inferred_fields({"a": SOURCE_USER, "b": SOURCE_INFERRED}) == ["b"]
