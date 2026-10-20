@@ -19,6 +19,51 @@ from ..llm_client import invoke_json
 from .base import TestGenProvider, TestReport
 
 
+def _doc_slices_section(
+    feature: dict[str, Any] | None,
+    doc_manifest: dict[str, Any] | None,
+) -> str:
+    """doc_refs → 原文切片注入段（LLM 直连设计与技能执行器共用同一素材口径）。
+
+    feature 模式：按功能点 doc_refs 解析切片；整单模式：只给目录清单
+    （需求要点已进上下文，切片按 feature 派发时再给）。
+    """
+    if not doc_manifest:
+        return ""
+    from ..doc_index import manifest_dir, render_manifest_view, resolve_doc_slices
+    from ..feature_split import normalize_doc_refs
+
+    parts: list[str] = []
+    refs = normalize_doc_refs((feature or {}).get("doc_refs"))
+    if refs and any(refs.values()):
+        from ..config import settings
+
+        slices = resolve_doc_slices(
+            doc_manifest, refs,
+            max_chars_per=settings.DOC_SLICE_MAX_CHARS,
+            max_slices=settings.DOC_SLICE_MAX_COUNT,
+        )
+        if slices:
+            parts.append(
+                "【关联文档切片（原文摘录，设计依据以此为准，不要凭转述想象契约）】"
+            )
+            for s in slices:
+                parts.append(f"—— [{s['ref']}] {s['title']} ——")
+                parts.append(s["text"])
+    else:
+        view = render_manifest_view(doc_manifest)
+        if view:
+            parts.append("【文档目录清单（需求条目的原文出处，涉及接口/模型时按 id 对应的目录条目设计）】")
+            parts.append(view)
+    mdir = manifest_dir(doc_manifest)
+    if mdir and parts:
+        parts.append(
+            f"完整文档目录清单：{mdir}/manifest.json"
+            "（需要更多原文时按 chapter_id/api_id/model_id 在清单中定位）"
+        )
+    return "\n".join(parts)
+
+
 class _Scenario(BaseModel):
     tier: Literal["functional", "performance", "security"] = Field(description="用例层级")
     priority: Literal["P0", "P1", "P2"] = Field(description="优先级")
@@ -106,6 +151,7 @@ def _build_user_prompt(
     feedback: str | None = None,
     checklists: list[dict[str, str]] | None = None,
     feature: dict[str, Any] | None = None,
+    doc_manifest: dict[str, Any] | None = None,
 ) -> str:
     req = requirement or {}
     root_line = (
@@ -228,6 +274,13 @@ def _build_user_prompt(
             cl_parts.append(str(cl.get("content", "")).strip())
             cl_parts.append("")
         parts.append("\n".join(cl_parts) + "\n")
+    doc_section = _doc_slices_section(feature, doc_manifest)
+    if doc_section:
+        parts.append(doc_section + "\n")
+        parts.append(
+            "【文档引用标注】依据文档切片的用例，rationale 里注明「章节:<CH-xxx>」"
+            "「接口:<API-xxx>」「模型:<MDL-xxx>」。\n"
+        )
     tail = (
         "请按上述设计策略系统化输出测试场景组：先写 overview 测试概述（总-分结构的总文档），"
         "再输出 scenarios（每条标注 case_type 设计方法与 target 所属模块），最后给出 self_check 自检结论。"
@@ -259,6 +312,7 @@ class LlmTestGenProvider(TestGenProvider):
         checklists: list[dict[str, str]] | None = None,
         feature: dict[str, Any] | None = None,
         skill_paths: list[str] | None = None,
+        doc_manifest: dict[str, Any] | None = None,
     ) -> TestReport:
         graph = logic_graph or {}
         result = await invoke_json(
@@ -266,7 +320,7 @@ class LlmTestGenProvider(TestGenProvider):
             user_prompt=_build_user_prompt(
                 project_root, target_symbols, graph,
                 requirement=requirement, feedback=feedback, checklists=checklists,
-                feature=feature,
+                feature=feature, doc_manifest=doc_manifest,
             ),
             response_model=_TestDesign,
             response_type="test_design",

@@ -556,6 +556,7 @@ class OpenCodeTestProvider(TestGenProvider):
         checklists: list[dict[str, str]] | None,
         feature: dict[str, Any] | None,
         skill_paths: list[str] | None,
+        doc_manifest: dict[str, Any] | None = None,
     ) -> str:
         from ..feature_split import (
             SKILL_ENVELOPE,
@@ -569,6 +570,7 @@ class OpenCodeTestProvider(TestGenProvider):
                 feedback=feedback,
                 checklists=checklists,
                 skill_paths=skill_paths,
+                doc_manifest=doc_manifest,
             )
         parts = [
             "你是测试架构师。根据给定的目标与上下文设计测试场景组"
@@ -610,6 +612,7 @@ class OpenCodeTestProvider(TestGenProvider):
         checklists: list[dict[str, str]] | None = None,
         feature: dict[str, Any] | None = None,
         skill_paths: list[str] | None = None,
+        doc_manifest: dict[str, Any] | None = None,
     ) -> TestReport:
         if not project_root:
             # 仅需求模式（未提供项目代码）：opencode 没有可操作的项目，委托 LLM
@@ -627,6 +630,7 @@ class OpenCodeTestProvider(TestGenProvider):
                 feedback=feedback,
                 checklists=checklists,
                 feature=feature,
+                doc_manifest=doc_manifest,
             )
         if shutil.which(self.bin_path) is None and not Path(self.bin_path).exists():
             raise CliNotFoundError(
@@ -648,6 +652,7 @@ class OpenCodeTestProvider(TestGenProvider):
             checklists=checklists,
             feature=feature,
             skill_paths=skill_paths,
+            doc_manifest=doc_manifest,
         )
         self.last_request = {  # type: ignore[attr-defined]
             "argv": self._build_args(prompt, session_id=session_id, project_root=project_root),

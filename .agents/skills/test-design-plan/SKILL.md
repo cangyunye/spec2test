@@ -21,6 +21,10 @@ description: 把软件需求拆分成可独立设计测试用例的功能点（f
    功能点都无关的不要硬塞——留给 devflow 的覆盖自检归入 F0 综合与集成。
 3. **无占位**：功能点必须有真实业务含义与明确测试面，禁止「其他」「待定」类占位。
 4. **跨功能点端到端场景不单独成组**：由 devflow 在合并阶段补充 F0 集成轮。
+5. **文档对齐（仅在派发 prompt 提供了文档目录清单时）**：每个功能点必须在
+   `doc_refs` 里标注设计依据——依据哪些章节（`chapter_ids`）、涉及哪些接口
+   （`api_ids`）与数据模型（`model_ids`）；目录里的 id 原样引用，不要编造。
+   没有提供目录时 `doc_refs` 三个数组都留空。
 
 ## 产出（三件套）
 
@@ -35,7 +39,8 @@ description: 把软件需求拆分成可独立设计测试用例的功能点（f
   "target_modules": ["涉及模块/页面/子系统"],
   "acceptance_criteria": ["归属该功能点的验收标准（原文）"],
   "edge_cases": ["归属该功能点的边界场景（原文）"],
-  "node_ids": ["相关逻辑图节点 id，没有可空"]
+  "node_ids": ["相关逻辑图节点 id，没有可空"],
+  "doc_refs": {"chapter_ids": ["CH-001"], "api_ids": ["API-002"], "model_ids": ["MDL-001"]}
 }
 ```
 
@@ -66,7 +71,7 @@ description: 把软件需求拆分成可独立设计测试用例的功能点（f
 ```json
 {
   "status": "ok | partial",
-  "features": [{"name": "…", "description": "…", "target_modules": [], "acceptance_criteria": [], "edge_cases": [], "node_ids": []}],
+  "features": [{"name": "…", "description": "…", "target_modules": [], "acceptance_criteria": [], "edge_cases": [], "node_ids": [], "doc_refs": {"chapter_ids": [], "api_ids": [], "model_ids": []}}],
   "open_questions": [{"question": "…", "options": [], "recommended": "…"}],
   "assumptions": [],
   "coverage_self_check": ["逐条说明：每条验收标准/边界场景归属到了哪个功能点，或标 gap"],

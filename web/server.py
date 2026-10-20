@@ -274,6 +274,7 @@ async def _events_gen(bus: RunBus, after: int):
 class CreateSession(BaseModel):
     thread_id: str | None = None
     set_fields: list[str] = []   # 等价 --set：["project_root=/workspace", ...]
+    doc_manifest: dict[str, Any] | None = None  # 文档目录层（POST /api/doc/index 的返回值）
 
 
 class SendMessage(BaseModel):
@@ -311,6 +312,9 @@ def create_session(body: CreateSession) -> dict[str, Any]:
     state = initial_state()
     if body.set_fields:
         state["requirement"] = apply_assignments(state["requirement"], body.set_fields)
+    if getattr(body, "doc_manifest", None):
+        # 文档目录层：目录+坐标进 state，章节正文留磁盘（澄清阶段分章抽取）
+        state["doc_manifest"] = body.doc_manifest
     # 只写初始 checkpoint，不跑任何节点（省一次空澄清 LLM 调用）；
     # 首条用户消息经由 POST /messages 推进 compress → clarify_extract
     graph.update_state(_config(thread_id=tid), state)
@@ -581,6 +585,60 @@ async def extract_doc(file: UploadFile = File(...)) -> dict[str, Any]:
     finally:
         Path(tmp_path).unlink(missing_ok=True)
     return {"name": file.filename, "chars": len(text), "text": text}
+
+
+@app.post("/api/doc/index")
+async def index_docs(
+    files: list[UploadFile] = File(...),
+    kinds: list[str] | None = Form(None),
+) -> dict[str, Any]:
+    """多文档摄入 → doc manifest（大需求文档集的目录层）。
+
+    文档类型自动识别：kinds 不传时按内容嗅探分拣（JSON 精确判 OpenAPI/Schema，
+    Markdown 按端点/字段密度启发，模糊回退需求）；kinds 传了则显式指定（与 files
+    一一对应，requirement / api / model），用于自动识别失手时人工纠偏。
+    构建产物落在 DOC_INDEX_ROOT/upload-<uuid>/（manifest.json + cache/ 正文缓存），
+    返回的 manifest 原样传给 POST /api/sessions 的 doc_manifest 字段即可：
+    会话澄清阶段会自动分章抽取，正文不整份进上下文。
+    """
+    from devflow.config import settings
+    from devflow.doc_index import build_doc_index, classify_docs
+
+    if kinds is not None and len(files) != len(kinds):
+        raise HTTPException(400, f"files({len(files)}) 与 kinds({len(kinds)}) 数量不一致")
+    if kinds:
+        bad = [k for k in kinds if k not in ("requirement", "api", "model")]
+        if bad:
+            raise HTTPException(400, f"非法 kind: {bad}（仅 requirement / api / model）")
+
+    root = Path(settings.DOC_INDEX_ROOT) / f"upload-{uuid.uuid4().hex[:8]}"
+    saved: list[Path] = []
+    for f in files:
+        suffix = Path(f.filename or "").suffix.lower()
+        if suffix not in (".docx", ".txt", ".md", ".json"):
+            raise HTTPException(415, f"不支持的格式 {suffix}（{f.filename}）")
+        data = await f.read()
+        if len(data) > 20 * 1024 * 1024:
+            raise HTTPException(413, f"文件超过 20MB 上限: {f.filename}")
+        dest = root / "source" / f"{len(saved)}_{Path(f.filename or 'doc').name}"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+        saved.append(dest)
+
+    if kinds is None:
+        by_req, by_api, by_model = classify_docs(saved)
+    else:
+        by_kind: dict[str, list[Path]] = {
+            "requirement": [], "api": [], "model": [],
+        }
+        for dest, kind in zip(saved, kinds):
+            by_kind[kind].append(dest)
+        by_req, by_api, by_model = by_kind["requirement"], by_kind["api"], by_kind["model"]
+    try:
+        manifest = build_doc_index(by_req, by_api, by_model, root=root)
+    except (FileNotFoundError, ValueError, ImportError) as e:
+        raise HTTPException(422, f"文档摄入失败: {e}")
+    return manifest
 
 
 # ═══════════════════════════════════════════════════════════════════

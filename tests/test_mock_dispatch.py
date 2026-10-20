@@ -87,3 +87,17 @@ class TestTextDispatch:
         content = str(resp.content)
         assert '"project_context"' in content
         assert '"nodes"' not in content
+
+    @pytest.mark.asyncio
+    async def test_spec_fill_prompt_returns_requirement_shaped_json(self):
+        """spec 缺口脑补（资深需求分析师身份串）→ 需求形状 JSON，可被
+        auto_run.fill_missing 的 mock 兼容路径取与缺失字段相交的键。"""
+        from devflow.auto_run import _FILL_SYSTEM_PROMPT
+
+        resp = await _MockLLM().ainvoke([
+            SystemMessage(content=_FILL_SYSTEM_PROMPT),
+            HumanMessage(content="【缺失字段】\n- project_context: 必须填写项目背景简述"),
+        ])
+        content = str(resp.content)
+        assert '"project_context"' in content
+        assert "mock fallback" not in content  # 不是「请人工补充」占位文本

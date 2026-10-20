@@ -42,10 +42,11 @@ async def _split_async(state: GlobalState) -> dict[str, Any]:
         return {}
     req = state.get("requirement") or {}
     logic_graph = state.get("logic_graph") or {}
+    doc_manifest = state.get("doc_manifest")
     questions: list[dict[str, Any]] = []
     assumptions: list[str] = []
 
-    features = await _build_features(req, logic_graph, questions, assumptions)
+    features = await _build_features(req, logic_graph, questions, assumptions, doc_manifest)
     if not features:
         return {}  # 既聚不出也拆不出 → 单次整单路径（test_gen 按无 features 处理）
     features, gaps = assign_uncovered(features, req)
@@ -70,15 +71,16 @@ async def _build_features(
     logic_graph: dict[str, Any],
     questions: list[dict[str, Any]],
     assumptions: list[str],
+    doc_manifest: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """代码模式聚类 + LLM 命名；仅需求模式 LLM 拆解；都失败 → None（调用方降级）。"""
     if has_project_code(req):
         features = cluster_nodes_by_target(logic_graph, req)
         if features:
             return await llm_name_features(features)
-    split = await llm_split_features(req, logic_graph)
+    split = await llm_split_features(req, logic_graph, doc_manifest)
     if split is None:
-        return _fallback_single(req)
+        return _fallback_single(req, doc_manifest)
     features, llm_questions, llm_assumptions = split
     questions.extend(
         {
@@ -95,7 +97,9 @@ async def _build_features(
     return features
 
 
-def _fallback_single(req: dict[str, Any]) -> list[dict[str, Any]]:
+def _fallback_single(
+    req: dict[str, Any], doc_manifest: dict[str, Any] | None = None
+) -> list[dict[str, Any]]:
     """LLM 拆分不可用：整单作为单 feature（含全部准则），流程不中断。"""
     targets = [str(m) for m in (req.get("target_modules") or []) if m]
     criteria = [str(c) for c in (req.get("acceptance_criteria") or []) if c]
@@ -104,6 +108,14 @@ def _fallback_single(req: dict[str, Any]) -> list[dict[str, Any]]:
         targets = ["端到端场景"]
     if not targets and not criteria and not edges:
         return []
+    # 整单兜底覆盖全部需求章节（有 manifest 时），下游切片按 doc_refs 解析
+    refs = None
+    if doc_manifest:
+        from ..doc_index import requirement_chapters
+
+        chapter_ids = [str(c["chapter_id"]) for c in requirement_chapters(doc_manifest)]
+        if chapter_ids:
+            refs = {"chapter_ids": chapter_ids}
     return [make_feature(
         "F1",
         "、".join(targets[:3]) or "整单需求",
@@ -111,6 +123,7 @@ def _fallback_single(req: dict[str, Any]) -> list[dict[str, Any]]:
         target_modules=targets,
         acceptance_criteria=criteria,
         edge_cases=edges,
+        doc_refs=refs,
     )]
 
 

@@ -17,6 +17,8 @@
     - resolve_skill_paths       本仓 .agents/skills/<name>/SKILL.md 绝对路径解析
     - skill_dispatch_prefix     「先完整读取并严格遵守 <abs path>」prompt 前缀
     - SKILL_ENVELOPE            统一输出契约（技能与解析器共用的同一份 schema 说明）
+    - build_feature_design_prompt  单 feature handoff（doc manifest 时注入
+                                doc_refs → 「引用 + 原文切片」+ manifest 回查路径）
 
   交付
     - render_test_design_plan   面向测试工程师的 test-design-plan 文档（Markdown）
@@ -31,6 +33,13 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from .doc_index import (
+    format_doc_refs,
+    manifest_dir,
+    normalize_doc_refs,
+    render_manifest_view,
+    resolve_doc_slices,
+)
 from .llm_client import invoke_json
 
 logger = logging.getLogger(__name__)
@@ -54,8 +63,10 @@ def make_feature(
     acceptance_criteria: list[str] | None = None,
     edge_cases: list[str] | None = None,
     node_ids: list[str] | None = None,
+    doc_refs: dict[str, Any] | None = None,
     is_modified: bool = False,
 ) -> dict[str, Any]:
+    refs = normalize_doc_refs(doc_refs) if doc_refs else None
     return {
         "feature_id": feature_id,
         "name": name or feature_id,
@@ -64,6 +75,7 @@ def make_feature(
         "acceptance_criteria": [c for c in (acceptance_criteria or []) if c],
         "edge_cases": [c for c in (edge_cases or []) if c],
         "node_ids": [n for n in (node_ids or []) if n],
+        **({"doc_refs": refs} if refs and any(refs.values()) else {}),
         "is_modified": bool(is_modified),
     }
 
@@ -208,6 +220,13 @@ async def llm_name_features(features: list[dict[str, Any]]) -> list[dict[str, An
         return features
 
 
+class _DocRefs(BaseModel):
+    """功能点 → 文档目录条目的对齐引用（有 doc manifest 时由拆分 LLM 产出）。"""
+    chapter_ids: list[str] = Field(default_factory=list, description="需求依据的章节，如 [\"CH-001\"]")
+    api_ids: list[str] = Field(default_factory=list, description="该功能点设计依据的接口，如 [\"API-002\"]")
+    model_ids: list[str] = Field(default_factory=list, description="该功能点涉及的数据模型，如 [\"MDL-001\"]")
+
+
 class _FeatureOut(BaseModel):
     name: str = Field(description="功能点名称（简洁业务化）")
     description: str = Field(default="", description="功能点职责一句话说明")
@@ -215,6 +234,7 @@ class _FeatureOut(BaseModel):
     acceptance_criteria: list[str] = Field(default_factory=list, description="归属该功能点的验收标准（原文）")
     edge_cases: list[str] = Field(default_factory=list, description="归属该功能点的边界场景（原文）")
     node_ids: list[str] = Field(default_factory=list, description="相关逻辑图节点 id（没有可空）")
+    doc_refs: _DocRefs | None = Field(default=None, description="文档目录对齐引用（提供了文档目录时必填）")
 
 
 class _QuestionOut(BaseModel):
@@ -240,17 +260,23 @@ SPLIT_SYSTEM_PROMPT = """你是测试需求拆分师。把一段软件需求拆�
 3. 无占位：功能点必须有真实的业务含义与明确的测试面，禁止「其他」「待定」类占位。
 4. 不许停下提问：拆分依据不足时不要向用户追问，把不确定项写进 open_questions
    （含 options 与 recommended）与 assumptions，按假设继续拆分。
-5. 跨功能点的端到端场景不要单独成组——由系统在合并阶段补充综合功能点。"""
+5. 跨功能点的端到端场景不要单独成组——由系统在合并阶段补充综合功能点。
+6. 文档对齐（仅在提供了文档目录清单时）：每个功能点必须在 doc_refs 里标注它的
+   设计依据——依据哪些章节（chapter_ids）、涉及哪些接口（api_ids）与数据模型
+   （model_ids）；目录里的 id 原样引用，不要编造。没有提供目录时 doc_refs 填空。"""
 
 
 async def llm_split_features(
     requirement: dict[str, Any] | None,
     logic_graph: dict[str, Any] | None,
+    doc_manifest: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]] | None:
     """仅需求模式：LLM + JSON Schema 拆解。
 
     返回 (features, questions, assumptions)；LLM 不可用（含 mock 兜底）返回 None，
     由调用方走单 feature 降级——mock 的编造拆分会让演示流程失真。
+
+    doc_manifest 非空时把文档目录视图喂进拆分上下文，features 携带 doc_refs 对齐引用。
     """
     req = requirement or {}
     parts: list[str] = []
@@ -270,6 +296,11 @@ async def llm_split_features(
         parts.append("逻辑图节点：" + "；".join(
             f"{n.get('node_id')}({n.get('label')})" for n in nodes if n.get("node_id")
         ))
+    manifest_view = render_manifest_view(doc_manifest)
+    if manifest_view:
+        parts.append(
+            "文档目录清单（拆分时把每个功能点的依据标注进 doc_refs）：\n" + manifest_view
+        )
     if not parts:
         return None
     meta: dict[str, Any] = {}
@@ -295,6 +326,7 @@ async def llm_split_features(
             acceptance_criteria=[str(c) for c in (f.get("acceptance_criteria") or [])],
             edge_cases=[str(c) for c in (f.get("edge_cases") or [])],
             node_ids=[str(n) for n in (f.get("node_ids") or [])],
+            doc_refs=f.get("doc_refs"),
         )
         for f in raw.get("features") or []
         if isinstance(f, dict) and str(f.get("name") or "").strip()
@@ -456,6 +488,19 @@ def validate_feature_report(
         for c in (feature.get("edge_cases") or []):
             if not _criterion_covered(str(c), case_texts):
                 issues.append(f"边界场景无对应用例：「{c}」")
+        # 文档对齐：声明了接口/模型依据的功能点，用例里至少要出现一次 id 引用
+        # （rationale 约定「接口:API-xxx」「模型:MDL-xxx」）——对着幻觉契约出用例
+        # 比缺用例更危险，这里做确定性兜底；id 与用例文本用同一套归一（大小写、
+        # 连字符等标点差异不误伤）
+        refs = normalize_doc_refs(feature.get("doc_refs"))
+        ref_ids = refs["api_ids"] + refs["model_ids"]
+        if ref_ids and not any(
+            _norm_text(rid) in "\n".join(case_texts) for rid in ref_ids
+        ):
+            issues.append(
+                "关联接口/模型未在用例中标注引用（rationale 写「接口:<API-xxx>」"
+                "「模型:<MDL-xxx>」，依据章节写「章节:<CH-xxx>」）"
+            )
     return issues
 
 
@@ -669,10 +714,16 @@ def build_feature_design_prompt(
     feedback: str | None = None,
     checklists: list[dict[str, str]] | None = None,
     skill_paths: list[str] | None = None,
+    doc_manifest: dict[str, Any] | None = None,
+    doc_slice_max_chars: int | None = None,
+    doc_slice_max_count: int | None = None,
 ) -> str:
     """单功能点派发 prompt（opencode run / pi -p 技能执行器共用，契约单点维护）。
 
     派发时显式传 SKILL.md 绝对路径并要求先完整读取；产出走 SKILL_ENVELOPE 契约。
+    doc_manifest 非空时把功能点 doc_refs 解析为「引用 + 原文切片」注入 handoff
+    （契约类内容给逐字切片，不让子代理对着转述设计用例），并附 manifest 路径
+    供执行器按需回查更多章节/接口/模型。
     """
     lines = [
         "你是测试设计执行器。只针对下面给定的单个功能点设计测试场景，"
@@ -701,6 +752,9 @@ def build_feature_design_prompt(
         )
     for line in feature.get("qa_decisions") or []:
         lines.append(f"拆分确认决策：{line}")
+    refs = normalize_doc_refs(feature.get("doc_refs"))
+    if refs and any(refs.values()):
+        lines.append(f"文档对齐引用：{format_doc_refs(refs)}")
     req = requirement or {}
     if (req.get("project_context") or "").strip():
         lines.append(f"全局背景：{req['project_context']}")
@@ -711,11 +765,38 @@ def build_feature_design_prompt(
         for cl in checklists:
             label = cl.get("name") or cl.get("rel_dir") or "业务清单"
             lines.append(f"- [{label}] {str(cl.get('content', ''))[:1500]}")
+    if doc_manifest is not None and refs and any(refs.values()):
+        from .config import settings
+
+        slices = resolve_doc_slices(
+            doc_manifest, refs,
+            max_chars_per=doc_slice_max_chars or settings.DOC_SLICE_MAX_CHARS,
+            max_slices=doc_slice_max_count or settings.DOC_SLICE_MAX_COUNT,
+        )
+        if slices:
+            lines.append("")
+            lines.append("【关联文档切片（原文摘录，设计依据以此为准，不要凭转述想象契约）】")
+            for s in slices:
+                lines.append(f"—— [{s['ref']}] {s['title']} ——")
+                lines.append(s["text"])
+                lines.append("")
+        mdir = manifest_dir(doc_manifest)
+        if mdir:
+            lines.append(
+                f"完整文档目录清单：{Path(mdir) / 'manifest.json'}"
+                "（切片不够用时，可用文件读取工具打开该清单，再按需回查对应文档缓存原文）"
+            )
     lines += [
         "",
         "归属标注：每条用例的 rationale 必须注明依据——验收标准写「验收:<准则摘要>」、"
         "边界场景写「边界:<场景摘要>」、清单规则写「清单:<业务>/<条目>」、"
-        "常规用例写「功能:<功能点名称>」。",
+        "常规用例写「功能:<功能点名称>」"
+        + (
+            "；依据文档切片的用例写「章节:<CH-xxx>」「接口:<API-xxx>」「模型:<MDL-xxx>」"
+            if doc_manifest is not None and refs and any(refs.values())
+            else ""
+        )
+        + "。",
         "",
         "最终答复只输出一个 JSON envelope（不要代码围栏、不要解释文字），结构：",
         "```json",

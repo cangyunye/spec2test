@@ -157,6 +157,7 @@ class Feature(TypedDict, total=False):
     acceptance_criteria: list[str]
     edge_cases: list[str]
     node_ids: list[str]         # 对应 LogicNode.node_id（代码模式聚类产物）
+    doc_refs: dict[str, list[str]]  # 文档对齐引用 {chapter_ids, api_ids, model_ids}（有 doc manifest 时）
     is_modified: bool
 
 
@@ -200,6 +201,8 @@ class GlobalState(TypedDict, total=False):
     distill_dismissed: bool                  # 用户对「沉淀建议卡」点了暂不（本会话不再提示）
     features: list[Feature]                  # feature 拆分结果（feature_split 节点产出；空 = 未拆分/单次整单）
     feature_questions: list[dict[str, Any]]  # 拆分阶段待确认问题（feature_gate 门禁承接用）
+    doc_manifest: Optional[dict[str, Any]]   # 文档目录层（大文档集）：目录+ID+行号坐标；章节正文留磁盘不进 state
+    doc_index_extracted: bool                # 分章 clarify 是否已对 manifest 跑过逐章抽取（只跑一次）
 
     # ── 3. 子系统会话映射 ──────────────────────────────
     opencode_sessions: OpenCodeSessions

@@ -245,6 +245,272 @@ USER_PROMPT_TEMPLATE = """
 """
 
 
+# ═══════════════════════════════════════════════════════════════════
+# 文档目录模式（大需求文档集）：需求字段从章节分批抽取，正文不进对话上下文
+# ═══════════════════════════════════════════════════════════════════
+
+class _DocChapterRef(BaseModel):
+    text: str = Field(description="acceptance_criteria / edge_cases 里的条目原文（逐字）")
+    chapter_ids: list[str] = Field(description="该条目出自的章节 id，如 [\"CH-002\"]")
+
+
+class DocChapterExtract(RequirementExtract):
+    """文档分章抽取响应：在通用抽取之上增加条目 → 章节出处映射（对齐引用，尽力而为）。"""
+    chapter_refs: list[_DocChapterRef] | None = Field(
+        default=None,
+        description=(
+            "acceptance_criteria / edge_cases 每条出自哪些章节的映射；"
+            "其他字段（io_constraints/project_context 等）无需映射"
+        ),
+    )
+
+
+SYSTEM_PROMPT_DOC_EXTRACT = """你是一个严谨的需求分析师，任务是从需求文档的章节原文中抽取结构化需求信息。
+重要规则：
+1. 只提取【文档原文里明确写到】的信息，不要猜测，不要脑补；文档没提到的字段必须填 null。
+2. req_type 严格三选一：new_feature(全新功能) / component_iteration(组件迭代) / bug_fix(缺陷修复)。
+3. acceptance_criteria / edge_cases 必须保留文档原文（逐字摘录，不要改写、不要概括）；
+   多个章节的条目并列放进同一个数组，不要互相覆盖。
+4. target_modules 汇总文档里明确提到的模块/页面/子系统。
+5. project_context 用 2~4 句概括文档描述的项目背景与业务场景（不要复述全文）。
+6. project_root 永远填 null（文档里不会有绝对路径）。
+7. existing_code_accessible：文档未提到现有代码就填 null；明确说明仅按需求设计测试时填 false。
+8. chapter_refs：把 acceptance_criteria / edge_cases 每条原文映射到它出自的章节 id
+   （text 逐字对应数组里的条目）；对不上的条目可不映射。
+"""
+
+
+DOC_EXTRACT_USER_TEMPLATE = """请从下面这些需求文档章节原文中抽取结构化需求信息（每章独立阅读，条目并列汇总）：
+
+{chapters}
+
+请输出抽取结果（JSON）："""
+
+
+def _requirement_has_content(req: dict[str, Any]) -> bool:
+    """requirement 是否已有实质内容（manifest 抽取只在空需求上触发一次）。"""
+    if not isinstance(req, dict):
+        return False
+    io = req.get("io_constraints") or {}
+    return bool(
+        str(req.get("project_context") or "").strip()
+        or str(io.get("input") or "").strip()
+        or str(io.get("output") or "").strip()
+        or req.get("acceptance_criteria")
+        or req.get("edge_cases")
+        or req.get("target_modules")
+    )
+
+
+def _norm_ws(s: Any) -> str:
+    return re.sub(r"\s+", "", str(s or ""))
+
+
+def merge_doc_fragments(
+    fragments: list[tuple[dict[str, Any], list[str]]],
+) -> tuple[dict[str, Any], dict[str, dict[str, list[str]]]]:
+    """分章抽取分片 → (requirement patch, 条目对齐引用)。确定性合并：
+
+    - 列表类字段并列汇总（按空白归一去重，保持首现顺序）
+    - io_constraints 每个子字段取首个非空值；req_type/project_root 等标量取首个非空
+    - 对齐引用：条目原文 → 章节 id（LLM 的 chapter_refs 优先，缺失退回所在批的章节）
+
+    fragments: [(抽取 dict, 该批覆盖的 chapter_id 列表)]
+    """
+    criteria: list[str] = []
+    edges: list[str] = []
+    modules: list[str] = []
+    seen_c: set[str] = set()
+    seen_e: set[str] = set()
+    seen_m: set[str] = set()
+    criterion_src: list[tuple[str, int, str]] = []  # (原文, fragment 序号, "ac"|"ec")
+    contexts: list[str] = []
+    io = {"input": "", "output": ""}
+    patch: dict[str, Any] = {}
+
+    ref_map: dict[str, list[str]] = {}
+    for fr, _ in fragments:
+        for ref in fr.get("chapter_refs") or []:
+            if isinstance(ref, dict) and ref.get("text") and ref.get("chapter_ids"):
+                ids = [str(x) for x in ref["chapter_ids"] if str(x).strip()]
+                if ids:
+                    ref_map.setdefault(_norm_ws(ref["text"]), ids)
+
+    for fi, (fr, batch_ids) in enumerate(fragments):
+        for key, bucket, seen in (
+            ("acceptance_criteria", criteria, seen_c),
+            ("edge_cases", edges, seen_e),
+        ):
+            for c in fr.get(key) or []:
+                text = str(c or "").strip()
+                if not text:
+                    continue
+                nk = _norm_ws(text)
+                if nk in seen:
+                    continue
+                seen.add(nk)
+                bucket.append(text)
+                if key == "acceptance_criteria":
+                    criterion_src.append((text, fi, "ac"))
+                else:
+                    criterion_src.append((text, fi, "ec"))
+        for m in fr.get("target_modules") or []:
+            s = str(m or "").strip()
+            if s and _norm_ws(s) not in seen_m:
+                seen_m.add(_norm_ws(s))
+                modules.append(s)
+        ctx = str(fr.get("project_context") or "").strip()
+        if ctx and ctx not in contexts:
+            contexts.append(ctx)
+        ioc = fr.get("io_constraints") or {}
+        for sub in ("input", "output"):
+            if not io[sub] and str(ioc.get(sub) or "").strip():
+                io[sub] = str(ioc[sub]).strip()
+        for key in ("req_type", "project_root", "existing_code_accessible"):
+            if patch.get(key) is None and fr.get(key) is not None:
+                patch[key] = fr[key]
+
+    alignment: dict[str, dict[str, list[str]]] = {
+        "acceptance_criteria": {}, "edge_cases": {},
+    }
+    for text, fi, kind in criterion_src:
+        ids = ref_map.get(_norm_ws(text)) or fragments[fi][1]
+        if ids:
+            alignment["acceptance_criteria" if kind == "ac" else "edge_cases"][text] = ids
+
+    if criteria:
+        patch["acceptance_criteria"] = criteria
+    if edges:
+        patch["edge_cases"] = edges
+    if modules:
+        patch["target_modules"] = modules
+    if contexts:
+        patch["project_context"] = "；".join(contexts)[:1500]
+    if io["input"] or io["output"]:
+        patch["io_constraints"] = io
+    return patch, alignment
+
+
+async def _extract_from_doc_index_async(
+    state: GlobalState,
+    existing: dict[str, Any],
+    latest_user_text: str,
+    mode_update: dict[str, Any],
+) -> dict[str, Any]:
+    """manifest 模式抽取：需求字段从章节分批抽取后确定性合并（只跑一次）。
+
+    - 章节 / 接口 / 模型正文不进对话与 checkpoint，state 里只有目录坐标
+    - 任一批失败 → 与单文档路径一致的可重试错误（图级 retry 重跑全部批次）
+    - mock 兜底的编造分片不并入（与 clarify_extract 的 SOURCE_MOCK 诚实原则一致）；
+      全部批次 mock 时需求保持为空 → validate 正常追问用户补齐
+    """
+    from ..doc_index import batch_chapters, requirement_chapters, slice_text
+
+    manifest = dict(state.get("doc_manifest") or {})
+    chapters = requirement_chapters(manifest)
+    ok_ret = {"last_error": None, "last_error_code": None, "last_error_retryable": None}
+    extracted_flag = {"doc_index_extracted": True}
+
+    def _plain_out(req: dict[str, Any], extra: dict[str, Any] | None = None) -> dict[str, Any]:
+        return {
+            "requirement": req,
+            "doc_manifest": manifest,
+            **extracted_flag,
+            "clarify_round_user_chars": len(latest_user_text.strip()),
+            **ok_ret,
+            **mode_update,
+            **(extra or {}),
+        }
+
+    if not chapters:
+        # 只挂了接口/模型文档（没有需求章节）：无可抽取，走正常澄清追问
+        return _plain_out(existing)
+
+    batches = batch_chapters(chapters, settings.DOC_EXTRACT_BATCH_CHARS)
+    sem = asyncio.Semaphore(max(1, settings.DOC_EXTRACT_CONCURRENCY))
+
+    async def _one_batch(batch: list[dict[str, Any]]) -> tuple[dict[str, Any], list[str], bool]:
+        async with sem:
+            meta: dict[str, Any] = {}
+            blocks = "\n\n".join(
+                f"### [{ch['chapter_id']}] {ch['title']}\n"
+                + slice_text(manifest, ch, max_chars=settings.DOC_EXTRACT_MAX_CHAPTER_CHARS)
+                for ch in batch
+            )
+            raw = await invoke_json(
+                system_prompt=SYSTEM_PROMPT_DOC_EXTRACT,
+                user_prompt=DOC_EXTRACT_USER_TEMPLATE.format(chapters=blocks),
+                json_schema=DocChapterExtract.model_json_schema(),
+                response_type="doc_chapter_extract",
+                meta=meta,
+            )
+            try:
+                DocChapterExtract.model_validate(raw)
+            except ValidationError as ve:
+                raise LlmOutputFormatError(
+                    f"文档分章抽取结果不符合 schema: {ve}",
+                    validation_errors=[err["msg"] for err in ve.errors()],
+                    extra={"raw_tail": str(raw)[:200]},
+                ) from ve
+            return dict(raw), [str(ch["chapter_id"]) for ch in batch], bool(meta.get("mock"))
+
+    try:
+        results = await asyncio.gather(*(_one_batch(b) for b in batches))
+    except DevFlowError as e:
+        retry = state.get("retry_count", {}) or {}
+        retry["clarify_extract"] = retry.get("clarify_extract", 0) + 1
+        return {
+            "requirement": existing,
+            "last_error": f"[clarify_extract:{e.code}] {e.message}",
+            "last_error_code": e.code,
+            "last_error_retryable": e.retryable,
+            "retry_count": retry,
+            **mode_update,
+        }
+    except Exception as e:
+        from ..errors import wrap_exception
+        err = wrap_exception(e, context="clarify_extract:doc_index")
+        retry = state.get("retry_count", {}) or {}
+        retry["clarify_extract"] = retry.get("clarify_extract", 0) + 1
+        return {
+            "requirement": existing,
+            "last_error": f"[clarify_extract:{err.code}] {err.message}",
+            "last_error_code": err.code,
+            "last_error_retryable": err.retryable,
+            "retry_count": retry,
+            **mode_update,
+        }
+
+    fragments = [(raw, ids) for raw, ids, mock in results if not mock]
+    used_mock_only = not fragments
+    patch, alignment = merge_doc_fragments(fragments)
+    merged = _merge_requirement(existing, patch)
+    manifest["alignment"] = alignment
+
+    sources = dict(state.get("requirement_sources") or {})
+    for key, val in patch.items():
+        if key == "io_constraints":
+            for sub in ("input", "output"):
+                if _is_present(val.get(sub)):
+                    sources[f"io_constraints.{sub}"] = SOURCE_USER
+            continue
+        if _is_present(val):
+            sources[key] = SOURCE_USER  # 文档是用户提供的需求材料
+
+    title_update: dict[str, Any] = {}
+    if not used_mock_only:
+        title_update = await _ensure_session_title(state, merged)
+
+    out = _plain_out(merged, {
+        "requirement_sources": sources,
+        "clarify_round_no_progress": merged == existing,
+        **title_update,
+    })
+    if merged != existing:
+        out["requirement_confirmed"] = False
+    return out
+
+
 def clarify_extract(state: GlobalState) -> dict[str, Any]:
     """同步入口（LangGraph .invoke 使用）：内部用 asyncio.run 跑 async 实现。"""
     return asyncio.run(clarify_extract_async(state))
@@ -309,6 +575,17 @@ async def clarify_extract_async(state: GlobalState) -> dict[str, Any]:
                 **ok_ret,
                 **mode_update,
             }
+
+    # 1.7 文档目录模式：会话挂了 doc manifest、需求还基本为空、且没抽取过 →
+    # 需求字段从章节分批抽取（章节正文不进对话上下文），成功后本会话不再进此分支；
+    # 之后用户补充的消息仍走下方常规单轮抽取
+    manifest = state.get("doc_manifest")
+    if (
+        manifest
+        and not state.get("doc_index_extracted")
+        and not _requirement_has_content(existing)
+    ):
+        return await _extract_from_doc_index_async(state, existing, latest_user_text, mode_update)
 
     # 2. LLM 结构化抽取
     # 走 json_schema 档（裸补全 + 本地解析）而非 response_model 的 function_calling 档：

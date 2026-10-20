@@ -241,6 +241,10 @@ class _MockLLM:
         # 需求抽取按身份串精确识别（提示词里出现「制图」等词时不至于被制图分支抢答）
         if "严谨的需求分析师" in joined:
             return AIMessage(content=json.dumps(_MOCK_DEMO_REQUIREMENT, ensure_ascii=False))
+        # spec 缺口脑补（auto_run._FILL_SYSTEM_PROMPT）：返回需求形状演示数据，
+        # 由调用方取与缺失字段相交的键（fill_mock 标记「非真实推断」）
+        if "资深需求分析师" in joined:
+            return AIMessage(content=json.dumps(_MOCK_DEMO_REQUIREMENT, ensure_ascii=False))
         graph_payload = _mock_graph_payload(joined)
         if graph_payload is not None:
             return AIMessage(content=json.dumps(

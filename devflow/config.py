@@ -288,6 +288,20 @@ class Settings:
             os.getenv("TEST_DESIGN_SKILL_DIR", str(Path(__file__).resolve().parent.parent / ".agents" / "skills"))
         )
 
+        # ── 文档目录层（大需求文档集：多章节 + 接口/模型专用文档）──
+        # 需求正文超过该字符数、或提供多份需求文档 / 接口 / 模型文档时，
+        # 启用 manifest 模式：目录进 state、章节正文留磁盘按需切片
+        self.DOC_INDEX_MIN_CHARS: int = int(os.getenv("DOC_INDEX_MIN_CHARS", "8000"))
+        # manifest 与缓存文本的落盘根目录（会话子目录 = <root>/<thread_id>）
+        self.DOC_INDEX_ROOT: Path = Path(os.getenv("DOC_INDEX_ROOT", "./data/doc_index"))
+        # 分章 clarify：单章抽取切片上限 / 每次抽取调用的章节批量字符预算 / 并发数
+        self.DOC_EXTRACT_MAX_CHAPTER_CHARS: int = int(os.getenv("DOC_EXTRACT_MAX_CHAPTER_CHARS", "6000"))
+        self.DOC_EXTRACT_BATCH_CHARS: int = int(os.getenv("DOC_EXTRACT_BATCH_CHARS", "12000"))
+        self.DOC_EXTRACT_CONCURRENCY: int = int(os.getenv("DOC_EXTRACT_CONCURRENCY", "3"))
+        # handoff 切片：单条上限 / 每功能点切片数上限
+        self.DOC_SLICE_MAX_CHARS: int = int(os.getenv("DOC_SLICE_MAX_CHARS", "2400"))
+        self.DOC_SLICE_MAX_COUNT: int = int(os.getenv("DOC_SLICE_MAX_COUNT", "8"))
+
         # ── Pi Coding Agent（可选代码生成/测试后端；CLI 子进程接入）──
         # npm 包 @mariozechner/pi-coding-agent；pi 自身需先完成模型登录（交互运行 pi）
         self.PI_BIN: str = os.getenv("PI_BIN", "pi")

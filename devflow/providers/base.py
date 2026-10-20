@@ -194,6 +194,7 @@ class TestGenProvider(CodeProvider, ABC):
         checklists: list[dict[str, str]] | None = None,
         feature: dict[str, Any] | None = None,
         skill_paths: list[str] | None = None,
+        doc_manifest: dict[str, Any] | None = None,
     ) -> TestReport:
         """生成针对 target_symbols 的测试并运行，返回完整测试报告。
 
@@ -205,4 +206,6 @@ class TestGenProvider(CodeProvider, ABC):
                      None = 单次整单模式
         skill_paths: 技能执行器模式下要完整读取遵守的 SKILL.md 绝对路径列表；
                      None/[] = 不走技能，按 prompt 注入执行
+        doc_manifest: 文档目录层（doc_index 产物）。feature.doc_refs 会被解析为
+                     「引用 + 原文切片」注入派发上下文；None = 会话未挂文档目录
         """

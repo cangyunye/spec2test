@@ -169,6 +169,7 @@ class MockTestGen(TestGenProvider):
         checklists: list[dict[str, str]] | None = None,
         feature: dict[str, Any] | None = None,
         skill_paths: list[str] | None = None,
+        doc_manifest: dict[str, Any] | None = None,
     ) -> TestReport:
         edge_ids: list[str] = []
         if logic_graph:

@@ -30,7 +30,7 @@ from rich.table import Table
 
 from .auto_run import export_artifacts
 from .config import settings
-from .doc_reader import read_doc
+from .doc_reader import read_doc  # noqa: F401 — 对外 re-export（历史脚本 from devflow.cli import read_doc）
 from .events import events_from_stream
 from .orchestrator import build_graph, build_graph_with_providers, initial_state
 
@@ -302,13 +302,31 @@ def cmd_setup(
 def cmd_new(
     thread_id: str = typer.Option(None, "--id", help="自定义 thread_id，不填则自动生成"),
     full: bool = typer.Option(False, "--full", help="全链路模式（澄清→制图→检索→生成→测试→验收）"),
-    from_doc: str = typer.Option(None, "--from-doc", help="从 .docx/.txt/.md 文件读取初始需求"),
+    from_doc: list[str] = typer.Option(
+        None, "--from-doc",
+        help="需求文档（.docx/.txt/.md/.json 可多次）；接口/模型文档也可直接放这里，类型自动识别",
+    ),
+    api_doc: list[str] = typer.Option(
+        None, "--api-doc", help="强制按接口文档处理（可多次；自动识别失手时人工纠偏用）",
+    ),
+    model_doc: list[str] = typer.Option(
+        None, "--model-doc", help="强制按模型文档处理（可多次；自动识别失手时人工纠偏用）",
+    ),
     set_fields: list[str] = typer.Option(
         None, "--set",
         help="手动强制赋值（可多次）：--set req_type=bug_fix --set target_modules='[\"src/a.py\"]'",
     ),
 ) -> None:
-    """新开一个会话：输入需求 → 自动追问 → 生成逻辑图（--full 启用全链路）。"""
+    """新开一个会话：输入需求 → 自动追问 → 生成逻辑图（--full 启用全链路）。
+
+    文档类型自动识别：需求 / 接口 / 模型文档都从 --from-doc 递入即可（可多次、
+    可混合、单份混合文档里的接口/模型附录章节也会自动挑出），无需分类提交；
+    --api-doc / --model-doc 仅在自动识别失手时用于人工纠偏。大文档集自动走
+    manifest 模式：只把文档目录放进会话，章节正文留磁盘，澄清阶段分章抽取。
+    """
+    from .config import settings
+    from .doc_index import doc_feed_notice, ingest_docs
+
     tid = thread_id or f"t-{uuid.uuid4().hex[:8]}"
     graph = build_graph_with_providers() if full else build_graph()
     # 首次 invoke 初始化状态（必须传 initial_state 仅首次有效）
@@ -320,20 +338,41 @@ def cmd_new(
         except ValueError as e:
             console.print(f"[red]×[/] --set 参数解析失败: {e}")
             raise typer.Exit(code=1)
+
+    # 文档摄入：manifest 模式（目录进 state）或单文档直喂（原文进首条消息）
+    feed_text: str | None = None
+    if from_doc or api_doc or model_doc:
+        try:
+            manifest, req_texts = ingest_docs(
+                from_doc or [], api_doc, model_doc,
+                root=Path(settings.DOC_INDEX_ROOT) / tid,
+                threshold=settings.DOC_INDEX_MIN_CHARS,
+            )
+        except (FileNotFoundError, ValueError, ImportError) as e:
+            console.print(f"[red]×[/] 读取文档失败: {e}")
+            raise typer.Exit(code=1)
+        if manifest is not None:
+            state["doc_manifest"] = manifest
+            console.print(
+                f"[green]✓[/] 已建立文档目录: [bold]{len(manifest['chapters'])} 章 / "
+                f"{len(manifest['apis'])} 接口 / {len(manifest['models'])} 模型[/] "
+                f"→ {manifest['root']}（正文不进上下文，澄清阶段分章抽取）"
+            )
+            feed_text = doc_feed_notice(manifest)
+        else:
+            feed_text = req_texts[0]
+            console.print(
+                f"[green]✓[/] 已读取需求文档: [bold]{from_doc[0]}[/] ({len(feed_text)} 字符)"
+            )
+
     next(graph.stream(state, _config(thread_id=tid)))  # 触发 initial checkpoint
 
     mode_label = "全链路" if full else "阶段一"
     console.print(f"[green]✓[/] 已创建新会话 thread_id=[bold]{tid}[/]（{mode_label}）")
 
-    # 如果有 --from-doc，读取文档并自动喂入
-    if from_doc:
-        try:
-            doc_text = read_doc(from_doc)
-            console.print(f"[green]✓[/] 已读取需求文档: [bold]{from_doc}[/] ({len(doc_text)} 字符)")
-            _feed_input_and_stream(graph, tid, doc_text)
-        except (FileNotFoundError, ValueError, ImportError) as e:
-            console.print(f"[red]×[/] 读取文档失败: {e}")
-            raise typer.Exit(code=1)
+    # 有文档集则自动喂入首条消息（manifest 模式喂短文案，澄清阶段分章抽取）
+    if feed_text:
+        _feed_input_and_stream(graph, tid, feed_text)
 
     _interactive_loop(tid, full=full)
 
@@ -357,6 +396,12 @@ def cmd_spec(
     doc: str = typer.Argument(..., help="需求文档路径（.docx/.txt/.md）"),
     out: Path = typer.Option(Path("./artifacts"), "--out", "-o", help="产物输出根目录"),
     thread_id: str = typer.Option(None, "--id", help="自定义 thread_id，不填则自动生成 spec-xxx"),
+    api_doc: list[str] = typer.Option(
+        None, "--api-doc", help="强制按接口文档处理（可多次；自动识别失手时人工纠偏用）",
+    ),
+    model_doc: list[str] = typer.Option(
+        None, "--model-doc", help="强制按模型文档处理（可多次；自动识别失手时人工纠偏用）",
+    ),
     set_fields: list[str] = typer.Option(
         None, "--set",
         help="进入 graph 前强制赋值（可多次）：--set req_type=bug_fix --set project_root=/path",
@@ -368,6 +413,9 @@ def cmd_spec(
       - 全部门禁自动按推荐应答（图种类/清单路由/feature 问题取推荐项，验收全采纳）；
       - 需求文档信息不足时由 AI 直接脑补（逐字段标注「AI 脑补的最佳选择」，需求来源标 inferred）；
       - 全程不写 checklist 库（没有人工用例过滤步骤）。
+
+    文档类型自动识别（接口/模型文档可直接随需求文档一起提交）；大文档集自动走
+    manifest 模式：澄清阶段分章抽取，正文不整份进上下文。
 
     产物（./artifacts/<tid>/）：casecraft-tests-<tid>.csv（11 列用例）、
     casecraft-spec-<tid>.md（全过程报告）、requirement.json / logic_graph.* 等结构化产物。
@@ -381,6 +429,8 @@ def cmd_spec(
             set_fields=set_fields,
             thread_id=thread_id,
             console=console,
+            api_docs=api_doc,
+            model_docs=model_doc,
         )
     except (FileNotFoundError, ValueError, ImportError) as e:
         console.print(f"[red]×[/] 读取文档失败: {e}")

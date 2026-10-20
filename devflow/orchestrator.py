@@ -696,6 +696,8 @@ def initial_state() -> dict[str, Any]:
         "distill_dismissed": False,
         "features": [],
         "feature_questions": [],
+        "doc_manifest": None,
+        "doc_index_extracted": False,
         "last_error": None,
         "last_error_code": None,
         "last_error_retryable": False,

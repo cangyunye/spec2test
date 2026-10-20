@@ -460,6 +460,7 @@ class PiTestProvider(PiProviderBase, TestGenProvider):
         checklists: list[dict[str, str]] | None = None,
         feature: dict[str, Any] | None = None,
         skill_paths: list[str] | None = None,
+        doc_manifest: dict[str, Any] | None = None,
     ) -> TestReport:
         if not project_root:
             from .llm_testgen import LlmTestGenProvider
@@ -475,6 +476,7 @@ class PiTestProvider(PiProviderBase, TestGenProvider):
                 feedback=feedback,
                 checklists=checklists,
                 feature=feature,
+                doc_manifest=doc_manifest,
             )
         if shutil.which(self.bin_path) is None and not Path(self.bin_path).exists():
             raise PiNotInstalledError(
@@ -495,6 +497,7 @@ class PiTestProvider(PiProviderBase, TestGenProvider):
                 feedback=feedback,
                 checklists=checklists,
                 skill_paths=skill_paths,
+                doc_manifest=doc_manifest,
             )
         else:
             prompt = (

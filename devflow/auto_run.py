@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import settings
-from .doc_reader import read_doc
+from .doc_reader import read_doc  # noqa: F401 — 对外 re-export（兼容旧导入路径）
 from .errors import CLARIFY_LOOP_EXHAUSTED
 from .events import events_from_stream
 from .graph_types import suggest_graph_types
@@ -376,26 +376,51 @@ def run_spec(
     set_fields: list[str] | None = None,
     thread_id: str | None = None,
     console: Any = None,
+    api_docs: list[str] | None = None,
+    model_docs: list[str] | None = None,
 ) -> SpecResult:
     """一次性自动全流程：读文档 → 喂图 → 自动应答全部门禁 → 导出 CSV/MD。
 
     返回 SpecResult；无论成败都尽量落盘过程报告（ok=False 时也带已产出文件）。
+    大文档集（--api-doc/--model-doc 或正文超阈值）走 manifest 模式：澄清阶段
+    分章抽取，doc_text 退化为章节切片拼接（仅供缺口脑补兜底）。
     """
     from langchain_core.messages import HumanMessage
     from langgraph.types import Command
 
+    from .config import settings
+    from .doc_index import concat_chapter_slices, doc_feed_notice, ingest_docs
     from .orchestrator import build_graph_with_providers, initial_state
     from .cli import apply_assignments
 
-    doc_text = read_doc(doc_path)
     tid = thread_id or f"spec-{uuid.uuid4().hex[:8]}"
     config = {"configurable": {"thread_id": tid}}
     graph = build_graph_with_providers()
     journal = SpecJournal()
-    _say(console, f"[green]✓[/] 已读取需求文档: [bold]{doc_path}[/]（{len(doc_text)} 字符）")
+
+    manifest, req_texts = ingest_docs(
+        [doc_path], api_docs, model_docs,
+        root=Path(settings.DOC_INDEX_ROOT) / tid,
+        threshold=settings.DOC_INDEX_MIN_CHARS,
+    )
+    if manifest is not None:
+        doc_text = concat_chapter_slices(
+            manifest, per_chapter_chars=2000, total_chars=20000
+        )
+        feed_text = doc_feed_notice(manifest)
+        _say(console, f"[green]✓[/] 已建立文档目录: [bold]{len(manifest['chapters'])} 章 / "
+                      f"{len(manifest['apis'])} 接口 / {len(manifest['models'])} 模型[/] "
+                      f"→ {manifest['root']}（分章抽取，正文不整份进上下文）")
+        journal.record("doc_index", root=manifest["root"], chapters=len(manifest["chapters"]),
+                       apis=len(manifest["apis"]), models=len(manifest["models"]))
+    else:
+        doc_text = req_texts[0]
+        feed_text = doc_text
+        _say(console, f"[green]✓[/] 已读取需求文档: [bold]{doc_path}[/]（{len(doc_text)} 字符）")
+        journal.record("doc", path=str(doc_path), chars=len(doc_text))
+
     _say(console, f"[cyan]▶[/] spec 全自动模式启动 thread_id=[bold]{tid}[/]"
                   "（无评审 · 缺口 AI 脑补 · 全按推荐 · 不写 checklist 库）")
-    journal.record("doc", path=str(doc_path), chars=len(doc_text))
 
     result = SpecResult(tid=tid, ok=False, journal=journal)
     state: dict[str, Any] = {}
@@ -405,10 +430,12 @@ def run_spec(
         if set_fields:
             state["requirement"] = apply_assignments(state["requirement"], set_fields)
             journal.record("set", fields=set_fields)
+        if manifest is not None:
+            state["doc_manifest"] = manifest
         next(graph.stream(state, config))  # 触发 initial checkpoint（与 cmd_new 同路径）
 
-        # 需求文档作为首条消息喂入，走正常澄清抽取
-        _drive(graph, {"messages": [HumanMessage(content=doc_text)]}, config, console)
+        # 首条消息喂入（manifest 模式 = 短文案，抽取走分章路径；普通模式 = 全文）
+        _drive(graph, {"messages": [HumanMessage(content=feed_text)]}, config, console)
         journal.record("gate", gate="(输入)", decision="需求文档已喂入", rationale="进入澄清抽取")
 
         error: str | None = None

@@ -466,6 +466,7 @@ def make_test_gen_node(providers: Providers | None = None):
                 checklists=checklists,
                 features=features,
                 feature_questions=feature_questions,
+                doc_manifest=state.get("doc_manifest"),
             )
             if map_reduce is not None:
                 report, extra_retries, failed_notes = map_reduce
@@ -496,6 +497,7 @@ def make_test_gen_node(providers: Providers | None = None):
                 requirement=req if requirement_only else None,
                 feedback=state.get("review_feedback"),
                 checklists=checklists,
+                doc_manifest=state.get("doc_manifest"),
             )
         except DevFlowError as e:
             return _apply_error_out(
@@ -555,6 +557,7 @@ async def _run_feature_map_reduce(
     checklists: list[dict[str, str]] | None,
     features: list[dict[str, Any]],
     feature_questions: list[dict[str, Any]],
+    doc_manifest: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, int], list[str]] | None:
     """feature 拆分模式的主流程。
 
@@ -641,6 +644,7 @@ async def _run_feature_map_reduce(
                     checklists=assigned.get(fid) or None,
                     feature=feature,
                     skill_paths=skill_paths or None,
+                    doc_manifest=doc_manifest,
                 )
 
             # provider 异常重试 1 次，仍失败记 gap（不拖垮整单）
