@@ -1374,6 +1374,8 @@ def _maybe_ingest_doc_paths(tid: str, text: str) -> tuple[str | None, dict[str, 
         doc_feed_notice,
         expand_doc_inputs,
         extract_doc_candidates,
+        looks_like_path_mention,
+        scan_existing_paths,
     )
     from devflow.nodes.clarify import _merge_requirement, _requirement_has_content
     from devflow.state import SOURCE_DOC
@@ -1387,16 +1389,37 @@ def _maybe_ingest_doc_paths(tid: str, text: str) -> tuple[str | None, dict[str, 
         return text, None, None  # 已挂目录：后续消息不再识别（避免中途误吞文本）
 
     candidates = extract_doc_candidates(text)
-    if not candidates:
-        return text, None, None
-
     # 文件直取；目录按白名单扩展名一层展开（上限防整盘目录灌爆）
     existing, expanded, skipped = expand_doc_inputs(
         candidates, max_files=max(1, settings.DOC_DIR_MAX_FILES)
     )
+    # token 切分不认识带空格路径（粘贴自资源管理器常见）：候选全部落空、或存在
+    # 跳过项时，用文件系统扫描兜底（最长存在前缀），命中则并入候选。
+    # 例：「…/需求 文档 集 目录下」会先切出半截候选「…/需求」，扫描能还原完整目录。
+    residual_paths = candidates
+    if not existing or skipped:
+        scanned = [p for p in scan_existing_paths(text) if p not in candidates]
+        if scanned:
+            candidates = candidates + scanned
+            residual_paths = scanned  # 扫描命中的完整路径才能整段从消息里剥掉
+            s_files, s_exp, s_skip = expand_doc_inputs(
+                scanned, max_files=max(1, settings.DOC_DIR_MAX_FILES)
+            )
+            existing = list(dict.fromkeys(existing + s_files))
+            expanded += s_exp
+            skipped = s_skip  # 扫描命中的路径必然存在，丢弃 token 阶段的误报
+    if not candidates:
+        if looks_like_path_mention(text):
+            note = (
+                "检测到疑似文档路径，但按路径解析不到（常见原因：路径含空格且未加引号、"
+                "路径不存在、或服务端不可读）。可改用引号包裹完整路径，或上传文档；"
+                "也可以直接描述需求。"
+            )
+            return text, None, note
+        return text, None, None
 
     residual = text
-    for p in candidates:
+    for p in residual_paths:
         residual = residual.replace(p, " ")
     residual = re.sub(r"\s+", " ", residual).strip()
 
@@ -1415,7 +1438,8 @@ def _maybe_ingest_doc_paths(tid: str, text: str) -> tuple[str | None, dict[str, 
         note = (
             "消息里的路径都不存在或不可读，未按文档处理："
             + "、".join(skipped[:5])
-            + "。请检查路径（需为服务端可读的路径）后重发，或直接把需求内容贴进来。"
+            + "。请检查路径（需为服务端可读的路径）；路径含空格时请用引号包裹完整路径，"
+            "或直接上传文档。"
         )
         if win_hint:
             note += "\n" + win_hint

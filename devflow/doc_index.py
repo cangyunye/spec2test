@@ -447,6 +447,77 @@ def expand_doc_inputs(
     return list(dict.fromkeys(files)), expanded, skipped
 
 
+# ── 自由文本里的路径扫描（带空格路径的回退方案）──────────────────
+# 聊天输入按空白切 token，含空格的路径会被拆碎；资源管理器粘贴的路径还常带
+# 中文/引号/尾随说明。回退策略：找到路径起始符后，按字符尝试渐长前缀，
+# 取「磁盘上存在的最长前缀」——空格、尾随「目录下」等噪音自然被裁掉。
+_PATH_START_RE = re.compile(
+    r"(?:/|~/|\./|\.\./|[A-Za-z]:[\\/]|\\\\)"
+)
+_PATH_START_OK_PREFIX = set(" \t\n\"'「『（(")
+# 注意不含 ':'：URL（https://…）的首个 / 前是冒号，不应被当路径起点；
+# Windows 盘符（D:/…）由 _PATH_START_RE 的 drive 分支在字母处命中
+
+
+def looks_like_path_mention(text: str) -> bool:
+    """文本里是否出现路径样子的内容（用于「没识别到但确实给了路径」的提示）。"""
+    t = text or ""
+    if re.search(r"\.(md|markdown|txt|docx|json)(?![\w])", t, re.IGNORECASE):
+        return True  # 文档扩展名出现在句中即可（不要求结尾）
+    return bool(
+        re.search(r"(?:^|[\s\"'「『（(])(?:/|~/|\./|\.\./|[A-Za-z]:[\\/]|\\\\)", t)
+    )
+
+
+def scan_existing_paths(text: str, *, max_path_len: int = 400) -> list[str]:
+    """从自由文本扫描磁盘上真实存在的文档路径（文件或含文档的目录）。
+
+    作为 token 提取无结果时的回退：支持含空格/中文的路径，并用「最长存在前缀」
+    自动裁掉尾随说明文字（如「…/需求 文档」目录下）。文件要求白名单扩展名；
+    目录要求一层内至少含一份白名单文档（避免误吞 /tmp 这类无关目录）。
+    只返回路径候选，不展开。
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    s = text or ""
+    for m in _PATH_START_RE.finditer(s):
+        i = m.start()
+        if i > 0 and s[i - 1] not in _PATH_START_OK_PREFIX:
+            continue
+        # 路径候选区间：到行尾/引号/中文括号/句读为止
+        end = len(s)
+        for stop in ("\n", "\"", "'", "”", "」", "』", "）", ")", "。", "，"):
+            j = s.find(stop, i)
+            if j != -1:
+                end = min(end, j)
+        line = s[i:min(end, i + max_path_len)]
+        best = ""
+        # 从长到短，取存在的最长前缀（尾随噪音自动裁掉）
+        for cut in range(len(line), 1, -1):
+            cand = line[:cut].rstrip(" \t,;，；")
+            if len(cand) < 2:
+                continue
+            p = Path(cand)
+            try:
+                if p.is_file():
+                    if is_doc_filename(p.name):
+                        best = cand
+                        break
+                elif p.is_dir():
+                    if any(
+                        c.is_file() and is_doc_filename(c.name)
+                        for c in p.iterdir()
+                    ):
+                        best = cand
+                        break
+            except OSError:
+                continue
+        if best and best not in seen:
+            seen.add(best)
+            out.append(best)
+    return out
+
+
 # ═══════════════════════════════════════════════════════════════════
 # 目录构建：多文档 → manifest（稳定 ID + 缓存 + manifest.json 落盘）
 # ═══════════════════════════════════════════════════════════════════

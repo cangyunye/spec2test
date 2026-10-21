@@ -659,3 +659,51 @@ class TestAgentCatalogSlices:
                                   max_chars_per=100, max_slices=3) == []
         assert resolve_doc_slices(cat, {"api_ids": ["API-001"]},
                                   max_chars_per=100, max_slices=3) == []
+
+
+class TestScanExistingPaths:
+    """自由文本路径扫描：带空格/中文目录、尾随说明、目录需含文档。"""
+
+    def test_dir_with_spaces_and_trailing_prose(self, tmp_path: Path):
+        d = tmp_path / "需求 文档 集"
+        d.mkdir()
+        (d / "需求.md").write_text("x", encoding="utf-8")
+        from devflow.doc_index import scan_existing_paths
+
+        text = f"需求文档位于 {d} 目录下，请分析"
+        assert scan_existing_paths(text) == [str(d)]
+
+    def test_file_with_spaces(self, tmp_path: Path):
+        d = tmp_path / "docs v1"
+        d.mkdir()
+        f = d / "接口 说明.md"
+        f.write_text("x", encoding="utf-8")
+        from devflow.doc_index import scan_existing_paths
+
+        assert str(f) in scan_existing_paths(f"看下 {f} 这个文件")
+
+    def test_dir_without_docs_rejected(self, tmp_path: Path):
+        d = tmp_path / "plain dir"
+        d.mkdir()
+        (d / "a.png").write_bytes(b"x")
+        from devflow.doc_index import scan_existing_paths
+
+        assert scan_existing_paths(f"文件在 {d} 里") == []
+
+    def test_nonexistent_returns_empty(self):
+        from devflow.doc_index import scan_existing_paths
+
+        assert scan_existing_paths("/no/such/需求 文档") == []
+
+    def test_url_not_mistaken_as_path(self):
+        from devflow.doc_index import scan_existing_paths
+
+        assert scan_existing_paths("见 https://example.com/api/v1 文档") == []
+
+    def test_looks_like_path_mention(self):
+        from devflow.doc_index import looks_like_path_mention
+
+        assert looks_like_path_mention("路径 /data/docs 目录")
+        assert looks_like_path_mention("看 D:\\docs")
+        assert looks_like_path_mention("参考 需求.md")
+        assert not looks_like_path_mention("做一个订单系统，输入订单号")

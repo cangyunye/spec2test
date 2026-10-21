@@ -1192,3 +1192,70 @@ class TestAgentCorpusBudget:
             for m in vals.get("messages") or []
         ]
         assert any("语料约" in t and "opencode" in t for t in texts)
+
+
+class TestSpacePathIngestion:
+    """生产常见：粘贴带空格/中文的目录（资源管理器复制），token 切分拆碎后
+    必须能靠文件系统扫描兜住，而不是静默当文本追问所有字段。"""
+
+    def _wait_idle(self, client, tid: str, timeout: float = 30.0) -> None:
+        import time
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if not client.get(f"/api/sessions/{tid}").json()["running"]:
+                return
+            time.sleep(0.05)
+        raise AssertionError("会话运行超过 30s 仍未空闲")
+
+    def test_unquoted_dir_with_spaces_ingested(self, client, tmp_path):
+        d = tmp_path / "需求 文档 集"
+        d.mkdir()
+        (d / "需求.md").write_text("# 需求\n\n## 登录\n密码 8~20 位。\n", encoding="utf-8")
+        (d / "接口.md").write_text("## POST /api/login 登录\n入参：账号密码\n", encoding="utf-8")
+        tid = f"w-{uuid.uuid4().hex[:8]}"
+        assert client.post("/api/sessions", json={"thread_id": tid}).status_code == 200
+        client.post(f"/api/sessions/{tid}/messages",
+                    json={"text": f"需求文档位于 {d} 目录下，请分析"})
+        self._wait_idle(client, tid)
+
+        vals = client.get(f"/api/sessions/{tid}").json()["values"]
+        m = vals.get("doc_manifest")
+        assert m and len(m["docs"]) == 2
+        texts = [
+            str(msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", msg))
+            for msg in vals.get("messages") or []
+        ]
+        assert any("已展开目录" in t for t in texts)
+        assert not any("简单描述" in t for t in texts)
+        assert not any("不存在" in t and "已忽略" in t for t in texts)
+
+    def test_unrecognized_path_gets_actionable_note(self, client):
+        """只有文件名没有路径分隔符 → 识别不到，给「引号/上传」指引而非静默。"""
+        tid = f"w-{uuid.uuid4().hex[:8]}"
+        assert client.post("/api/sessions", json={"thread_id": tid}).status_code == 200
+        client.post(f"/api/sessions/{tid}/messages",
+                    json={"text": "参考 需求.md 这个文件（路径没给全）"})
+        self._wait_idle(client, tid)
+
+        vals = client.get(f"/api/sessions/{tid}").json()["values"]
+        assert not vals.get("doc_manifest")
+        texts = [
+            str(msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", msg))
+            for msg in vals.get("messages") or []
+        ]
+        assert any("疑似文档路径" in t and "引号" in t for t in texts)
+
+    def test_missing_dir_note_mentions_quoting_and_upload(self, client):
+        tid = f"w-{uuid.uuid4().hex[:8]}"
+        assert client.post("/api/sessions", json={"thread_id": tid}).status_code == 200
+        client.post(f"/api/sessions/{tid}/messages",
+                    json={"text": "需求文档在 /no/such 目录下"})
+        self._wait_idle(client, tid)
+
+        vals = client.get(f"/api/sessions/{tid}").json()["values"]
+        assert not vals.get("doc_manifest")
+        texts = [
+            str(msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", msg))
+            for msg in vals.get("messages") or []
+        ]
+        assert any("引号" in t and "上传" in t for t in texts)
