@@ -707,3 +707,25 @@ class TestScanExistingPaths:
         assert looks_like_path_mention("看 D:\\docs")
         assert looks_like_path_mention("参考 需求.md")
         assert not looks_like_path_mention("做一个订单系统，输入订单号")
+
+
+class TestCurlyQuotes:
+    """中文输入法的全角双引号（U+201C/U+201D）包路径：生产实测识别失败点。"""
+
+    def test_scan_curly_quoted_dir_with_spaces(self, tmp_path: Path):
+        d = tmp_path / "需求 文档"
+        d.mkdir()
+        (d / "需求.md").write_text("x", encoding="utf-8")
+        from devflow.doc_index import scan_existing_paths
+
+        assert scan_existing_paths(f"文档位于“{d}”目录下") == [str(d)]
+
+    def test_token_curly_quoted_file(self):
+        from devflow.doc_index import extract_doc_candidates
+
+        assert extract_doc_candidates("看“/a/b.md”这个文件") == ["/a/b.md"]
+
+    def test_looks_like_path_mention_curly_windows(self):
+        from devflow.doc_index import looks_like_path_mention
+
+        assert looks_like_path_mention("路径：“D:\\docs\\需求”")

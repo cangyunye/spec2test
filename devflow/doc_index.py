@@ -335,12 +335,12 @@ def classify_docs(
 _DOC_EXT_RE = re.compile(r"\.(md|markdown|txt|docx|json)$", re.IGNORECASE)
 # 注意不含 `.`——会把 ./x.md 的相对前缀剥掉；不含右括号——目录名可能自带
 # 尾括号（…\备份（2024）），只有「文件名 + 尾标点」形态才截到扩展名
-_PATH_TOKEN_STRIP = "，,;；！!？?'\""
+_PATH_TOKEN_STRIP = "，,;；！!？?'\"“”"
 _WIN_ABS_RE = re.compile(r"^[A-Za-z]:[\\/]")
 _UNC_RE = re.compile(r"^\\\\")
 # 文件名前缀 + 尾随标点/括号（如 /x/y.md））→ 截到扩展名
 _FILE_WITH_TAIL_RE = re.compile(
-    r"^(.*?\.(?:md|markdown|txt|docx|json))[）)\]】」'\"，,;；！!？?\s]*$",
+    r"^(.*?\.(?:md|markdown|txt|docx|json))[）)\]】」'\"“”，,;；！!？?\s]*$",
     re.IGNORECASE,
 )
 
@@ -354,9 +354,9 @@ def _iter_path_tokens(text: str) -> list[str]:
     """消息 → 路径 token（粗切分 + 引号/注解清理）。"""
     out: list[str] = []
     for tok in re.split(r"[\s，。；、|]+", text or ""):
-        # 描述句里被引号夹住的路径（需求文档位于"D:\…\通知"目录下）：
+        # 描述句里被引号夹住的路径（需求文档位于"D:\…\通知"目录下 / “D:\…”）：
         # 引号内容含分隔符才算路径，否则保留原 token 继续别的清理
-        m = re.search(r"[\"'「『]([^\"'」』]+)[\"'」』]", tok)
+        m = re.search(r"[\"'“”「『]([^\"'“”」』]+)[\"'“”」』]", tok)
         if m and ("/" in m.group(1) or "\\" in m.group(1)):
             tok = m.group(1)
         else:
@@ -369,7 +369,7 @@ def _iter_path_tokens(text: str) -> list[str]:
                 # 文件名 + 尾随标点（含右括号）：截到扩展名，目录路径原样保留
                 m3 = _FILE_WITH_TAIL_RE.match(tok)
                 tok = m3.group(1) if m3 else tok.strip(_PATH_TOKEN_STRIP)
-        tok = tok.strip().strip("'\"")
+        tok = tok.strip().strip("'\"“”")
         if tok:
             out.append(tok)
     return out
@@ -454,9 +454,11 @@ def expand_doc_inputs(
 _PATH_START_RE = re.compile(
     r"(?:/|~/|\./|\.\./|[A-Za-z]:[\\/]|\\\\)"
 )
-_PATH_START_OK_PREFIX = set(" \t\n\"'「『（(")
+_PATH_START_OK_PREFIX = set(" \t\n\"'“”「『（(")
 # 注意不含 ':'：URL（https://…）的首个 / 前是冒号，不应被当路径起点；
-# Windows 盘符（D:/…）由 _PATH_START_RE 的 drive 分支在字母处命中
+# Windows 盘符（D:/…）由 _PATH_START_RE 的 drive 分支在字母处命中。
+# “” 是中文全角双引号（U+201C/U+201D）：中文输入法包路径时常写成
+# “D:\…”，若不在 OK 前缀里，前导引号会让候选被跳过 → 路径识别失败
 
 
 def looks_like_path_mention(text: str) -> bool:
@@ -465,7 +467,7 @@ def looks_like_path_mention(text: str) -> bool:
     if re.search(r"\.(md|markdown|txt|docx|json)(?![\w])", t, re.IGNORECASE):
         return True  # 文档扩展名出现在句中即可（不要求结尾）
     return bool(
-        re.search(r"(?:^|[\s\"'「『（(])(?:/|~/|\./|\.\./|[A-Za-z]:[\\/]|\\\\)", t)
+        re.search(r"(?:^|[\s\"'“”「『（(])(?:/|~/|\./|\.\./|[A-Za-z]:[\\/]|\\\\)", t)
     )
 
 
