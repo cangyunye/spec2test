@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import shutil
@@ -46,6 +47,8 @@ from devflow.doctor import first_run_notice
 from devflow.events import events_from_stream
 from devflow.orchestrator import _get_sqlite_conn, build_graph_with_providers, initial_state
 from devflow.timetravel import list_steps, revert as revert_thread
+
+logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -1334,28 +1337,45 @@ def _gate_resume(
 
 
 def _maybe_ingest_doc_paths(tid: str, text: str) -> tuple[str | None, dict[str, Any] | None, str | None]:
-    """聊天路径识别：消息里贴了文档路径 → 自动建目录挂会话。
+    """聊天路径识别：消息里贴了文档路径/目录 → 建语料目录挂会话。
 
-    会话尚未挂 manifest 且消息含白名单扩展名的真实文件路径时，按内容嗅探分拣
-    建 doc manifest 并 update_state 写入会话（同步重 IO，调用方须放线程池，
-    且只在 start_run 的锁内执行——锁外写 checkpoint 会与运行中的图并发）。
+    会话尚未挂 manifest 且消息含可读的文档候选（POSIX / Windows 盘符路径的文件，
+    或绝对目录——目录按白名单扩展名一层展开、上限 DOC_DIR_MAX_FILES）时：
+      - DOC_ANALYZE_PROVIDER=opencode/pi（或 auto 且本机装了对应 CLI）：
+        把语料路径交给 agent 读取分析，结构化返回需求关键要素 + 目录摘要；
+        失败自动回退本地解析并在提示里注明原因
+      - local（默认回退）：按内容嗅探分拣建 doc manifest + 分章抽取
+    同步重 IO / CLI 子进程，调用方须放线程池，且只在 start_run 的锁内执行。
 
     返回 (最终消息文本或 None, manifest 或 None, 用户提示或 None)：
-      - 全部成功 → (残留正文或载入回执, manifest, None)
-      - 部分路径不存在 → manifest 照建，提示注明跳过清单
-      - 路径都不存在 / 建目录失败 → (剥掉路径后的残留文本或 None, None, 引导提示)
+      - 成功 → (残留正文或载入回执, manifest, None/展开与跳过回执)
+      - 部分路径不存在 → 照常处理，提示注明跳过清单
+      - 路径都不存在 / 处理失败 → (剥掉路径后的残留文本或 None, None, 引导提示)
+        （Windows 盘符路径出现在非 Windows 服务上时额外说明，而不是静默当文本）
       - 会话已写入过需求内容 → 不摄入（分章抽取只跑一次的守卫会让 manifest
         半生效），提示新开会话再贴文档
     最终文本为 None = 本轮不放 HumanMessage（只剩提示）。
     """
+    import os as _os
+
     from devflow.config import settings
+    from devflow.doc_agent import (
+        agent_feed_notice,
+        analyze_docs,
+        catalog_from_agent,
+        error_note,
+        patch_from_agent,
+        resolve_analyze_provider,
+    )
     from devflow.doc_index import (
         build_doc_index,
         classify_docs,
         doc_feed_notice,
-        extract_doc_paths,
+        expand_doc_inputs,
+        extract_doc_candidates,
     )
-    from devflow.nodes.clarify import _requirement_has_content
+    from devflow.nodes.clarify import _merge_requirement, _requirement_has_content
+    from devflow.state import SOURCE_DOC
 
     graph = build_graph_with_providers()
     try:
@@ -1365,22 +1385,39 @@ def _maybe_ingest_doc_paths(tid: str, text: str) -> tuple[str | None, dict[str, 
     if vals.get("doc_manifest"):
         return text, None, None  # 已挂目录：后续消息不再识别（避免中途误吞文本）
 
-    candidates = extract_doc_paths(text)
+    candidates = extract_doc_candidates(text)
     if not candidates:
         return text, None, None
-    existing = [p for p in candidates if Path(p).is_file()]
-    skipped = [p for p in candidates if p not in existing]
+
+    # 文件直取；目录按白名单扩展名一层展开（上限防整盘目录灌爆）
+    existing, expanded, skipped = expand_doc_inputs(
+        candidates, max_files=max(1, settings.DOC_DIR_MAX_FILES)
+    )
+
     residual = text
     for p in candidates:
         residual = residual.replace(p, " ")
     residual = re.sub(r"\s+", " ", residual).strip()
 
+    # Windows 盘符/UNC 路径出现在非 Windows 服务上：明确告知，别让用户以为系统装没看见
+    win_like = [
+        p for p in skipped
+        if re.match(r"^[A-Za-z]:[\\/]", p) or p.startswith("\\\\")
+    ]
+    win_hint = (
+        "检测到 Windows 盘符路径（" + "、".join(win_like[:3]) + "），但当前服务运行在"
+        "非 Windows 系统，读不到该路径——请上传文档，或改用本机可读的路径。"
+        if win_like and _os.name != "nt" else ""
+    )
+
     if not existing:
         note = (
             "消息里的路径都不存在或不可读，未按文档处理："
             + "、".join(skipped[:5])
-            + "。请检查路径（需为服务端可读的绝对路径）后重发，或直接把需求内容贴进来。"
+            + "。请检查路径（需为服务端可读的路径）后重发，或直接把需求内容贴进来。"
         )
+        if win_hint:
+            note += "\n" + win_hint
         return (residual or None), None, note
     if _requirement_has_content(vals.get("requirement") or {}):
         note = (
@@ -1390,8 +1427,55 @@ def _maybe_ingest_doc_paths(tid: str, text: str) -> tuple[str | None, dict[str, 
         )
         return (residual or None), None, note
 
-    reqs, apis, models = classify_docs(existing)
+    # 提示拼装（展开/跳过/跨系统）——agent 与本地两条路共用
+    note_parts: list[str] = []
+    if expanded:
+        note_parts.append("已展开目录：" + "、".join(expanded[:3]))
+    if skipped:
+        note_parts.append(
+            f"{len(skipped)} 个路径未找到已忽略：" + "、".join(skipped[:5])
+        )
+    if win_hint:
+        note_parts.append(win_hint)
+    note = "；".join(note_parts) or None
+
+    # agent 模式：opencode/pi 直接读取语料并梳理关键要素（服务端不自读原文）
+    provider = resolve_analyze_provider()
+    if provider != "local":
+        try:
+            payload = asyncio.run(analyze_docs(existing, provider=provider))
+        except Exception as e:  # noqa: BLE001 — agent 失败回退本地，不阻断流程
+            logger.warning("doc agent(%s) 分析失败，回退本地解析: %s", provider, e)
+            note = (note + "；" if note else "") + error_note(e)
+        else:
+            patch = patch_from_agent(payload)
+            catalog = catalog_from_agent(payload, existing, provider)
+            merged = _merge_requirement(vals.get("requirement") or {}, patch)
+            sources = dict(vals.get("requirement_sources") or {})
+            for key, val in patch.items():
+                if key == "io_constraints":
+                    for sub in ("input", "output"):
+                        if str(val.get(sub) or "").strip():
+                            sources[f"io_constraints.{sub}"] = SOURCE_DOC
+                elif val:
+                    sources[key] = SOURCE_DOC
+            graph.update_state(_config(thread_id=tid), {
+                "requirement": merged,
+                "requirement_sources": sources,
+                "doc_manifest": catalog,
+                "doc_index_extracted": True,  # 无须再走分章抽取
+                "doc_source_paths": list(existing),
+                "requirement_confirmed": False,
+            })
+            logger.info("doc agent(%s) 分析完成：%d 份文档 / %d 接口 / %d 模型",
+                        provider, len(catalog["docs"]), len(catalog["apis"]),
+                        len(catalog["models"]))
+            final = residual or agent_feed_notice(catalog, provider)
+            return final, catalog, note
+
+    # local 回退/默认：确定性摄入 + 分章抽取
     try:
+        reqs, apis, models = classify_docs(existing)
         manifest = build_doc_index(
             reqs, apis, models, root=Path(settings.DOC_INDEX_ROOT) / tid
         )
@@ -1400,11 +1484,6 @@ def _maybe_ingest_doc_paths(tid: str, text: str) -> tuple[str | None, dict[str, 
         return (residual or None), None, note
 
     graph.update_state(_config(thread_id=tid), {"doc_manifest": manifest})
-
-    note = None
-    if skipped:
-        note = (f"已载入 {len(existing)} 份文档；{len(skipped)} 个路径不存在已忽略："
-                + "、".join(skipped[:5]))
     final = residual or doc_feed_notice(manifest)
     return final, manifest, note
 

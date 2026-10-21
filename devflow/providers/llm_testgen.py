@@ -35,6 +35,7 @@ def _doc_slices_section(
 
     parts: list[str] = []
     refs = normalize_doc_refs((feature or {}).get("doc_refs"))
+    slices = []
     if refs and any(refs.values()):
         from ..config import settings
 
@@ -43,23 +44,32 @@ def _doc_slices_section(
             max_chars_per=settings.DOC_SLICE_MAX_CHARS,
             max_slices=settings.DOC_SLICE_MAX_COUNT,
         )
-        if slices:
-            parts.append(
-                "【关联文档切片（原文摘录，设计依据以此为准，不要凭转述想象契约）】"
-            )
-            for s in slices:
-                parts.append(f"—— [{s['ref']}] {s['title']} ——")
-                parts.append(s["text"])
+    if slices:
+        parts.append(
+            "【关联文档切片（原文摘录，设计依据以此为准，不要凭转述想象契约）】"
+        )
+        for s in slices:
+            parts.append(f"—— [{s['ref']}] {s['title']} ——")
+            parts.append(s["text"])
     else:
+        # agent 分析模式下没有行号切片 → 退回目录视图（条目/接口/模型清单）
         view = render_manifest_view(doc_manifest)
         if view:
-            parts.append("【文档目录清单（需求条目的原文出处，涉及接口/模型时按 id 对应的目录条目设计）】")
+            parts.append("【文档目录清单（需求条目的出处，涉及接口/模型时按 id 对应的目录条目设计）】")
             parts.append(view)
     mdir = manifest_dir(doc_manifest)
     if mdir and parts:
         parts.append(
             f"完整文档目录清单：{mdir}/manifest.json"
             "（需要更多原文时按 chapter_id/api_id/model_id 在清单中定位）"
+        )
+    src_paths = [
+        str(p) for p in (doc_manifest.get("source_paths") or []) if str(p).strip()
+    ]
+    if src_paths:
+        parts.append(
+            "原始文档语料路径（agent 分析模式：切片不可用，需要细节时按路径回查原文）：\n"
+            + "\n".join(f"- {p}" for p in src_paths[:20])
         )
     return "\n".join(parts)
 

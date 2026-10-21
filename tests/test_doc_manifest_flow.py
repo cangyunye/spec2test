@@ -164,7 +164,7 @@ class TestClarifyDocIndex:
 
     @pytest.mark.asyncio
     async def test_extract_runs_only_once(self, monkeypatch, manifest):
-        """doc_index_extracted 已置位 → 走常规单轮抽取，不再分章调用。"""
+        """doc_index_extracted 已置位 → 用户新消息走常规单轮抽取，不再分章调用。"""
         extract_calls: list[dict] = []
 
         async def fake_json(**kwargs):
@@ -173,7 +173,8 @@ class TestClarifyDocIndex:
 
         monkeypatch.setattr("devflow.nodes.clarify.invoke_json", fake_json)
         out = await clarify_extract_async(
-            _state(manifest, doc_index_extracted=True)
+            _state(manifest, doc_index_extracted=True,
+                   messages=[HumanMessage(content="补充一下：用户背景是订单系统")])
         )  # type: ignore[arg-type]
         assert out["requirement"]["project_context"] == "用户补充的背景"
         assert "doc_chapter_extract" not in "".join(
@@ -745,7 +746,7 @@ class TestChatIngestFeedback:
         m = vals.get("doc_manifest")
         assert m and len(m["docs"]) == 1
         texts = [str(getattr(msg, "content", msg)) for msg in vals.get("messages") or []]
-        assert any("不存在已忽略" in t and "/no/such/api.json" in t for t in texts)
+        assert any("未找到已忽略" in t and "/no/such/api.json" in t for t in texts)
 
     def test_delete_session_removes_doc_dir(self, client, tmp_path):
         """删除会话回收文档目录（聊天识别建的 DOC_INDEX_ROOT/<tid>）。"""
@@ -942,3 +943,178 @@ class TestMultiBatchContractPrecedence:
         assert req["io_constraints"]["output"] == "审核结论 JSON"
         assert req["acceptance_criteria"] == ["密码长度 8~20 位"]  # 接口条目未混入
         assert len(calls) >= 3  # 每章独立批
+
+
+class TestDirectoryWindowsPaths:
+    def _wait_idle(self, client, tid: str, timeout: float = 30.0) -> None:
+        import time
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if not client.get(f"/api/sessions/{tid}").json()["running"]:
+                return
+            time.sleep(0.05)
+        raise AssertionError("会话运行超过 30s 仍未空闲")
+
+    def test_directory_path_expands_one_level(self, client, tmp_path):
+        """贴目录路径 → 一层展开白名单文档（png 忽略）+ 展开回执。"""
+        d = tmp_path / "docdir"
+        d.mkdir()
+        (d / "需求.md").write_text("# 需求\n\n## 登录\n密码 8~20 位。\n", encoding="utf-8")
+        (d / "api.md").write_text(
+            "## POST /api/login 登录\n请求体：账号密码\n", encoding="utf-8")
+        (d / "截图.png").write_bytes(b"\x89PNG")
+        tid = f"w-{uuid.uuid4().hex[:8]}"
+        assert client.post("/api/sessions", json={"thread_id": tid}).status_code == 200
+        client.post(f"/api/sessions/{tid}/messages", json={"text": str(d)})
+        self._wait_idle(client, tid)
+
+        vals = client.get(f"/api/sessions/{tid}").json()["values"]
+        m = vals.get("doc_manifest")
+        assert m and len(m["docs"]) == 2  # png 被白名单过滤
+        texts = [str(getattr(msg, "content", msg)) for msg in vals.get("messages") or []]
+        assert any("已展开目录" in t for t in texts)
+
+    def test_windows_path_on_posix_gets_explicit_hint(self, client):
+        """Windows 盘符路径出现在非 Windows 服务 → 明确提示而不是静默当文本。"""
+        import os
+
+        if os.name == "nt":
+            pytest.skip("仅验证非 Windows 服务上的跨系统提示")
+        tid = f"w-{uuid.uuid4().hex[:8]}"
+        assert client.post("/api/sessions", json={"thread_id": tid}).status_code == 200
+        client.post(
+            f"/api/sessions/{tid}/messages",
+            json={"text": r"需求文档位于 D:\test_cases\BR20261009012\需求 目录下"},
+        )
+        self._wait_idle(client, tid)
+
+        vals = client.get(f"/api/sessions/{tid}").json()["values"]
+        assert not vals.get("doc_manifest")
+        texts = [
+            str(m.get("content") if isinstance(m, dict) else getattr(m, "content", m))
+            for m in vals.get("messages") or []
+        ]
+        assert any("非 Windows 系统" in t and "D:\\test_cases" in t for t in texts)
+
+
+class TestAgentAnalyzeMode:
+    """DOC_ANALYZE_PROVIDER=opencode/pi：agent 读语料 → 预填需求；失败回退本地。"""
+
+    def _wait_idle(self, client, tid: str, timeout: float = 30.0) -> None:
+        import time
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if not client.get(f"/api/sessions/{tid}").json()["running"]:
+                return
+            time.sleep(0.05)
+        raise AssertionError("会话运行超过 30s 仍未空闲")
+
+    def _payload(self) -> dict:
+        return {
+            "req_type": "new_feature",
+            "project_context": "V网通话查询接口改造",
+            "target_modules": ["queryServNumberVnetVoiceUsage"],
+            "io_constraints": {"input": "servNumber 必填", "output": "usageList 数组"},
+            "edge_cases": ["号码不存在返回空列表"],
+            "acceptance_criteria": ["与计费话单一致"],
+            "apis": [{"method": "post", "path": "/queryServNumberVnetVoiceUsage",
+                      "summary": "查询"}],
+            "models": [{"name": "VnetUsage", "fields": ["servNumber"]}],
+            "files": [{"path": "/docs/接口.md", "summary": "接口协议"}],
+        }
+
+    def test_agent_fills_requirement_and_catalog(self, client, tmp_path, monkeypatch):
+        from devflow.config import settings as _s
+
+        d = tmp_path / "agentdocs"
+        d.mkdir()
+        (d / "接口.md").write_text("## POST /x\n入参 servNumber\n", encoding="utf-8")
+        monkeypatch.setattr(_s, "DOC_ANALYZE_PROVIDER", "opencode")
+        calls = {}
+
+        async def fake_analyze(paths, provider=None):
+            calls["paths"] = paths
+            calls["provider"] = provider
+            return self._payload()
+
+        monkeypatch.setattr("devflow.doc_agent.analyze_docs", fake_analyze)
+
+        tid = f"w-{uuid.uuid4().hex[:8]}"
+        assert client.post("/api/sessions", json={"thread_id": tid}).status_code == 200
+        client.post(f"/api/sessions/{tid}/messages", json={"text": str(d / "接口.md")})
+        self._wait_idle(client, tid)
+
+        vals = client.get(f"/api/sessions/{tid}").json()["values"]
+        req = vals.get("requirement") or {}
+        assert req["io_constraints"]["input"] == "servNumber 必填"
+        assert req["acceptance_criteria"] == ["与计费话单一致"]
+        assert vals["requirement_sources"]["io_constraints.input"] == "doc"
+        cat = vals.get("doc_manifest")
+        assert cat and cat.get("mode") == "agent" and cat.get("provider") == "opencode"
+        assert cat["source_paths"] == [str(d / "接口.md")]
+        assert vals.get("doc_index_extracted") is True
+        texts = [
+            str(m.get("content") if isinstance(m, dict) else getattr(m, "content", m))
+            for m in vals.get("messages") or []
+        ]
+        assert any("opencode" in t and "读取并分析" in t for t in texts)
+        assert calls["provider"] == "opencode"
+
+    def test_agent_failure_falls_back_to_local(self, client, tmp_path, monkeypatch):
+        from devflow.config import settings as _s
+
+        d = tmp_path / "agentfail"
+        d.mkdir()
+        (d / "需求.md").write_text("# 需求\n\n## 登录\n密码 8~20 位。\n", encoding="utf-8")
+        monkeypatch.setattr(_s, "DOC_ANALYZE_PROVIDER", "pi")
+
+        async def fake_analyze(paths, provider=None):
+            raise RuntimeError("pi 未登录")
+
+        monkeypatch.setattr("devflow.doc_agent.analyze_docs", fake_analyze)
+
+        tid = f"w-{uuid.uuid4().hex[:8]}"
+        assert client.post("/api/sessions", json={"thread_id": tid}).status_code == 200
+        client.post(f"/api/sessions/{tid}/messages", json={"text": str(d / "需求.md")})
+        self._wait_idle(client, tid)
+
+        vals = client.get(f"/api/sessions/{tid}").json()["values"]
+        cat = vals.get("doc_manifest")
+        assert cat and cat.get("mode") != "agent"  # 回退本地 manifest 形态
+        assert cat.get("chapters")  # 本地切章成功
+        texts = [
+            str(m.get("content") if isinstance(m, dict) else getattr(m, "content", m))
+            for m in vals.get("messages") or []
+        ]
+        assert any("已回退本地解析" in t for t in texts)
+
+    def test_agent_prompt_reaches_handoff_with_source_paths(self, tmp_path):
+        """agent 目录（无切片）→ handoff prompt 带原始语料路径供执行器回查。"""
+        from devflow.doc_agent import catalog_from_agent
+        from devflow.feature_split import build_feature_design_prompt, make_feature
+
+        cat = catalog_from_agent(self._payload(), ["/docs/接口.md", "/docs/模型.md"], "opencode")
+        f = make_feature("F1", "查询", doc_refs={"api_ids": ["API-001"]})
+        prompt = build_feature_design_prompt(f, doc_manifest=cat)
+        assert "原始文档语料路径" in prompt
+        assert "/docs/接口.md" in prompt and "/docs/模型.md" in prompt
+
+
+class TestFeedNoticeGuard:
+    @pytest.mark.asyncio
+    async def test_agent_feed_notice_not_extracted(self, monkeypatch, manifest):
+        """agent 分析回执不是需求内容：已分析过时直接跳过抽取（防 mock/弱模型覆盖）。"""
+        calls: list[dict] = []
+
+        async def fake_json(**kwargs):
+            calls.append(kwargs)
+            return {"project_context": "不该出现的覆盖"}
+
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_json", fake_json)
+        st = _state(manifest, doc_index_extracted=True, messages=[HumanMessage(
+            content="（已由 opencode 读取并分析文档集：2 份文档 / 1 个接口 / 1 个模型，"
+                    "需求要素已写入清单。全部文档正文不进对话上下文。）"
+        )])
+        out = await clarify_extract_async(st)  # type: ignore[arg-type]
+        assert calls == []
+        assert out["requirement"] == empty_requirement()

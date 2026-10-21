@@ -301,6 +301,14 @@ class Settings:
         # 接口/模型文档章节作为受限上下文参与抽取的章数上限（只用于抽取
         # io_constraints，防止大接口文档把抽取上下文撑爆）
         self.DOC_EXTRACT_MAX_CTX_CHAPTERS: int = int(os.getenv("DOC_EXTRACT_MAX_CTX_CHAPTERS", "12"))
+        # 聊天里贴目录路径时一层展开的文件数上限（白名单扩展名，防整盘目录灌爆）
+        self.DOC_DIR_MAX_FILES: int = int(os.getenv("DOC_DIR_MAX_FILES", "20"))
+        # 文档语料分析器：auto（装了 opencode 用 opencode，其次 pi，都没有回落 local）
+        # / local（服务端确定性摄入 + 分章抽取）/ opencode / pi（由本机 agent CLI
+        # 直接读取语料并梳理关键要素）。注意 agent 与服务同一文件系统，跨机器路径读不到。
+        self.DOC_ANALYZE_PROVIDER: str = os.getenv("DOC_ANALYZE_PROVIDER", "auto").strip().lower()
+        # agent 读取分析语料的单次超时（大文档集读取+归纳，给足）
+        self.DOC_ANALYZE_TIMEOUT_SEC: int = int(os.getenv("DOC_ANALYZE_TIMEOUT_SEC", "600"))
         # handoff 切片：单条上限 / 每功能点切片数上限
         self.DOC_SLICE_MAX_CHARS: int = int(os.getenv("DOC_SLICE_MAX_CHARS", "2400"))
         self.DOC_SLICE_MAX_COUNT: int = int(os.getenv("DOC_SLICE_MAX_COUNT", "8"))

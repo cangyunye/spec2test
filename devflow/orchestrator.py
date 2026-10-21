@@ -698,6 +698,7 @@ def initial_state() -> dict[str, Any]:
         "feature_questions": [],
         "doc_manifest": None,
         "doc_index_extracted": False,
+        "doc_source_paths": [],
         "last_error": None,
         "last_error_code": None,
         "last_error_retryable": False,

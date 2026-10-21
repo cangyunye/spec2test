@@ -209,6 +209,7 @@ class GlobalState(TypedDict, total=False):
     feature_questions: list[dict[str, Any]]  # 拆分阶段待确认问题（feature_gate 门禁承接用）
     doc_manifest: Optional[dict[str, Any]]   # 文档目录层（大文档集）：目录+ID+行号坐标；章节正文留磁盘不进 state
     doc_index_extracted: bool                # 分章 clarify 是否已对 manifest 跑过逐章抽取（只跑一次）
+    doc_source_paths: list[str]              # agent 分析模式的原始语料路径（handoff 时供执行器按路径回查）
 
     # ── 3. 子系统会话映射 ──────────────────────────────
     opencode_sessions: OpenCodeSessions

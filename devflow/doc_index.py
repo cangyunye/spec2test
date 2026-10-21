@@ -329,32 +329,122 @@ def classify_docs(
     return buckets["requirement"], buckets["api"], buckets["model"]
 
 
-# 聊天路径识别：只认含路径分隔符 + 白名单扩展名的 token（裸文件名如「需求.md」
-# 歧义太大——相对谁？——不认）；分隔符 charset 排除常见 CJK 标点，容忍路径
-# 紧跟中文标点结尾。带空格的路径认不了，请用上传/CLI 入口。
+# 聊天路径识别：认「文件路径」（白名单扩展名）与「绝对目录」（可一层展开）；
+# 裸文件名（需求.md）歧义太大——相对谁？——不认；带空格的路径认不了，用上传/CLI。
+# 兼容 POSIX（/ 或 ~/ 或 ./）与 Windows（盘符 X:\ 或 UNC \\server\share）两种形态。
 _DOC_EXT_RE = re.compile(r"\.(md|markdown|txt|docx|json)$", re.IGNORECASE)
-# 注意不含 `.`——会把 ./x.md 的相对前缀剥掉
-_PATH_TOKEN_STRIP = "，,;；！!？?）)】」'\""
+# 注意不含 `.`——会把 ./x.md 的相对前缀剥掉；不含右括号——目录名可能自带
+# 尾括号（…\备份（2024）），只有「文件名 + 尾标点」形态才截到扩展名
+_PATH_TOKEN_STRIP = "，,;；！!？?'\""
+_WIN_ABS_RE = re.compile(r"^[A-Za-z]:[\\/]")
+_UNC_RE = re.compile(r"^\\\\")
+# 文件名前缀 + 尾随标点/括号（如 /x/y.md））→ 截到扩展名
+_FILE_WITH_TAIL_RE = re.compile(
+    r"^(.*?\.(?:md|markdown|txt|docx|json))[）)\]】」'\"，,;；！!？?\s]*$",
+    re.IGNORECASE,
+)
 
 
-def extract_doc_paths(text: str) -> list[str]:
-    """从聊天消息里提取文档路径候选（去重保序）。
+def is_doc_filename(name: str) -> bool:
+    """文件名是否属于摄入白名单（目录展开时过滤用）。"""
+    return bool(_DOC_EXT_RE.search(str(name or "")))
 
-    判据：token 含 `/`（绝对路径、~/、./ 或任意相对子路径）且以白名单扩展名结尾。
-    只提取候选、不做存在性判断（调用方负责 is_file 过滤）。
+
+def _iter_path_tokens(text: str) -> list[str]:
+    """消息 → 路径 token（粗切分 + 引号/注解清理）。"""
+    out: list[str] = []
+    for tok in re.split(r"[\s，。；、|]+", text or ""):
+        # 描述句里被引号夹住的路径（需求文档位于"D:\…\通知"目录下）：
+        # 引号内容含分隔符才算路径，否则保留原 token 继续别的清理
+        m = re.search(r"[\"'「『]([^\"'」』]+)[\"'」』]", tok)
+        if m and ("/" in m.group(1) or "\\" in m.group(1)):
+            tok = m.group(1)
+        else:
+            # 紧贴注释的括号组只在前面是文档文件名时剥（…models.md（按这些
+            # 文档来））；目录名自带尾括号（…\备份（2024））不误伤
+            m2 = re.match(r"^(.*)(（[^）]*）)$", tok)
+            if m2 and _DOC_EXT_RE.search(m2.group(1)):
+                tok = m2.group(1)
+            else:
+                # 文件名 + 尾随标点（含右括号）：截到扩展名，目录路径原样保留
+                m3 = _FILE_WITH_TAIL_RE.match(tok)
+                tok = m3.group(1) if m3 else tok.strip(_PATH_TOKEN_STRIP)
+        tok = tok.strip().strip("'\"")
+        if tok:
+            out.append(tok)
+    return out
+
+
+def _is_abs_path(tok: str) -> bool:
+    return bool(
+        tok.startswith(("/", "~/", "./", "../"))
+        or _WIN_ABS_RE.match(tok)
+        or _UNC_RE.match(tok)
+    )
+
+
+def extract_doc_candidates(text: str) -> list[str]:
+    """消息 → 文档摄入候选（文件或绝对目录，去重保序）。
+
+    - 文件：含路径分隔符（/ 或 \\）+ 白名单扩展名（允许相对子路径 a/b.md）
+    - 目录：绝对路径形态且无白名单扩展名（调用方负责 is_dir 判断并一层展开）
+    只提取候选、不做存在性判断。
     """
     out: list[str] = []
     seen: set[str] = set()
-    for tok in re.split(r"[\s，。；、|]+", text or ""):
-        # 路径后紧贴中文括号注释（"…models.md（按这些文档来）"）：先剥尾缀括号组
-        tok = re.sub(r"（[^）]*）$", "", tok)
-        tok = tok.strip(_PATH_TOKEN_STRIP)
-        if not tok or "/" not in tok or not _DOC_EXT_RE.search(tok):
+    for tok in _iter_path_tokens(text):
+        has_sep = ("/" in tok) or ("\\" in tok)
+        if not has_sep:
+            continue
+        if _DOC_EXT_RE.search(tok):
+            pass  # 文件形态
+        elif _is_abs_path(tok):
+            pass  # 目录形态候选
+        else:
             continue
         if tok not in seen:
             seen.add(tok)
             out.append(tok)
     return out
+
+
+def extract_doc_paths(text: str) -> list[str]:
+    """从聊天消息里提取文档**文件**路径候选（去重保序，目录候选已滤掉）。
+
+    判据：含路径分隔符（/ 或 \\）+ 白名单扩展名结尾；POSIX 与 Windows 盘符路径
+    （D:\\…\\x.md）都认。只提取候选、不做存在性判断（调用方负责 is_file 过滤）。
+    """
+    return [p for p in extract_doc_candidates(text) if _DOC_EXT_RE.search(p)]
+
+
+def expand_doc_inputs(
+    paths: list[str], *, max_files: int = 20
+) -> tuple[list[str], list[str], list[str]]:
+    """路径列表 → (可摄入的文档文件, 展开的目录描述, 跳过项)，文件列表去重保序。
+
+    文件直取；目录按白名单扩展名一层展开（上限 max_files，防整盘目录灌爆）；
+    其余（不存在/非白名单/空目录）进跳过项。web 聊天与 CLI 共用同一口径。
+    """
+    files: list[str] = []
+    expanded: list[str] = []
+    skipped: list[str] = []
+    for cand in paths:
+        p = Path(cand)
+        if p.is_file() and is_doc_filename(p.name):
+            files.append(cand)
+        elif p.is_dir():
+            kids = [
+                str(k) for k in sorted(p.iterdir())
+                if k.is_file() and is_doc_filename(k.name)
+            ][:max_files]
+            if kids:
+                files.extend(kids)
+                expanded.append(f"{cand}（{len(kids)} 份）")
+            else:
+                skipped.append(cand)
+        else:
+            skipped.append(cand)
+    return list(dict.fromkeys(files)), expanded, skipped
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -564,6 +654,10 @@ def find_entry(manifest: dict[str, Any] | None, ref_id: str) -> dict[str, Any] |
 
 
 def _cache_lines(manifest: dict[str, Any], cache_path: str) -> list[str]:
+    """读缓存正文；空 cache_path（agent 模式目录无缓存）直接返回空——不能
+    Path("") 变成 Path(".") 去 read_text（那是目录，必抛 IsADirectoryError）。"""
+    if not str(cache_path or "").strip():
+        return []
     root = manifest.get("root") or "."
     return (Path(root) / cache_path).read_text(encoding="utf-8").splitlines()
 

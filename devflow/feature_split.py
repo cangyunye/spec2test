@@ -786,6 +786,14 @@ def build_feature_design_prompt(
                 f"完整文档目录清单：{Path(mdir) / 'manifest.json'}"
                 "（切片不够用时，可用文件读取工具打开该清单，再按需回查对应文档缓存原文）"
             )
+    src_paths = [
+        str(p) for p in ((doc_manifest or {}).get("source_paths") or []) if str(p).strip()
+    ]
+    if src_paths:
+        lines.append("")
+        lines.append("原始文档语料路径（agent 分析模式：切片不可用，需要细节时"
+                     "用文件读取工具按路径回查原文）：")
+        lines += [f"- {p}" for p in src_paths[:20]]
     lines += [
         "",
         "归属标注：每条用例的 rationale 必须注明依据——验收标准写「验收:<准则摘要>」、"

@@ -23,11 +23,19 @@ def _force_mock_llm_unless_live():
         return
     from devflow.config import settings
 
-    saved = (list(settings.LLM_PROVIDERS), settings.LLM_USE_MOCK_FALLBACK)
+    saved = (
+        list(settings.LLM_PROVIDERS),
+        settings.LLM_USE_MOCK_FALLBACK,
+        settings.DOC_ANALYZE_PROVIDER,
+    )
     settings.LLM_PROVIDERS = []
     settings.LLM_USE_MOCK_FALLBACK = True
+    # 文档分析器强制本地确定性摄入（本机可能装了 opencode/pi，auto 会真起子进程）；
+    # agent 模式用例自行 monkeypatch DOC_ANALYZE_PROVIDER + devflow.doc_agent.analyze_docs
+    settings.DOC_ANALYZE_PROVIDER = "local"
     yield
-    settings.LLM_PROVIDERS, settings.LLM_USE_MOCK_FALLBACK = saved
+    (settings.LLM_PROVIDERS, settings.LLM_USE_MOCK_FALLBACK,
+     settings.DOC_ANALYZE_PROVIDER) = saved
 
 
 @pytest.fixture(autouse=True)

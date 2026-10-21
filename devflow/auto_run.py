@@ -398,26 +398,69 @@ def run_spec(
     graph = build_graph_with_providers()
     journal = SpecJournal()
 
-    manifest, req_texts = ingest_docs(
-        [doc_path], api_docs, model_docs,
-        root=Path(settings.DOC_INDEX_ROOT) / tid,
-        threshold=settings.DOC_INDEX_MIN_CHARS,
+    # 文档摄入：agent 分析（opencode/pi 读语料）→ 失败回退本地 manifest 模式
+    from .doc_agent import (
+        agent_feed_notice,
+        analyze_docs,
+        catalog_from_agent,
+        error_note,
+        patch_from_agent,
+        resolve_analyze_provider,
     )
-    if manifest is not None:
-        doc_text = concat_chapter_slices(
-            manifest, per_chapter_chars=2000, total_chars=20000
+    from .doc_index import expand_doc_inputs
+    from .nodes.clarify import _merge_requirement
+    from .state import SOURCE_DOC
+
+    corpus_paths = (
+        [str(doc_path)] + [str(p) for p in (api_docs or [])]
+        + [str(p) for p in (model_docs or [])]
+    )
+    agent_patch: dict[str, Any] | None = None
+    manifest: dict[str, Any] | None = None
+    provider = resolve_analyze_provider()
+    if provider != "local":
+        try:
+            payload = asyncio.run(analyze_docs(corpus_paths, provider=provider))
+        except Exception as e:  # noqa: BLE001 — agent 失败回退本地
+            _say(console, f"[yellow]![/] {error_note(e)}")
+        else:
+            agent_patch = patch_from_agent(payload)
+            manifest = catalog_from_agent(payload, corpus_paths, provider)
+            doc_text = json.dumps(agent_patch, ensure_ascii=False)
+            feed_text = agent_feed_notice(manifest, provider)
+            _say(console, f"[green]✓[/] 已由 [bold]{provider}[/] 读取并分析文档集: "
+                          f"{len(manifest['docs'])} 份文档 / {len(manifest['apis'])} 接口 / "
+                          f"{len(manifest['models'])} 模型（正文不进上下文）")
+            journal.record("doc_agent", provider=provider, files=len(manifest["docs"]),
+                           apis=len(manifest["apis"]), models=len(manifest["models"]))
+    if manifest is None:
+        files, expanded, _skipped = expand_doc_inputs(
+            corpus_paths, max_files=max(1, settings.DOC_DIR_MAX_FILES)
         )
-        feed_text = doc_feed_notice(manifest)
-        _say(console, f"[green]✓[/] 已建立文档目录: [bold]{len(manifest['chapters'])} 章 / "
-                      f"{len(manifest['apis'])} 接口 / {len(manifest['models'])} 模型[/] "
-                      f"→ {manifest['root']}（分章抽取，正文不整份进上下文）")
-        journal.record("doc_index", root=manifest["root"], chapters=len(manifest["chapters"]),
-                       apis=len(manifest["apis"]), models=len(manifest["models"]))
-    else:
-        doc_text = req_texts[0]
-        feed_text = doc_text
-        _say(console, f"[green]✓[/] 已读取需求文档: [bold]{doc_path}[/]（{len(doc_text)} 字符）")
-        journal.record("doc", path=str(doc_path), chars=len(doc_text))
+        if expanded:
+            _say(console, "[dim]已展开目录：" + "、".join(expanded[:3]) + "[/]")
+        if not files:
+            raise ValueError("没有可读的文档（路径不存在或目录内无 .md/.txt/.docx/.json）")
+        manifest, req_texts = ingest_docs(
+            files, [], [],
+            root=Path(settings.DOC_INDEX_ROOT) / tid,
+            threshold=settings.DOC_INDEX_MIN_CHARS,
+        )
+        if manifest is not None:
+            doc_text = concat_chapter_slices(
+                manifest, per_chapter_chars=2000, total_chars=20000
+            )
+            feed_text = doc_feed_notice(manifest)
+            _say(console, f"[green]✓[/] 已建立文档目录: [bold]{len(manifest['chapters'])} 章 / "
+                          f"{len(manifest['apis'])} 接口 / {len(manifest['models'])} 模型[/] "
+                          f"→ {manifest['root']}（分章抽取，正文不整份进上下文）")
+            journal.record("doc_index", root=manifest["root"], chapters=len(manifest["chapters"]),
+                           apis=len(manifest["apis"]), models=len(manifest["models"]))
+        else:
+            doc_text = req_texts[0]
+            feed_text = doc_text
+            _say(console, f"[green]✓[/] 已读取需求文档: [bold]{files[0]}[/]（{len(doc_text)} 字符）")
+            journal.record("doc", path=str(files[0]), chars=len(doc_text))
 
     _say(console, f"[cyan]▶[/] spec 全自动模式启动 thread_id=[bold]{tid}[/]"
                   "（无评审 · 缺口 AI 脑补 · 全按推荐 · 不写 checklist 库）")
@@ -432,6 +475,21 @@ def run_spec(
             journal.record("set", fields=set_fields)
         if manifest is not None:
             state["doc_manifest"] = manifest
+            if agent_patch is not None:
+                # agent 分析结果直接预填 requirement（doc_manifest 已置 extracted，
+                # 澄清阶段不再走分章抽取；validate 只追问真正缺失的字段）
+                state["requirement"] = _merge_requirement(state["requirement"], agent_patch)
+                sources = dict(state.get("requirement_sources") or {})
+                for key, val in agent_patch.items():
+                    if key == "io_constraints":
+                        for sub in ("input", "output"):
+                            if str(val.get(sub) or "").strip():
+                                sources[f"io_constraints.{sub}"] = SOURCE_DOC
+                    elif val:
+                        sources[key] = SOURCE_DOC
+                state["requirement_sources"] = sources
+                state["doc_index_extracted"] = True
+                state["doc_source_paths"] = corpus_paths
         next(graph.stream(state, config))  # 触发 initial checkpoint（与 cmd_new 同路径）
 
         # 首条消息喂入（manifest 模式 = 短文案，抽取走分章路径；普通模式 = 全文）

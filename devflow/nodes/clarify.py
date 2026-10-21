@@ -298,6 +298,14 @@ DOC_EXTRACT_USER_TEMPLATE = """请从下面这些需求文档章节原文中抽�
 请输出抽取结果（JSON）："""
 
 
+def _is_doc_feed_notice(text: str) -> bool:
+    """是否为文档载入回执（本地分章 / agent 分析两种短文案）。"""
+    t = (text or "").strip()
+    return t.startswith("（已载入需求文档集") or (
+        t.startswith("（已由 ") and "读取并分析文档集" in t
+    )
+
+
 def _requirement_has_content(req: dict[str, Any]) -> bool:
     """requirement 是否已有实质内容（manifest 抽取只在空需求上触发一次）。"""
     if not isinstance(req, dict):
@@ -743,6 +751,17 @@ async def clarify_extract_async(state: GlobalState) -> dict[str, Any]:
         and not _requirement_has_content(existing)
     ):
         return await _extract_from_doc_index_async(state, existing, latest_user_text, mode_update)
+
+    # 1.8 语料已分析过（分章抽取 / agent 读取）：载入回执短文案不做单轮抽取——
+    # 回执不是需求内容，放它进抽取（尤其 mock 兜底）会覆盖刚从文档得到的字段
+    if state.get("doc_index_extracted") and _is_doc_feed_notice(latest_user_text):
+        return {
+            "requirement": existing,
+            "clarify_round_user_chars": len(latest_user_text.strip()),
+            "clarify_round_no_progress": False,
+            **ok_ret,
+            **mode_update,
+        }
 
     # 2. LLM 结构化抽取
     # 走 json_schema 档（裸补全 + 本地解析）而非 response_model 的 function_calling 档：

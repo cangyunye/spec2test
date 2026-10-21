@@ -593,3 +593,29 @@ class TestTimetravelAndExport:
         }
         md = _build_export_md(vals)
         assert "### 2.1 模块甲" in md
+
+
+class TestFeatureIdsRenumbered:
+    @pytest.mark.asyncio
+    async def test_llm_split_features_get_ids_under_limit(self, monkeypatch):
+        """LLM 拆分产出无 feature_id + 未超上限（clamp 直接透传）→ 仍须重编号，
+        否则逐 feature 派发全是 F?（勾选/采纳/回炉都按 id 引用）。"""
+        from devflow.config import settings as _s
+        from devflow.nodes import feature_split as fs_node
+
+        async def fake_split(req, graph, manifest=None):
+            return ([
+                {"feature_id": "", "name": "A", "description": "", "target_modules": ["m"],
+                 "acceptance_criteria": ["c1"], "edge_cases": [], "node_ids": [],
+                 "is_modified": False},
+                {"feature_id": "", "name": "B", "description": "", "target_modules": ["n"],
+                 "acceptance_criteria": ["c2"], "edge_cases": [], "node_ids": [],
+                 "is_modified": False},
+            ], [], [])
+
+        monkeypatch.setattr(fs_node, "llm_split_features", fake_split)
+        monkeypatch.setattr(_s, "TEST_DESIGN_MODE", "feature")
+        state = {"requirement": {"project_context": "p"}, "logic_graph": {}}
+        out = await fs_node._split_async(state)
+        ids = [f["feature_id"] for f in out["features"]]
+        assert ids == ["F1", "F2"]  # 不再是空串/F?

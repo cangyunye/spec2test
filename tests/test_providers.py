@@ -454,8 +454,11 @@ async def test_opencode_edit_body_spec242(stub_post):
     assert out["lint"][0]["level"] == "error"
 
 
-def test_opencode_run_args_cli_contract():
-    """测试设计改走 opencode run CLI：argv 组装（model 留空不传 -m / agent/session/dir/prompt 末位）。"""
+def test_opencode_run_args_cli_contract(monkeypatch):
+    """v2 形态（run 无 --dir）：argv 组装 model 留空不传 -m / 工作目录靠 cwd。"""
+    monkeypatch.setattr(
+        "devflow.providers.opencode._supports_dir_flag", lambda bin_path: False
+    )
     p = OpenCodeTestProvider(
         bin_path="opencode", agent="test-designer", model="", extra_args=["--auto"]
     )
@@ -465,9 +468,30 @@ def test_opencode_run_args_cli_contract():
         "--agent", "test-designer",
         "--session", "sess-9",
         "--auto",
-        "--dir", "/tmp/prj",
         "do it",
     ]
+
+
+def test_opencode_run_args_v1_dir_flag(monkeypatch):
+    """v1 形态（run 支持 --dir）：探测到能力时照旧附 --dir，跨版本兼容。"""
+    monkeypatch.setattr(
+        "devflow.providers.opencode._supports_dir_flag", lambda bin_path: True
+    )
+    p = OpenCodeTestProvider(bin_path="opencode", agent="test-designer", model="")
+    args = p._build_args("do it", project_root="/tmp/prj")
+    assert args[-3:] == ["--dir", "/tmp/prj", "do it"]
+
+
+def test_opencode_dir_flag_env_override(monkeypatch):
+    """OPENCODE_DIR_FLAG=1|0 可强制能力判定（不跑探测子进程）。"""
+    from devflow.providers.opencode import _DIR_FLAG_SUPPORT, _supports_dir_flag
+
+    monkeypatch.delenv("OPENCODE_DIR_FLAG", raising=False)
+    _DIR_FLAG_SUPPORT.pop("opencode-fake", None)
+    monkeypatch.setenv("OPENCODE_DIR_FLAG", "1")
+    assert _supports_dir_flag("opencode-fake") is True
+    monkeypatch.setenv("OPENCODE_DIR_FLAG", "0")
+    assert _supports_dir_flag("opencode-fake") is False
 
 
 def test_opencode_run_args_model_flag():

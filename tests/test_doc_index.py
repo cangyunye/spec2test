@@ -585,3 +585,77 @@ class TestSelectContextChapters:
         m = self._manifest_with_endpoints(tmp_path)
         assert len(select_context_chapters(m, max_chapters=2)) == 2
         assert select_context_chapters(m, max_chapters=0) == []
+
+
+class TestDocCandidatesWindows:
+    """Windows 盘符 / UNC / 目录形态的路径识别（用户实测贴过 D:\\ 路径）。"""
+
+    def test_windows_file_paths(self):
+        from devflow.doc_index import extract_doc_candidates
+
+        text = r"看下 D:\test_cases\需求\需求.md 和 C:/docs/api.json"
+        assert extract_doc_candidates(text) == [r"D:\test_cases\需求\需求.md", "C:/docs/api.json"]
+
+    def test_unc_path(self):
+        from devflow.doc_index import extract_doc_candidates
+
+        assert extract_doc_candidates(r"\\server\share\需求.docx") == [
+            r"\\server\share\需求.docx"
+        ]
+
+    def test_windows_directory(self):
+        from devflow.doc_index import extract_doc_candidates
+
+        text = r"需求文档位于 D:\test_cases\BR20261009012\需求 目录下"
+        cands = extract_doc_candidates(text)
+        assert cands == [r"D:\test_cases\BR20261009012\需求"]
+
+    def test_posix_directory(self):
+        from devflow.doc_index import extract_doc_candidates
+
+        assert extract_doc_candidates("文档在 /data/docs 目录下") == ["/data/docs"]
+
+    def test_quoted_path_with_prose_suffix(self):
+        from devflow.doc_index import extract_doc_candidates
+
+        text = '需求文档位于"D:\\test_cases\\BR20261009012"目录下'
+        assert extract_doc_candidates(text) == ["D:\\test_cases\\BR20261009012"]
+
+    def test_relative_non_doc_dir_ignored(self):
+        from devflow.doc_index import extract_doc_candidates
+
+        # 相对目录形态且无扩展名 → 不当目录候选（避免误展开相对路径）
+        assert extract_doc_candidates("看看 foo/bar 这个模块") == []
+
+    def test_directory_with_trailing_parens_preserved(self):
+        from devflow.doc_index import extract_doc_candidates
+
+        assert extract_doc_candidates(r"D:\docs\备份（2024）") == [r"D:\docs\备份（2024）"]
+
+    def test_annotation_after_doc_file_still_stripped(self):
+        from devflow.doc_index import extract_doc_candidates
+
+        assert extract_doc_candidates("看 /a/models.md（按这些文档来）") == ["/a/models.md"]
+
+    def test_is_doc_filename(self):
+        from devflow.doc_index import is_doc_filename
+
+        assert is_doc_filename("需求.MD") and is_doc_filename("api.json")
+        assert not is_doc_filename("截图.png") and not is_doc_filename("x.py")
+
+
+class TestAgentCatalogSlices:
+    def test_agent_catalog_slices_are_empty_not_crash(self):
+        """agent 模式目录（cache_path 为空、root None）解析切片必须安全返回空：
+        拆分 LLM 可能把 doc_id 误填进 chapter_ids，不能 Path("").read_text()。"""
+        from devflow.doc_agent import catalog_from_agent
+        from devflow.doc_index import resolve_doc_slices
+
+        cat = catalog_from_agent({
+            "apis": [{"method": "GET", "path": "/api/x", "summary": "x"}],
+            "files": [{"path": "/tmp/a.md", "summary": "s"}],
+        }, ["/tmp/a.md"], "agent")
+        assert resolve_doc_slices(cat, {"chapter_ids": ["D1"]},
+                                  max_chars_per=100, max_slices=3) == []
+        assert resolve_doc_slices(cat, {"api_ids": ["API-001"]},
+                                  max_chars_per=100, max_slices=3) == []

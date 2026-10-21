@@ -27,6 +27,7 @@ from ..feature_split import (
     llm_split_features,
     make_feature,
     assign_uncovered,
+    renumber_features,
 )
 from ..schemas import has_project_code
 from ..state import GlobalState
@@ -50,7 +51,11 @@ async def _split_async(state: GlobalState) -> dict[str, Any]:
     if not features:
         return {}  # 既聚不出也拆不出 → 单次整单路径（test_gen 按无 features 处理）
     features, gaps = assign_uncovered(features, req)
-    features = clamp_features(features, settings.TEST_DESIGN_MAX_FEATURES)
+    # LLM 拆分的 feature_id 初始为空；未超上限时 clamp_features 直接透传，
+    # 必须显式重编号，否则逐 feature 派发全是 "F?"（勾选/采纳/回炉都按 id 引用）
+    features = renumber_features(
+        clamp_features(features, settings.TEST_DESIGN_MAX_FEATURES)
+    )
     for note in assumptions:
         questions.append({"assumption": note, "resolved": True})
     if gaps:

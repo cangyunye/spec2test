@@ -339,31 +339,86 @@ def cmd_new(
             console.print(f"[red]×[/] --set 参数解析失败: {e}")
             raise typer.Exit(code=1)
 
-    # 文档摄入：manifest 模式（目录进 state）或单文档直喂（原文进首条消息）
+    # 文档摄入：agent 分析（opencode/pi 读语料）→ 失败回退本地 manifest 模式
     feed_text: str | None = None
     if from_doc or api_doc or model_doc:
-        try:
-            manifest, req_texts = ingest_docs(
-                from_doc or [], api_doc, model_doc,
-                root=Path(settings.DOC_INDEX_ROOT) / tid,
-                threshold=settings.DOC_INDEX_MIN_CHARS,
-            )
-        except (FileNotFoundError, ValueError, ImportError) as e:
-            console.print(f"[red]×[/] 读取文档失败: {e}")
-            raise typer.Exit(code=1)
-        if manifest is not None:
-            state["doc_manifest"] = manifest
-            console.print(
-                f"[green]✓[/] 已建立文档目录: [bold]{len(manifest['chapters'])} 章 / "
-                f"{len(manifest['apis'])} 接口 / {len(manifest['models'])} 模型[/] "
-                f"→ {manifest['root']}（正文不进上下文，澄清阶段分章抽取）"
-            )
-            feed_text = doc_feed_notice(manifest)
-        else:
-            feed_text = req_texts[0]
-            console.print(
-                f"[green]✓[/] 已读取需求文档: [bold]{from_doc[0]}[/] ({len(feed_text)} 字符)"
-            )
+        import asyncio as _asyncio
+
+        from .doc_agent import (
+            agent_feed_notice,
+            analyze_docs,
+            catalog_from_agent,
+            error_note,
+            patch_from_agent,
+            resolve_analyze_provider,
+        )
+        from .doc_index import expand_doc_inputs
+        from .nodes.clarify import _merge_requirement
+        from .state import SOURCE_DOC
+
+        corpus_paths = (
+            [str(p) for p in (from_doc or [])]
+            + [str(p) for p in (api_doc or [])]
+            + [str(p) for p in (model_doc or [])]
+        )
+        provider = resolve_analyze_provider()
+        if provider != "local":
+            try:
+                payload = _asyncio.run(analyze_docs(corpus_paths, provider=provider))
+            except Exception as e:  # noqa: BLE001 — agent 失败回退本地
+                console.print(f"[yellow]![/] {error_note(e)}")
+            else:
+                patch = patch_from_agent(payload)
+                catalog = catalog_from_agent(payload, corpus_paths, provider)
+                merged = _merge_requirement(state["requirement"], patch)
+                sources = dict(state.get("requirement_sources") or {})
+                for key, val in patch.items():
+                    if key == "io_constraints":
+                        for sub in ("input", "output"):
+                            if str(val.get(sub) or "").strip():
+                                sources[f"io_constraints.{sub}"] = SOURCE_DOC
+                    elif val:
+                        sources[key] = SOURCE_DOC
+                state["requirement"] = merged
+                state["requirement_sources"] = sources
+                state["doc_manifest"] = catalog
+                state["doc_index_extracted"] = True
+                state["doc_source_paths"] = corpus_paths
+                feed_text = agent_feed_notice(catalog, provider)
+                console.print(
+                    f"[green]✓[/] 已由 [bold]{provider}[/] 读取并分析文档集: "
+                    f"{len(catalog['docs'])} 份文档 / {len(catalog['apis'])} 接口 / "
+                    f"{len(catalog['models'])} 模型（正文不进上下文）"
+                )
+        if feed_text is None:
+            # 本地解析：目录一层展开后走 ingest_docs（单文档小需求仍可原文直喂）
+            try:
+                files, expanded, _skipped = expand_doc_inputs(
+                    corpus_paths, max_files=max(1, settings.DOC_DIR_MAX_FILES)
+                )
+                if expanded:
+                    console.print("[dim]已展开目录：" + "、".join(expanded[:3]) + "[/]")
+                manifest, req_texts = ingest_docs(
+                    files, [], [],
+                    root=Path(settings.DOC_INDEX_ROOT) / tid,
+                    threshold=settings.DOC_INDEX_MIN_CHARS,
+                )
+            except (FileNotFoundError, ValueError, ImportError) as e:
+                console.print(f"[red]×[/] 读取文档失败: {e}")
+                raise typer.Exit(code=1)
+            if manifest is not None:
+                state["doc_manifest"] = manifest
+                console.print(
+                    f"[green]✓[/] 已建立文档目录: [bold]{len(manifest['chapters'])} 章 / "
+                    f"{len(manifest['apis'])} 接口 / {len(manifest['models'])} 模型[/] "
+                    f"→ {manifest['root']}（正文不进上下文，澄清阶段分章抽取）"
+                )
+                feed_text = doc_feed_notice(manifest)
+            else:
+                feed_text = req_texts[0]
+                console.print(
+                    f"[green]✓[/] 已读取需求文档: [bold]{files[0]}[/] ({len(feed_text)} 字符)"
+                )
 
     next(graph.stream(state, _config(thread_id=tid)))  # 触发 initial checkpoint
 

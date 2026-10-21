@@ -452,6 +452,36 @@ def _parse_run_output(raw: str) -> tuple[str, str | None]:
     return "\n".join(texts), session_id
 
 
+# opencode CLI 跨版本兼容：v1 支持 run --dir，v2 已移除该 flag（工作目录靠子进程
+# cwd）。首次使用时探测一次 `run --help` 并缓存；可用 OPENCODE_DIR_FLAG=1|0 强制
+# （测试/特殊安装形态用），默认 auto。
+_DIR_FLAG_SUPPORT: dict[str, bool] = {}
+
+
+def _supports_dir_flag(bin_path: str) -> bool:
+    """该 opencode 二进制的 `run` 是否支持 --dir（v1 支持，v2 移除）。"""
+    mode = os.getenv("OPENCODE_DIR_FLAG", "auto").strip().lower()
+    if mode in ("1", "true", "yes", "on"):
+        return True
+    if mode in ("0", "false", "no", "off"):
+        return False
+    if bin_path in _DIR_FLAG_SUPPORT:
+        return _DIR_FLAG_SUPPORT[bin_path]
+    ok = False
+    try:
+        import subprocess
+
+        out = subprocess.run(
+            [bin_path, "run", "--help"],
+            capture_output=True, text=True, timeout=8,
+        )
+        ok = "--dir" in ((out.stdout or "") + (out.stderr or ""))
+    except Exception:  # noqa: BLE001 — 探不到就按不支持处理（cwd 兜底）
+        ok = False
+    _DIR_FLAG_SUPPORT[bin_path] = ok
+    return ok
+
+
 class OpenCodeTestProvider(TestGenProvider):
     name = "opencode_test"
 
@@ -476,7 +506,12 @@ class OpenCodeTestProvider(TestGenProvider):
     def _build_args(
         self, prompt: str, *, session_id: str | None = None, project_root: str = ""
     ) -> list[str]:
-        """拼 `opencode run --format json [-m provider/model] --agent X [--session S] [extra] [--dir R] <prompt>`。"""
+        """拼 `opencode run --format json [-m provider/model] --agent X [--session S] [extra] [--dir R] <prompt>`。
+
+        跨版本：v1 的 run 支持 `--dir`，v2 已移除（工作目录由子进程 cwd 指定——
+        _run_opencode 已设 cwd=project_root）。这里按二进制能力探测结果决定是否
+        附 `--dir`，两种版本都能工作；OPENCODE_DIR_FLAG=1|0 可强制。
+        """
         args = [self.bin_path, "run", "--format", "json"]
         if self.model:
             args += ["-m", self.model]
@@ -485,7 +520,7 @@ class OpenCodeTestProvider(TestGenProvider):
         if session_id:
             args += ["--session", session_id]
         args += list(self.extra_args)
-        if project_root:
+        if project_root and _supports_dir_flag(self.bin_path):
             args += ["--dir", project_root]
         args.append(prompt)  # prompt 永远是最后一个位置参数
         return args
