@@ -298,6 +298,9 @@ class Settings:
         self.DOC_EXTRACT_MAX_CHAPTER_CHARS: int = int(os.getenv("DOC_EXTRACT_MAX_CHAPTER_CHARS", "6000"))
         self.DOC_EXTRACT_BATCH_CHARS: int = int(os.getenv("DOC_EXTRACT_BATCH_CHARS", "12000"))
         self.DOC_EXTRACT_CONCURRENCY: int = int(os.getenv("DOC_EXTRACT_CONCURRENCY", "3"))
+        # 接口/模型文档章节作为受限上下文参与抽取的章数上限（只用于抽取
+        # io_constraints，防止大接口文档把抽取上下文撑爆）
+        self.DOC_EXTRACT_MAX_CTX_CHAPTERS: int = int(os.getenv("DOC_EXTRACT_MAX_CTX_CHAPTERS", "12"))
         # handoff 切片：单条上限 / 每功能点切片数上限
         self.DOC_SLICE_MAX_CHARS: int = int(os.getenv("DOC_SLICE_MAX_CHARS", "2400"))
         self.DOC_SLICE_MAX_COUNT: int = int(os.getenv("DOC_SLICE_MAX_COUNT", "8"))

@@ -273,14 +273,21 @@ SYSTEM_PROMPT_DOC_EXTRACT = """你是一个严谨的需求分析师，任务是�
 重要规则：
 1. 只提取【文档原文里明确写到】的信息，不要猜测，不要脑补；文档没提到的字段必须填 null。
 2. req_type 严格三选一：new_feature(全新功能) / component_iteration(组件迭代) / bug_fix(缺陷修复)。
-3. acceptance_criteria / edge_cases 必须保留文档原文（逐字摘录，不要改写、不要概括）；
-   多个章节的条目并列放进同一个数组，不要互相覆盖。
+3. acceptance_criteria / edge_cases：文档里显式列出的条目逐字摘录；以叙述形式写出的
+   功能规则、限制条件、校验逻辑、异常处理，也要提炼成条目（优先保留原文措辞，可轻度
+   裁剪成完整短句）——不要因为「文档没有列表」就返回 null。多个章节的条目并列放进
+   同一个数组，不要互相覆盖。
 4. target_modules 汇总文档里明确提到的模块/页面/子系统。
 5. project_context 用 2~4 句概括文档描述的项目背景与业务场景（不要复述全文）。
 6. project_root 永远填 null（文档里不会有绝对路径）。
 7. existing_code_accessible：文档未提到现有代码就填 null；明确说明仅按需求设计测试时填 false。
 8. chapter_refs：把 acceptance_criteria / edge_cases 每条原文映射到它出自的章节 id
    （text 逐字对应数组里的条目）；对不上的条目可不映射。
+9. 标注「（接口文档）」/「（模型文档）」的章节是受限上下文，只用于两件事：
+   - 填写 io_constraints：输入约束 = 请求入参/请求体的字段与格式；输出约束 = 响应/返回结构；
+   - 帮助理解 target_modules。
+   接口条目与模型字段定义本身【不是】验收标准或边界场景，禁止摘进
+   acceptance_criteria / edge_cases；它们是否被测试覆盖由下游按 API/MDL 条目对齐。
 """
 
 
@@ -428,14 +435,26 @@ async def _extract_from_doc_index_async(
     """manifest 模式抽取：需求字段从章节分批抽取后确定性合并（只跑一次）。
 
     - 章节 / 接口 / 模型正文不进对话与 checkpoint，state 里只有目录坐标
+    - 抽取语料 = 需求章节（验收标准/边界场景来源）+ 接口/模型章节（受限上下文，
+      只用于 io_constraints 与模块理解——现实文档常把「入参字段」写在接口文档里）
     - 任一批失败 → 与单文档路径一致的可重试错误（图级 retry 重跑全部批次）
     - mock 兜底的编造分片不并入（与 clarify_extract 的 SOURCE_MOCK 诚实原则一致）；
       全部批次 mock 时需求保持为空 → validate 正常追问用户补齐
     """
-    from ..doc_index import batch_chapters, requirement_chapters, slice_text
+    from ..doc_index import (
+        batch_chapters,
+        context_chapters,
+        docs_doc_kind,
+        requirement_chapters,
+        slice_text,
+    )
 
     manifest = dict(state.get("doc_manifest") or {})
     chapters = requirement_chapters(manifest)
+    # 接口/模型文档章节作为受限上下文：只帮模型填 io_constraints（入参/响应）与
+    # 理解模块，不进验收标准（提示词第 9 条）；现实文档常把「入参字段」写在接口
+    # 文档里，不喂上下文就会向用户追问文档里已有的输入约束
+    ctx_chapters = context_chapters(manifest)[: max(0, settings.DOC_EXTRACT_MAX_CTX_CHAPTERS)]
     ok_ret = {"last_error": None, "last_error_code": None, "last_error_retryable": None}
     extracted_flag = {"doc_index_extracted": True}
 
@@ -450,18 +469,27 @@ async def _extract_from_doc_index_async(
             **(extra or {}),
         }
 
-    if not chapters:
-        # 只挂了接口/模型文档（没有需求章节）：无可抽取，走正常澄清追问
+    if not chapters and not ctx_chapters:
+        # 没有任何可抽取章节：无可抽取，走正常澄清追问
         return _plain_out(existing)
 
-    batches = batch_chapters(chapters, settings.DOC_EXTRACT_BATCH_CHARS)
+    _kind_tag = {"api": "（接口文档）", "model": "（模型文档）"}
+
+    def _tagged(ch: dict[str, Any]) -> dict[str, Any]:
+        kind = docs_doc_kind(manifest, ch.get("doc_id"))
+        if kind == "requirement":
+            kind = str(ch.get("entry_kind") or "")
+        return {**ch, "_tag": _kind_tag.get(kind, "")}
+
+    tagged = [_tagged(ch) for ch in chapters] + [_tagged(ch) for ch in ctx_chapters]
+    batches = batch_chapters(tagged, settings.DOC_EXTRACT_BATCH_CHARS)
     sem = asyncio.Semaphore(max(1, settings.DOC_EXTRACT_CONCURRENCY))
 
     async def _one_batch(batch: list[dict[str, Any]]) -> tuple[dict[str, Any], list[str], bool]:
         async with sem:
             meta: dict[str, Any] = {}
             blocks = "\n\n".join(
-                f"### [{ch['chapter_id']}] {ch['title']}\n"
+                f"### [{ch['chapter_id']}] {ch['title']}{ch.get('_tag', '')}\n"
                 + slice_text(manifest, ch, max_chars=settings.DOC_EXTRACT_MAX_CHAPTER_CHARS)
                 for ch in batch
             )
@@ -1051,10 +1079,26 @@ async def clarify_build_question_async(state: GlobalState) -> dict[str, Any]:
             "你的回答这次没能写入需求清单，请重试一次或换种说法。\n\n" + text
         )
     elif state.get("clarify_round_no_progress"):
-        text = (
-            "⚠️ 你上一条消息内容不少，但本轮没能从中抽取到新的需求字段"
-            "（疑似模型输出异常或被截断），你的回答这次没能写入需求清单。"
-            "请重试一次或把关键信息拆开逐条说明。\n\n" + text
+        if state.get("doc_manifest") and state.get("doc_index_extracted"):
+            # 文档模式下的「无进展」不是用户表述问题：是分章抽取没产出可用字段
+            text = (
+                "⚠️ 文档分章抽取本轮没有产出可用字段（模型输出异常/供应商不可用，"
+                "或章节表述太含糊），需求清单没有新增内容。若这些信息其实写在文档里，"
+                "可直接按问题补充，或完善文档表述后重新开一轮。\n\n" + text
+            )
+        else:
+            text = (
+                "⚠️ 你上一条消息内容不少，但本轮没能从中抽取到新的需求字段"
+                "（疑似模型输出异常或被截断），你的回答这次没能写入需求清单。"
+                "请重试一次或把关键信息拆开逐条说明。\n\n" + text
+            )
+    # 文档目录模式透明提示：文档已抽取过却仍有缺口——避免用户困惑
+    # 「文档里明明写了」却还在被追问（接口/模型章节已作为受限上下文参与抽取）
+    elif state.get("doc_manifest") and state.get("doc_index_extracted"):
+        text += (
+            "\n\n（文档目录模式：文档已载入并完成分章抽取，接口/模型章节也作为上下文"
+            "参与了输入输出约束抽取；若下面这些信息其实写在文档里，请直接补充，"
+            "或完善文档表述后重新开一轮。）"
         )
 
     # 选择卡只在普通模式首轮出现一次（键序保证事件在 AI 追问之后触发，卡片落在问题下方）

@@ -745,6 +745,22 @@ def requirement_chapters(manifest: dict[str, Any] | None) -> list[dict[str, Any]
     ]
 
 
+def context_chapters(manifest: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """接口/模型内容的章节（分章 clarify 的受限上下文：只用于抽取输入输出约束，
+    不作为验收标准/边界场景的来源）。
+
+    覆盖两类：接口/模型文档的章节，以及需求文档里被章节级改判为 api/model 的
+    附录章（entry_kind）——它们同样承载入参/响应/字段信息。
+    """
+    if not manifest:
+        return []
+    return [
+        e for e in manifest.get("chapters") or []
+        if docs_doc_kind(manifest, e.get("doc_id")) in ("api", "model")
+        or e.get("entry_kind") in ("api", "model")
+    ]
+
+
 def docs_doc_kind(manifest: dict[str, Any], doc_id: Any) -> str:
     return next(
         (str(d.get("kind")) for d in manifest.get("docs") or [] if d.get("doc_id") == doc_id),

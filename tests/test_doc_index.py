@@ -515,3 +515,31 @@ class TestExtractDocPaths:
     def test_empty_and_none(self):
         assert extract_doc_paths("") == []
         assert extract_doc_paths("没有路径的一段话。") == []
+
+
+class TestContextChapters:
+    def test_api_and_model_docs_are_context(self, manifest):
+        from devflow.doc_index import context_chapters
+
+        ctx = context_chapters(manifest)
+        assert ctx and all(c["doc_id"] in ("D2", "D3") for c in ctx)
+        assert "POST /api/login" in " ".join(c["title"] for c in ctx)
+
+    def test_pure_requirement_manifest_has_no_context(self, doc_dir: Path, tmp_path: Path):
+        from devflow.doc_index import context_chapters
+
+        m = build_doc_index([doc_dir / "需求文档.md"], [], [], root=tmp_path / "idx_ctx")
+        assert context_chapters(m) == []
+
+    def test_mixed_doc_override_chapters_are_context(self, tmp_path: Path):
+        """需求文档内被章节级改判为 api/model 的附录章也算上下文（入参写在附录里）。"""
+        from devflow.doc_index import context_chapters
+
+        mixed = tmp_path / "mixed.md"
+        mixed.write_text(MIXED_MD, encoding="utf-8")
+        m, _ = ingest_docs([str(mixed)], [], [], root=tmp_path / "idx_ctx2", threshold=8000)
+        ctx_titles = [c["title"] for c in context_chapters(m)]
+        assert any("附录A" in t for t in ctx_titles)
+        assert any("附录B" in t for t in ctx_titles)
+        # 纯需求章不在上下文里
+        assert all("文本审核" not in t for t in ctx_titles)

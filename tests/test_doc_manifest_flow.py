@@ -152,8 +152,11 @@ class TestClarifyDocIndex:
         assert out["requirement_sources"]["acceptance_criteria"] == "doc"
         align = out["doc_manifest"]["alignment"]
         assert align["acceptance_criteria"]["密码长度 8~20 位"] == ["CH-002"]
-        # 无 chapter_refs 的条目回退到所在批的全部章节（默认批量预算下单批装下 3 章）
-        assert align["acceptance_criteria"]["金额必须大于 0"] == ["CH-001", "CH-002", "CH-003"]
+        # 无 chapter_refs 的条目回退到所在批的全部章节（默认预算下单批装下需求
+        # 3 章 + 接口上下文 2 章，因此这里包含接口文档章节）
+        assert align["acceptance_criteria"]["金额必须大于 0"] == [
+            "CH-001", "CH-002", "CH-003", "CH-004", "CH-005",
+        ]
         # 每次调用都是分章抽取形态：带章节切片块与文档抽取 schema
         assert all(c.get("response_type") == "doc_chapter_extract" for c in calls)
         assert all("[CH-" in c["user_prompt"] for c in calls)
@@ -761,3 +764,91 @@ class TestChatIngestFeedback:
 
         assert client.delete(f"/api/sessions/{tid}").status_code == 200
         assert not doc_dir.exists()
+
+
+class TestApiContextExtraction:
+    """接口/模型章节作为受限上下文参与抽取：io 约束从接口文档来，条目禁令写进提示词。"""
+
+    @pytest.mark.asyncio
+    async def test_io_constraints_extracted_from_api_chapters(self, monkeypatch, manifest):
+        calls: list[dict] = []
+
+        async def fake_json(**kwargs):
+            calls.append(kwargs)
+            meta = kwargs.get("meta") or {}
+            meta["mock"] = False
+            up = kwargs.get("user_prompt", "")
+            frag: dict = {}
+            # 默认预算下需求章与接口上下文可能在同一批：按标记合并产出
+            if "（接口文档）" in up:
+                frag["io_constraints"] = {
+                    "input": "request.text 字符串，最长 5000",
+                    "output": "审核结论 JSON",
+                }
+            if "[CH-002]" in up:
+                frag["acceptance_criteria"] = ["密码长度 8~20 位"]
+            return frag
+
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_json", fake_json)
+        out = await clarify_extract_async(_state(manifest))  # type: ignore[arg-type]
+
+        req = out["requirement"]
+        assert req["io_constraints"]["input"] == "request.text 字符串，最长 5000"
+        assert req["io_constraints"]["output"] == "审核结论 JSON"
+        assert req["acceptance_criteria"] == ["密码长度 8~20 位"]
+        assert out["requirement_sources"]["io_constraints.input"] == "doc"
+        # 上下文批次确实带上了接口原文（端点契约逐字进 prompt）
+        assert any("（接口文档）" in c["user_prompt"] for c in calls)
+        assert any('"summary": "登录"' in c["user_prompt"] for c in calls)
+
+    def test_doc_extract_prompt_contract(self):
+        from devflow.nodes.clarify import SYSTEM_PROMPT_DOC_EXTRACT
+
+        # 接口/模型条目禁止进验收标准；叙述式规则要能提炼成条目（不再"没列表就 null"）
+        assert "禁止摘进" in SYSTEM_PROMPT_DOC_EXTRACT
+        assert "不要因为「文档没有列表」就返回 null" in SYSTEM_PROMPT_DOC_EXTRACT
+        assert "输入约束 = 请求入参" in SYSTEM_PROMPT_DOC_EXTRACT
+
+
+class TestDocModeQuestionHint:
+    @pytest.mark.asyncio
+    async def test_no_progress_question_explains_doc_extraction(self, monkeypatch, manifest):
+        async def fake_text(**kwargs):
+            return "请补充输入约束：io_constraints.input"
+
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_text", fake_text)
+        from devflow.nodes.clarify import clarify_build_question_async
+
+        state = {
+            "messages": [],
+            "requirement": empty_requirement(),
+            "missing_fields": ["io_constraints.input: 必须填写输入约束"],
+            "clarify_mode": "normal",
+            "doc_manifest": manifest,
+            "doc_index_extracted": True,
+            "clarify_round_no_progress": True,
+        }
+        out = await clarify_build_question_async(state)  # type: ignore[arg-type]
+        text = str(out["messages"][0].content)
+        assert "文档分章抽取本轮没有产出可用字段" in text
+
+    @pytest.mark.asyncio
+    async def test_partial_progress_question_adds_doc_hint(self, monkeypatch, manifest):
+        async def fake_text(**kwargs):
+            return "请补充输入约束"
+
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_text", fake_text)
+        from devflow.nodes.clarify import clarify_build_question_async
+
+        state = {
+            "messages": [],
+            "requirement": empty_requirement(),
+            "missing_fields": ["io_constraints.input: 必须填写输入约束"],
+            "clarify_mode": "normal",
+            "doc_manifest": manifest,
+            "doc_index_extracted": True,
+            "clarify_round_no_progress": False,
+        }
+        out = await clarify_build_question_async(state)  # type: ignore[arg-type]
+        text = str(out["messages"][0].content)
+        assert "文档目录模式" in text and "接口/模型章节" in text
