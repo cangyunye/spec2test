@@ -768,6 +768,49 @@ def docs_doc_kind(manifest: dict[str, Any], doc_id: Any) -> str:
     )
 
 
+def select_context_chapters(
+    manifest: dict[str, Any] | None,
+    *,
+    max_chapters: int,
+    probe_chars: int = 4000,
+) -> list[dict[str, Any]]:
+    """按与需求内容的关联度挑选接口/模型上下文章节（不足按文档顺序补齐）。
+
+    多文档、接口章节很多时，顺序截前 N 章会漏掉需求真正提到的端点/模型——
+    这里按确定性关联度排序：需求正文中出现接口路径(+5)/路径末段(+2)/模型名(+3)/
+    章节标题(+3) 的章节优先，无信号时保持文档顺序。返回顺序即批次顺序。
+    """
+    ctx = context_chapters(manifest)
+    if not ctx or max_chapters <= 0:
+        return []
+    req_text = "\n".join(
+        slice_text(manifest, ch, max_chars=probe_chars)
+        for ch in requirement_chapters(manifest)
+    )
+    api_by_ch = {a.get("chapter_id"): a for a in manifest.get("apis") or []}
+    model_by_ch = {m.get("chapter_id"): m for m in manifest.get("models") or []}
+    scored: list[tuple[int, int, dict[str, Any]]] = []
+    for i, ch in enumerate(ctx):
+        score = 0
+        title = str(ch.get("title") or "").strip()
+        if req_text and title and title in req_text:
+            score += 3
+        api = api_by_ch.get(ch.get("chapter_id")) or {}
+        path = str(api.get("path") or "")
+        if req_text and path:
+            if path in req_text:
+                score += 5
+            elif path.rstrip("/").rsplit("/", 1)[-1] in req_text:
+                score += 2
+        mdl = model_by_ch.get(ch.get("chapter_id")) or {}
+        name = str(mdl.get("name") or "")
+        if req_text and name and name in req_text:
+            score += 3
+        scored.append((score, i, ch))
+    ordered = [ch for _, _, ch in sorted(scored, key=lambda x: (-x[0], x[1]))]
+    return ordered[:max_chapters]
+
+
 def batch_chapters(
     chapters: list[dict[str, Any]], max_chars: int
 ) -> list[list[dict[str, Any]]]:

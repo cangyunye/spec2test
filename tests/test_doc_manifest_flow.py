@@ -152,10 +152,10 @@ class TestClarifyDocIndex:
         assert out["requirement_sources"]["acceptance_criteria"] == "doc"
         align = out["doc_manifest"]["alignment"]
         assert align["acceptance_criteria"]["密码长度 8~20 位"] == ["CH-002"]
-        # 无 chapter_refs 的条目回退到所在批的全部章节（默认预算下单批装下需求
-        # 3 章 + 接口上下文 2 章，因此这里包含接口文档章节）
+        # 无 chapter_refs 的条目回退到所在批的全部章节——需求批与接口上下文批
+        # 分池，因此只含需求 3 章（接口章节不会混进验收标准的出处）
         assert align["acceptance_criteria"]["金额必须大于 0"] == [
-            "CH-001", "CH-002", "CH-003", "CH-004", "CH-005",
+            "CH-001", "CH-002", "CH-003",
         ]
         # 每次调用都是分章抽取形态：带章节切片块与文档抽取 schema
         assert all(c.get("response_type") == "doc_chapter_extract" for c in calls)
@@ -852,3 +852,93 @@ class TestDocModeQuestionHint:
         out = await clarify_build_question_async(state)  # type: ignore[arg-type]
         text = str(out["messages"][0].content)
         assert "文档目录模式" in text and "接口/模型章节" in text
+
+
+class TestProvenanceMerge:
+    """批次出处规则：契约 io 压过叙述 io；ctx-only 批次不贡献验收标准。"""
+
+    def test_contract_io_beats_prose_io(self):
+        from devflow.nodes.clarify import merge_doc_fragments
+
+        req_frag = {"io_constraints": {"input": "用户提交的内容", "output": "结果"},
+                    "acceptance_criteria": ["金额必须大于 0"]}
+        ctx_frag = {"io_constraints": {"input": "request.text 字符串，maxLength=5000",
+                                       "output": "{\"category\": string}"}}
+        # ctx 在前后顺序都不影响：契约优先
+        patch1, _ = merge_doc_fragments([(req_frag, ["CH-002"], "req"),
+                                         (ctx_frag, ["CH-005"], "ctx")])
+        patch2, _ = merge_doc_fragments([(ctx_frag, ["CH-005"], "ctx"),
+                                         (req_frag, ["CH-002"], "req")])
+        for p in (patch1, patch2):
+            assert p["io_constraints"]["input"] == "request.text 字符串，maxLength=5000"
+            assert p["io_constraints"]["output"] == '{"category": string}'
+
+    def test_prose_io_used_when_contract_absent(self):
+        from devflow.nodes.clarify import merge_doc_fragments
+
+        patch, _ = merge_doc_fragments([
+            ({"io_constraints": {"input": "上传的图片"}}, ["CH-002"], "req"),
+            ({"io_constraints": {"input": None, "output": None}}, ["CH-005"], "ctx"),
+        ])
+        assert patch["io_constraints"]["input"] == "上传的图片"
+
+    def test_ctx_only_criteria_dropped(self):
+        from devflow.nodes.clarify import merge_doc_fragments
+
+        patch, alignment = merge_doc_fragments([
+            ({"acceptance_criteria": ["金额必须大于 0"]}, ["CH-002"], "req"),
+            ({"acceptance_criteria": ["POST /api/orders 创建订单"],
+              "edge_cases": ["请求体缺少 amount"]}, ["CH-005"], "ctx"),
+        ])
+        assert patch["acceptance_criteria"] == ["金额必须大于 0"]  # 接口条目被丢弃
+        assert "edge_cases" not in patch
+        assert all("API" not in k for k in alignment["edge_cases"])
+
+    def test_mixed_batch_keeps_criteria(self):
+        from devflow.nodes.clarify import merge_doc_fragments
+
+        patch, _ = merge_doc_fragments([
+            ({"acceptance_criteria": ["来自混合批的规则"]}, ["CH-002", "CH-005"], "mixed"),
+        ])
+        assert patch["acceptance_criteria"] == ["来自混合批的规则"]
+
+    def test_two_tuple_backward_compatible(self):
+        from devflow.nodes.clarify import merge_doc_fragments
+
+        patch, _ = merge_doc_fragments([({"acceptance_criteria": ["老调用形态"]}, ["CH-001"])])
+        assert patch["acceptance_criteria"] == ["老调用形态"]
+
+
+class TestMultiBatchContractPrecedence:
+    @pytest.mark.asyncio
+    async def test_split_batches_contract_io_wins(self, monkeypatch, manifest):
+        """强制每章独立成批：需求批次给模糊 io、接口批次给精确 io → 后者胜。"""
+        from devflow.config import settings
+
+        monkeypatch.setattr(settings, "DOC_EXTRACT_BATCH_CHARS", 10)
+        calls: list[str] = []
+
+        async def fake_json(**kwargs):
+            meta = kwargs.get("meta") or {}
+            meta["mock"] = False
+            up = kwargs.get("user_prompt", "")
+            calls.append(up)
+            if "（接口文档）" in up:
+                return {
+                    "io_constraints": {"input": "request.text 字符串，maxLength=5000",
+                                       "output": "审核结论 JSON"},
+                    "acceptance_criteria": ["接口条目不该成为验收标准"],
+                }
+            if "[CH-002]" in up:
+                return {"io_constraints": {"input": "用户提交的文本", "output": "结果"},
+                        "acceptance_criteria": ["密码长度 8~20 位"]}
+            return {}
+
+        monkeypatch.setattr("devflow.nodes.clarify.invoke_json", fake_json)
+        out = await clarify_extract_async(_state(manifest))  # type: ignore[arg-type]
+
+        req = out["requirement"]
+        assert req["io_constraints"]["input"] == "request.text 字符串，maxLength=5000"
+        assert req["io_constraints"]["output"] == "审核结论 JSON"
+        assert req["acceptance_criteria"] == ["密码长度 8~20 位"]  # 接口条目未混入
+        assert len(calls) >= 3  # 每章独立批

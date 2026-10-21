@@ -318,40 +318,54 @@ def _norm_ws(s: Any) -> str:
 
 
 def merge_doc_fragments(
-    fragments: list[tuple[dict[str, Any], list[str]]],
+    fragments: list[tuple[dict[str, Any], list[str], str] | tuple[dict[str, Any], list[str]]],
 ) -> tuple[dict[str, Any], dict[str, dict[str, list[str]]]]:
     """分章抽取分片 → (requirement patch, 条目对齐引用)。确定性合并：
 
     - 列表类字段并列汇总（按空白归一去重，保持首现顺序）
-    - io_constraints 每个子字段取首个非空值；req_type/project_root 等标量取首个非空
-    - 对齐引用：条目原文 → 章节 id（LLM 的 chapter_refs 优先，缺失退回所在批的章节）
+    - 批次出处（origin）：req（需求章）/ ctx（接口·模型上下文）/ mixed。规则：
+      * io_constraints 契约优先：ctx/mixed 批次的 io 压过 req 批次的叙述型 io
+        （接口文档写的入参/响应是契约，比需求正文里顺带提的精确）
+      * ctx-only 批次的 acceptance_criteria / edge_cases 丢弃——接口条目与模型
+        字段定义不是验收标准（提示词的禁令在这里做确定性兜底）
+    - 其他标量取首个非空；对齐引用按接受的分片构建
 
-    fragments: [(抽取 dict, 该批覆盖的 chapter_id 列表)]
+    fragments: [(抽取 dict, 该批覆盖的 chapter_id 列表, origin)]；
+    origin 缺省（两元组）按 "req" 处理（向后兼容）。
     """
+    criterion_src: list[tuple[str, int, str]] = []  # (原文, fragment 序号, "ac"|"ec")
     criteria: list[str] = []
     edges: list[str] = []
     modules: list[str] = []
     seen_c: set[str] = set()
     seen_e: set[str] = set()
     seen_m: set[str] = set()
-    criterion_src: list[tuple[str, int, str]] = []  # (原文, fragment 序号, "ac"|"ec")
     contexts: list[str] = []
-    io = {"input": "", "output": ""}
+    io_ctx = {"input": "", "output": ""}
+    io_req = {"input": "", "output": ""}
     patch: dict[str, Any] = {}
 
+    def _origin(item: Any) -> str:
+        return str(item[2]) if len(item) > 2 else "req"
+
     ref_map: dict[str, list[str]] = {}
-    for fr, _ in fragments:
+    for item in fragments:
+        fr = item[0]
         for ref in fr.get("chapter_refs") or []:
             if isinstance(ref, dict) and ref.get("text") and ref.get("chapter_ids"):
                 ids = [str(x) for x in ref["chapter_ids"] if str(x).strip()]
                 if ids:
                     ref_map.setdefault(_norm_ws(ref["text"]), ids)
 
-    for fi, (fr, batch_ids) in enumerate(fragments):
+    for fi, item in enumerate(fragments):
+        fr, batch_ids = item[0], item[1]
+        origin = _origin(item)
         for key, bucket, seen in (
             ("acceptance_criteria", criteria, seen_c),
             ("edge_cases", edges, seen_e),
         ):
+            if origin == "ctx":
+                continue  # 契约上下文不允许贡献验收标准/边界场景
             for c in fr.get(key) or []:
                 text = str(c or "").strip()
                 if not text:
@@ -361,10 +375,7 @@ def merge_doc_fragments(
                     continue
                 seen.add(nk)
                 bucket.append(text)
-                if key == "acceptance_criteria":
-                    criterion_src.append((text, fi, "ac"))
-                else:
-                    criterion_src.append((text, fi, "ec"))
+                criterion_src.append((text, fi, "ac" if key == "acceptance_criteria" else "ec"))
         for m in fr.get("target_modules") or []:
             s = str(m or "").strip()
             if s and _norm_ws(s) not in seen_m:
@@ -374,12 +385,15 @@ def merge_doc_fragments(
         if ctx and ctx not in contexts:
             contexts.append(ctx)
         ioc = fr.get("io_constraints") or {}
+        target = io_ctx if origin in ("ctx", "mixed") else io_req
         for sub in ("input", "output"):
-            if not io[sub] and str(ioc.get(sub) or "").strip():
-                io[sub] = str(ioc[sub]).strip()
+            if not target[sub] and str(ioc.get(sub) or "").strip():
+                target[sub] = str(ioc[sub]).strip()
         for key in ("req_type", "project_root", "existing_code_accessible"):
             if patch.get(key) is None and fr.get(key) is not None:
                 patch[key] = fr[key]
+
+    io = {sub: io_ctx[sub] or io_req[sub] for sub in ("input", "output")}
 
     alignment: dict[str, dict[str, list[str]]] = {
         "acceptance_criteria": {}, "edge_cases": {},
@@ -443,18 +457,20 @@ async def _extract_from_doc_index_async(
     """
     from ..doc_index import (
         batch_chapters,
-        context_chapters,
         docs_doc_kind,
         requirement_chapters,
+        select_context_chapters,
         slice_text,
     )
 
     manifest = dict(state.get("doc_manifest") or {})
     chapters = requirement_chapters(manifest)
     # 接口/模型文档章节作为受限上下文：只帮模型填 io_constraints（入参/响应）与
-    # 理解模块，不进验收标准（提示词第 9 条）；现实文档常把「入参字段」写在接口
-    # 文档里，不喂上下文就会向用户追问文档里已有的输入约束
-    ctx_chapters = context_chapters(manifest)[: max(0, settings.DOC_EXTRACT_MAX_CTX_CHAPTERS)]
+    # 理解模块，不进验收标准（提示词第 9 条）；按需求内容关联度挑选——多文档、
+    # 接口章节多时，被需求提到的端点/模型才拿得到，而不是顺序截前 N 章
+    ctx_chapters = select_context_chapters(
+        manifest, max_chapters=max(0, settings.DOC_EXTRACT_MAX_CTX_CHAPTERS)
+    )
     ok_ret = {"last_error": None, "last_error_code": None, "last_error_retryable": None}
     extracted_flag = {"doc_index_extracted": True}
 
@@ -475,17 +491,34 @@ async def _extract_from_doc_index_async(
 
     _kind_tag = {"api": "（接口文档）", "model": "（模型文档）"}
 
-    def _tagged(ch: dict[str, Any]) -> dict[str, Any]:
+    def _tagged(ch: dict[str, Any], origin: str) -> dict[str, Any]:
         kind = docs_doc_kind(manifest, ch.get("doc_id"))
         if kind == "requirement":
             kind = str(ch.get("entry_kind") or "")
-        return {**ch, "_tag": _kind_tag.get(kind, "")}
+        return {**ch, "_tag": _kind_tag.get(kind, ""), "_origin": origin}
 
-    tagged = [_tagged(ch) for ch in chapters] + [_tagged(ch) for ch in ctx_chapters]
-    batches = batch_chapters(tagged, settings.DOC_EXTRACT_BATCH_CHARS)
+    tagged = (
+        [_tagged(ch, "req") for ch in chapters]
+        + [_tagged(ch, "ctx") for ch in ctx_chapters]
+    )
+    # 按出处分池分批：需求正文与接口/模型上下文永不混批——混批会让 ctx 内容
+    # 随批获得 criteria 资格（绕过「契约不进验收标准」的出处规则）
+    batches: list[tuple[str, list[dict[str, Any]]]] = [
+        ("req", b) for b in batch_chapters(
+            [ch for ch in tagged if ch.get("_origin") == "req"],
+            settings.DOC_EXTRACT_BATCH_CHARS,
+        )
+    ] + [
+        ("ctx", b) for b in batch_chapters(
+            [ch for ch in tagged if ch.get("_origin") == "ctx"],
+            settings.DOC_EXTRACT_BATCH_CHARS,
+        )
+    ]
     sem = asyncio.Semaphore(max(1, settings.DOC_EXTRACT_CONCURRENCY))
 
-    async def _one_batch(batch: list[dict[str, Any]]) -> tuple[dict[str, Any], list[str], bool]:
+    async def _one_batch(
+        origin: str, batch: list[dict[str, Any]]
+    ) -> tuple[dict[str, Any], list[str], str, bool]:
         async with sem:
             meta: dict[str, Any] = {}
             blocks = "\n\n".join(
@@ -508,10 +541,15 @@ async def _extract_from_doc_index_async(
                     validation_errors=[err["msg"] for err in ve.errors()],
                     extra={"raw_tail": str(raw)[:200]},
                 ) from ve
-            return dict(raw), [str(ch["chapter_id"]) for ch in batch], bool(meta.get("mock"))
+            return (
+                dict(raw),
+                [str(ch["chapter_id"]) for ch in batch],
+                origin,
+                bool(meta.get("mock")),
+            )
 
     try:
-        results = await asyncio.gather(*(_one_batch(b) for b in batches))
+        results = await asyncio.gather(*(_one_batch(o, b) for o, b in batches))
     except DevFlowError as e:
         retry = state.get("retry_count", {}) or {}
         retry["clarify_extract"] = retry.get("clarify_extract", 0) + 1
@@ -537,7 +575,9 @@ async def _extract_from_doc_index_async(
             **mode_update,
         }
 
-    fragments = [(raw, ids) for raw, ids, mock in results if not mock]
+    fragments = [
+        (raw, ids, origin) for raw, ids, origin, mock in results if not mock
+    ]
     used_mock_only = not fragments
     patch, alignment = merge_doc_fragments(fragments)
     merged = _merge_requirement(existing, patch)

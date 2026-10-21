@@ -543,3 +543,45 @@ class TestContextChapters:
         assert any("附录B" in t for t in ctx_titles)
         # 纯需求章不在上下文里
         assert all("文本审核" not in t for t in ctx_titles)
+
+
+class TestSelectContextChapters:
+    def _manifest_with_endpoints(self, tmp_path: Path) -> dict:
+        req = tmp_path / "req.md"
+        req.write_text(
+            "# 订单系统需求\n\n## 1. 下单\n下单走 /api/orders 接口，金额必须大于 0。\n",
+            encoding="utf-8")
+        api = tmp_path / "api.md"
+        api.write_text(
+            "# 接口文档\n\n## POST /api/login 登录\n请求体：账号密码\n\n"
+            "## POST /api/orders 创建订单\n请求体：amount, items\n\n"
+            "## GET /api/records 记录查询\n响应：记录列表\n",
+            encoding="utf-8")
+        m, _ = ingest_docs([str(req), str(api)], [], [], root=tmp_path / "idx_sel", threshold=1)
+        return m
+
+    def test_relevant_endpoint_ranked_first(self, tmp_path: Path):
+        from devflow.doc_index import select_context_chapters
+
+        m = self._manifest_with_endpoints(tmp_path)
+        picked = select_context_chapters(m, max_chapters=1)
+        assert len(picked) == 1
+        assert "orders" in picked[0]["title"]  # 需求正文提到 /api/orders → 优先
+
+    def test_no_probe_text_falls_back_to_doc_order(self, tmp_path: Path):
+        from devflow.doc_index import select_context_chapters
+
+        api = tmp_path / "api.md"
+        api.write_text(
+            "## POST /api/a 甲\n说明\n\n## POST /api/b 乙\n说明\n",
+            encoding="utf-8")
+        m, _ = ingest_docs([], [str(api)], [], root=tmp_path / "idx_sel2", threshold=1)
+        picked = select_context_chapters(m, max_chapters=2)
+        assert ["甲" in picked[0]["title"], "乙" in picked[1]["title"]] == [True, True]
+
+    def test_cap_respected(self, tmp_path: Path):
+        from devflow.doc_index import select_context_chapters
+
+        m = self._manifest_with_endpoints(tmp_path)
+        assert len(select_context_chapters(m, max_chapters=2)) == 2
+        assert select_context_chapters(m, max_chapters=0) == []
