@@ -1364,6 +1364,7 @@ def _maybe_ingest_doc_paths(tid: str, text: str) -> tuple[str | None, dict[str, 
         analyze_docs,
         catalog_from_agent,
         error_note,
+        exceeds_agent_budget,
         patch_from_agent,
         resolve_analyze_provider,
     )
@@ -1442,36 +1443,48 @@ def _maybe_ingest_doc_paths(tid: str, text: str) -> tuple[str | None, dict[str, 
     # agent 模式：opencode/pi 直接读取语料并梳理关键要素（服务端不自读原文）
     provider = resolve_analyze_provider()
     if provider != "local":
-        try:
-            payload = asyncio.run(analyze_docs(existing, provider=provider))
-        except Exception as e:  # noqa: BLE001 — agent 失败回退本地，不阻断流程
-            logger.warning("doc agent(%s) 分析失败，回退本地解析: %s", provider, e)
-            note = (note + "；" if note else "") + error_note(e)
+        over, est = exceeds_agent_budget(
+            existing, settings.DOC_ANALYZE_MAX_CORPUS_CHARS
+        )
+        if over:
+            # 超预算回落 local：agent 整语料读全部文档，小窗口模型可能内部静默截断
+            note = (note + "；" if note else "") + (
+                f"语料约 {est} 字符，超出 agent 分析预算"
+                f"（{settings.DOC_ANALYZE_MAX_CORPUS_CHARS}），已改用分章抽取"
+            )
         else:
-            patch = patch_from_agent(payload)
-            catalog = catalog_from_agent(payload, existing, provider)
-            merged = _merge_requirement(vals.get("requirement") or {}, patch)
-            sources = dict(vals.get("requirement_sources") or {})
-            for key, val in patch.items():
-                if key == "io_constraints":
-                    for sub in ("input", "output"):
-                        if str(val.get(sub) or "").strip():
-                            sources[f"io_constraints.{sub}"] = SOURCE_DOC
-                elif val:
-                    sources[key] = SOURCE_DOC
-            graph.update_state(_config(thread_id=tid), {
-                "requirement": merged,
-                "requirement_sources": sources,
-                "doc_manifest": catalog,
-                "doc_index_extracted": True,  # 无须再走分章抽取
-                "doc_source_paths": list(existing),
-                "requirement_confirmed": False,
-            })
-            logger.info("doc agent(%s) 分析完成：%d 份文档 / %d 接口 / %d 模型",
-                        provider, len(catalog["docs"]), len(catalog["apis"]),
-                        len(catalog["models"]))
-            final = residual or agent_feed_notice(catalog, provider)
-            return final, catalog, note
+            try:
+                payload = asyncio.run(analyze_docs(existing, provider=provider))
+            except Exception as e:  # noqa: BLE001 — agent 失败回退本地，不阻断流程
+                logger.warning("doc agent(%s) 分析失败，回退本地解析: %s", provider, e)
+                note = (note + "；" if note else "") + error_note(e)
+            else:
+                patch = patch_from_agent(payload)
+                catalog = catalog_from_agent(payload, existing, provider)
+                merged = _merge_requirement(vals.get("requirement") or {}, patch)
+                sources = dict(vals.get("requirement_sources") or {})
+                for key, val in patch.items():
+                    if key == "io_constraints":
+                        for sub in ("input", "output"):
+                            if str(val.get(sub) or "").strip():
+                                sources[f"io_constraints.{sub}"] = SOURCE_DOC
+                    elif val:
+                        sources[key] = SOURCE_DOC
+                graph.update_state(_config(thread_id=tid), {
+                    "requirement": merged,
+                    "requirement_sources": sources,
+                    "doc_manifest": catalog,
+                    "doc_index_extracted": True,  # 无须再走分章抽取
+                    "doc_source_paths": list(existing),
+                    "requirement_confirmed": False,
+                })
+                logger.info("doc agent(%s) 分析完成：%d 份文档 / %d 接口 / %d 模型，语料约 %d 字符",
+                            provider, len(catalog["docs"]), len(catalog["apis"]),
+                            len(catalog["models"]), est)
+                final = residual or agent_feed_notice(
+                    catalog, provider, corpus_chars=est
+                )
+                return final, catalog, note
 
     # local 回退/默认：确定性摄入 + 分章抽取
     try:

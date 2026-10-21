@@ -249,11 +249,45 @@ def catalog_from_agent(
     }
 
 
-def agent_feed_notice(catalog: dict[str, Any], provider: str) -> str:
+def estimate_corpus_chars(paths: list[str]) -> int:
+    """估算语料字符数（体积预检用，便宜且不读大二进制）。
+
+    文本类（.md/.txt/.json）按实际字符数；docx 等二进制按字节数/3 粗略折算；
+    目录与不存在的路径不在此处展开/计入（调用方先 expand_doc_inputs）。
+    """
+    total = 0
+    for p in paths:
+        path = Path(p)
+        if not path.is_file():
+            continue
+        try:
+            if path.suffix.lower() in (".md", ".markdown", ".txt", ".json"):
+                total += len(path.read_text(encoding="utf-8", errors="ignore"))
+            else:
+                total += max(1, path.stat().st_size // 3)
+        except OSError:
+            continue
+    return total
+
+
+def exceeds_agent_budget(paths: list[str], limit_chars: int) -> tuple[bool, int]:
+    """语料是否超出 agent 整语料分析预算。返回 (超限?, 估算字符数)。
+
+    超限时调用方应回落 local 分章抽取并注明——agent 整语料模式读的是全部文档，
+    小窗口模型可能内部静默截断（静默丢信息比明确降级糟糕）。
+    """
+    est = estimate_corpus_chars(paths)
+    return (est > max(1, limit_chars), est)
+
+
+def agent_feed_notice(
+    catalog: dict[str, Any], provider: str, corpus_chars: int | None = None
+) -> str:
     """agent 模式的首条消息回执（短文案，正文不进对话）。"""
     n_files = len(catalog.get("docs") or [])
+    size = f"语料约 {corpus_chars} 字符 / " if corpus_chars else ""
     return (
-        f"（已由 {provider} 读取并分析文档集：{n_files} 份文档 / "
+        f"（已由 {provider} 读取并分析文档集：{size}{n_files} 份文档 / "
         f"{len(catalog.get('apis') or [])} 个接口 / "
         f"{len(catalog.get('models') or [])} 个模型，需求要素已写入清单。"
         "全部文档正文不进对话上下文。）"

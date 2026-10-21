@@ -149,6 +149,34 @@ SiliconFlow 等 OpenAI 兼容服务的 Key（不配置则 Mock 演示模式）�
   也可直接访问 `/library` 独立文档页，展示库全树（只读），支持切换 `project_root` / 库根、
   关键词检索与 P0–P2 筛选。
 
+## 上下文窗口与语料预算（调参）
+
+两条文档处理链的上下文归属不同，按模型窗口选：
+
+| 链路 | 上下文由谁控制 | 适合 |
+| --- | --- | --- |
+| `DOC_ANALYZE_PROVIDER=local`（默认回退） | devflow：切章 → 按批并发子任务 → 确定性合并 | 任意模型，尤其小窗口本地模型——上下文重排 + 多子任务 |
+| `DOC_ANALYZE_PROVIDER=opencode/pi` | agent CLI 的模型：一个任务读完整个语料 | 大窗口模型（128k+）；小窗口会静默截断，勿用 |
+
+**provider 显式声明窗口**（未知/自定义模型按此值生效，小模型可低于 128k 下限）：
+
+```json
+LLM_PROVIDERS_JSON='[
+  {"name":"local-32k","base_url":"http://127.0.0.1:8000/v1","model":"my-32k","context_window":32768},
+  {"name":"ds","base_url":"https://api.deepseek.com/v1","api_key":"…","model":"deepseek-flash","context_window":158000}
+]'
+```
+
+**local 分章抽取的参数预设**（按模型窗口二选一）：
+
+- 大窗口（128k+）：`DOC_EXTRACT_BATCH_CHARS=100000`、`DOC_EXTRACT_MAX_CHAPTER_CHARS=20000`
+  （默认 12k/6k 太保守，长章节尾部会被截断）
+- 小窗口（16k~32k）：保持默认 `12k/6k`，`DOC_EXTRACT_CONCURRENCY=2~3`
+
+**agent 整语料模式的预算保护**：`DOC_ANALYZE_MAX_CORPUS_CHARS`（默认 120000，按估算字符数）
+——超出自动回落 local 分章抽取并在回执注明，避免小窗口模型在 agent 内部静默截断；
+32k 本地模型经 agent 分析时建议调到 `20000~30000`。
+
 ## 架构一览
 
 ```

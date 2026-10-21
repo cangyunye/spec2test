@@ -349,6 +349,7 @@ def cmd_new(
             analyze_docs,
             catalog_from_agent,
             error_note,
+            exceeds_agent_budget,
             patch_from_agent,
             resolve_analyze_provider,
         )
@@ -363,33 +364,46 @@ def cmd_new(
         )
         provider = resolve_analyze_provider()
         if provider != "local":
-            try:
-                payload = _asyncio.run(analyze_docs(corpus_paths, provider=provider))
-            except Exception as e:  # noqa: BLE001 — agent 失败回退本地
-                console.print(f"[yellow]![/] {error_note(e)}")
-            else:
-                patch = patch_from_agent(payload)
-                catalog = catalog_from_agent(payload, corpus_paths, provider)
-                merged = _merge_requirement(state["requirement"], patch)
-                sources = dict(state.get("requirement_sources") or {})
-                for key, val in patch.items():
-                    if key == "io_constraints":
-                        for sub in ("input", "output"):
-                            if str(val.get(sub) or "").strip():
-                                sources[f"io_constraints.{sub}"] = SOURCE_DOC
-                    elif val:
-                        sources[key] = SOURCE_DOC
-                state["requirement"] = merged
-                state["requirement_sources"] = sources
-                state["doc_manifest"] = catalog
-                state["doc_index_extracted"] = True
-                state["doc_source_paths"] = corpus_paths
-                feed_text = agent_feed_notice(catalog, provider)
+            est_files, _exp, _skip = expand_doc_inputs(
+                corpus_paths, max_files=max(1, settings.DOC_DIR_MAX_FILES)
+            )
+            over, est = exceeds_agent_budget(
+                est_files, settings.DOC_ANALYZE_MAX_CORPUS_CHARS
+            )
+            if over:
                 console.print(
-                    f"[green]✓[/] 已由 [bold]{provider}[/] 读取并分析文档集: "
-                    f"{len(catalog['docs'])} 份文档 / {len(catalog['apis'])} 接口 / "
-                    f"{len(catalog['models'])} 模型（正文不进上下文）"
+                    f"[yellow]![/] 语料约 {est} 字符，超出 agent 分析预算"
+                    f"（{settings.DOC_ANALYZE_MAX_CORPUS_CHARS}），改用分章抽取"
                 )
+            else:
+                try:
+                    payload = _asyncio.run(analyze_docs(corpus_paths, provider=provider))
+                except Exception as e:  # noqa: BLE001 — agent 失败回退本地
+                    console.print(f"[yellow]![/] {error_note(e)}")
+                else:
+                    patch = patch_from_agent(payload)
+                    catalog = catalog_from_agent(payload, corpus_paths, provider)
+                    merged = _merge_requirement(state["requirement"], patch)
+                    sources = dict(state.get("requirement_sources") or {})
+                    for key, val in patch.items():
+                        if key == "io_constraints":
+                            for sub in ("input", "output"):
+                                if str(val.get(sub) or "").strip():
+                                    sources[f"io_constraints.{sub}"] = SOURCE_DOC
+                        elif val:
+                            sources[key] = SOURCE_DOC
+                    state["requirement"] = merged
+                    state["requirement_sources"] = sources
+                    state["doc_manifest"] = catalog
+                    state["doc_index_extracted"] = True
+                    state["doc_source_paths"] = corpus_paths
+                    feed_text = agent_feed_notice(catalog, provider, corpus_chars=est)
+                    console.print(
+                        f"[green]✓[/] 已由 [bold]{provider}[/] 读取并分析文档集: "
+                        f"语料约 {est} 字符 / {len(catalog['docs'])} 份文档 / "
+                        f"{len(catalog['apis'])} 接口 / {len(catalog['models'])} 模型"
+                        "（正文不进上下文）"
+                    )
         if feed_text is None:
             # 本地解析：目录一层展开后走 ingest_docs（单文档小需求仍可原文直喂）
             try:

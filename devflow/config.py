@@ -309,6 +309,12 @@ class Settings:
         self.DOC_ANALYZE_PROVIDER: str = os.getenv("DOC_ANALYZE_PROVIDER", "auto").strip().lower()
         # agent 读取分析语料的单次超时（大文档集读取+归纳，给足）
         self.DOC_ANALYZE_TIMEOUT_SEC: int = int(os.getenv("DOC_ANALYZE_TIMEOUT_SEC", "600"))
+        # agent 整语料分析的体积预算（估算字符数）：超出自动回落 local 分章抽取，
+        # 避免小窗口模型在 agent 内部静默截断。大窗口模型（128k+）可上调到 ~120k；
+        # 32k 本地模型经 agent 分析时建议 20k~30k
+        self.DOC_ANALYZE_MAX_CORPUS_CHARS: int = int(
+            os.getenv("DOC_ANALYZE_MAX_CORPUS_CHARS", "120000")
+        )
         # handoff 切片：单条上限 / 每功能点切片数上限
         self.DOC_SLICE_MAX_CHARS: int = int(os.getenv("DOC_SLICE_MAX_CHARS", "2400"))
         self.DOC_SLICE_MAX_COUNT: int = int(os.getenv("DOC_SLICE_MAX_COUNT", "8"))

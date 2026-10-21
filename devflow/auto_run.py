@@ -404,6 +404,7 @@ def run_spec(
         analyze_docs,
         catalog_from_agent,
         error_note,
+        exceeds_agent_budget,
         patch_from_agent,
         resolve_analyze_provider,
     )
@@ -419,20 +420,34 @@ def run_spec(
     manifest: dict[str, Any] | None = None
     provider = resolve_analyze_provider()
     if provider != "local":
-        try:
-            payload = asyncio.run(analyze_docs(corpus_paths, provider=provider))
-        except Exception as e:  # noqa: BLE001 — agent 失败回退本地
-            _say(console, f"[yellow]![/] {error_note(e)}")
+        est_files, _exp, _skip = expand_doc_inputs(
+            corpus_paths, max_files=max(1, settings.DOC_DIR_MAX_FILES)
+        )
+        over, est = exceeds_agent_budget(
+            est_files, settings.DOC_ANALYZE_MAX_CORPUS_CHARS
+        )
+        if over:
+            _say(console, f"[yellow]![/] 语料约 {est} 字符，超出 agent 分析预算"
+                          f"（{settings.DOC_ANALYZE_MAX_CORPUS_CHARS}），改用分章抽取")
         else:
-            agent_patch = patch_from_agent(payload)
-            manifest = catalog_from_agent(payload, corpus_paths, provider)
-            doc_text = json.dumps(agent_patch, ensure_ascii=False)
-            feed_text = agent_feed_notice(manifest, provider)
-            _say(console, f"[green]✓[/] 已由 [bold]{provider}[/] 读取并分析文档集: "
-                          f"{len(manifest['docs'])} 份文档 / {len(manifest['apis'])} 接口 / "
-                          f"{len(manifest['models'])} 模型（正文不进上下文）")
-            journal.record("doc_agent", provider=provider, files=len(manifest["docs"]),
-                           apis=len(manifest["apis"]), models=len(manifest["models"]))
+            try:
+                payload = asyncio.run(analyze_docs(corpus_paths, provider=provider))
+            except Exception as e:  # noqa: BLE001 — agent 失败回退本地
+                _say(console, f"[yellow]![/] {error_note(e)}")
+            else:
+                agent_patch = patch_from_agent(payload)
+                manifest = catalog_from_agent(payload, corpus_paths, provider)
+                doc_text = json.dumps(agent_patch, ensure_ascii=False)
+                feed_text = agent_feed_notice(
+                    manifest, provider, corpus_chars=est
+                )
+                _say(console, f"[green]✓[/] 已由 [bold]{provider}[/] 读取并分析文档集: "
+                              f"语料约 {est} 字符 / {len(manifest['docs'])} 份文档 / "
+                              f"{len(manifest['apis'])} 接口 / {len(manifest['models'])} 模型"
+                              "（正文不进上下文）")
+                journal.record("doc_agent", provider=provider, files=len(manifest["docs"]),
+                               apis=len(manifest["apis"]), models=len(manifest["models"]),
+                               corpus_chars=est)
     if manifest is None:
         files, expanded, _skipped = expand_doc_inputs(
             corpus_paths, max_files=max(1, settings.DOC_DIR_MAX_FILES)

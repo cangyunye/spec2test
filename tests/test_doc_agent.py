@@ -155,3 +155,29 @@ class TestAnalyzeDispatch:
     async def test_local_mode_rejected(self):
         with pytest.raises(ValueError):
             await analyze_docs(["/docs/api.md"], provider="local")
+
+
+class TestCorpusBudget:
+    def test_estimate_text_and_binary(self, tmp_path):
+        from devflow.doc_agent import estimate_corpus_chars
+
+        a = tmp_path / "a.md"
+        a.write_text("字" * 1000, encoding="utf-8")
+        b = tmp_path / "b.docx"
+        b.write_bytes(b"x" * 3000)  # 二进制按字节/3 折算 ≈ 1000
+        assert estimate_corpus_chars([str(a), str(b), str(tmp_path / "missing.md")]) == 2000
+
+    def test_exceeds_budget(self, tmp_path):
+        from devflow.doc_agent import exceeds_agent_budget
+
+        a = tmp_path / "a.md"
+        a.write_text("x" * 500, encoding="utf-8")
+        over, est = exceeds_agent_budget([str(a)], 100)
+        assert over is True and est == 500
+        over, est = exceeds_agent_budget([str(a)], 1000)
+        assert over is False and est == 500
+
+    def test_feed_notice_includes_corpus_size(self):
+        cat = catalog_from_agent(PAYLOAD, ["/docs/api.md"], "opencode")
+        assert "语料约 12345 字符" in agent_feed_notice(cat, "opencode", corpus_chars=12345)
+        assert "语料约" not in agent_feed_notice(cat, "opencode")

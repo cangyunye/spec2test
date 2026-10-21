@@ -1118,3 +1118,77 @@ class TestFeedNoticeGuard:
         out = await clarify_extract_async(st)  # type: ignore[arg-type]
         assert calls == []
         assert out["requirement"] == empty_requirement()
+
+
+class TestAgentCorpusBudget:
+    """agent 整语料模式的体积预算：超限回落 local 并注明。"""
+
+    def _wait_idle(self, client, tid: str, timeout: float = 30.0) -> None:
+        import time
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if not client.get(f"/api/sessions/{tid}").json()["running"]:
+                return
+            time.sleep(0.05)
+        raise AssertionError("会话运行超过 30s 仍未空闲")
+
+    def test_over_budget_falls_back_to_local_with_note(self, client, tmp_path, monkeypatch):
+        import web.server as ws
+        from devflow.config import settings as _s
+
+        d = tmp_path / "bigdocs"
+        d.mkdir()
+        big = d / "需求.md"
+        big.write_text("# 需求\n\n## 登录\n" + "验收标准。" * 200, encoding="utf-8")
+        monkeypatch.setattr(_s, "DOC_ANALYZE_PROVIDER", "opencode")
+        monkeypatch.setattr(_s, "DOC_ANALYZE_MAX_CORPUS_CHARS", 500)
+        called = {}
+
+        async def fake_analyze(paths, provider=None):
+            called["ran"] = True
+            return {"files": []}
+
+        monkeypatch.setattr("devflow.doc_agent.analyze_docs", fake_analyze)
+
+        tid = f"w-{uuid.uuid4().hex[:8]}"
+        assert client.post("/api/sessions", json={"thread_id": tid}).status_code == 200
+        client.post(f"/api/sessions/{tid}/messages", json={"text": str(big)})
+        self._wait_idle(client, tid)
+
+        vals = client.get(f"/api/sessions/{tid}").json()["values"]
+        cat = vals.get("doc_manifest")
+        assert cat and cat.get("mode") != "agent"  # 回落本地 manifest
+        assert cat.get("chapters")
+        assert called == {}  # agent 未被调用
+        texts = [
+            str(m.get("content") if isinstance(m, dict) else getattr(m, "content", m))
+            for m in vals.get("messages") or []
+        ]
+        assert any("超出 agent 分析预算" in t and "分章抽取" in t for t in texts)
+
+    def test_within_budget_notice_shows_corpus_size(self, client, tmp_path, monkeypatch):
+        from devflow.config import settings as _s
+
+        d = tmp_path / "smalldocs"
+        d.mkdir()
+        f = d / "需求.md"
+        f.write_text("# 需求\n\n## 登录\n密码 8~20 位。\n", encoding="utf-8")
+        monkeypatch.setattr(_s, "DOC_ANALYZE_PROVIDER", "opencode")
+
+        async def fake_analyze(paths, provider=None):
+            return {"files": [{"path": str(f), "summary": "s"}], "apis": [], "models": []}
+
+        monkeypatch.setattr("devflow.doc_agent.analyze_docs", fake_analyze)
+
+        tid = f"w-{uuid.uuid4().hex[:8]}"
+        assert client.post("/api/sessions", json={"thread_id": tid}).status_code == 200
+        client.post(f"/api/sessions/{tid}/messages", json={"text": str(f)})
+        self._wait_idle(client, tid)
+
+        vals = client.get(f"/api/sessions/{tid}").json()["values"]
+        assert (vals.get("doc_manifest") or {}).get("mode") == "agent"
+        texts = [
+            str(m.get("content") if isinstance(m, dict) else getattr(m, "content", m))
+            for m in vals.get("messages") or []
+        ]
+        assert any("语料约" in t and "opencode" in t for t in texts)
